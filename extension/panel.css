@@ -1,0 +1,367 @@
+/* Browy DevTools panel — styled to match the Chrome/Edge DevTools Console.
+ * Honours the user's DevTools theme (light / dark) via prefers-color-scheme. */
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100vh;
+  width: 100vw;
+  font-family: Menlo, Monaco, "DejaVu Sans Mono", "Lucida Console", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  -webkit-font-smoothing: subpixel-antialiased;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+
+/* ── Theme tokens (DevTools Console palette) ─────────────────────────────── */
+
+:root {
+  /* Light (DevTools default light) */
+  --bg:        #ffffff;
+  --bg-alt:    #f3f3f3;
+  --bg-row-hover: rgba(0,0,0,0.05);
+  --fg:        #202124;
+  --fg-dim:    #5f6368;
+  --fg-faint:  #9aa0a6;
+  --border:    #d0d0d0;
+  --border-strong: #b8b8b8;
+
+  --prompt:    #1a73e8;
+  --user:      #202124;
+  --assistant: #202124;
+  --tool:      #8430ce;
+  --info:      #0b57d0;
+  --ok:        #1e7e34;
+  --warn:      #b06000;
+  --err:       #c5221f;
+  --err-bg:    #fce8e6;
+  --warn-bg:   #fff8c5;
+  --link:      #1a73e8;
+  --selection: #b3d4fc;
+  --kbd-bg:    #f5f5f5;
+  --kbd-border:#dadce0;
+  --tool-card-bg: #f7f7f9;
+  --tool-card-border: #e0e0e0;
+  --reasoning: #5f6368;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:        #1e1e1e;
+    --bg-alt:    #2a2a2a;
+    --bg-row-hover: rgba(255,255,255,0.06);
+    --fg:        #e8eaed;
+    --fg-dim:    #9aa0a6;
+    --fg-faint:  #6e7177;
+    --border:    #3c4043;
+    --border-strong: #5f6368;
+
+    --prompt:    #8ab4f8;
+    --user:      #e8eaed;
+    --assistant: #e8eaed;
+    --tool:      #c58af9;
+    --info:      #8ab4f8;
+    --ok:        #81c995;
+    --warn:      #fdd663;
+    --err:       #f28b82;
+    --err-bg:    rgba(242, 139, 130, 0.15);
+    --warn-bg:   rgba(253, 214, 99, 0.12);
+    --link:      #8ab4f8;
+    --selection: rgba(138, 180, 248, 0.35);
+    --kbd-bg:    #2d2e30;
+    --kbd-border:#5f6368;
+    --tool-card-bg: rgba(255,255,255,0.04);
+    --tool-card-border: #3c4043;
+    --reasoning: #9aa0a6;
+  }
+}
+
+html, body { background: var(--bg); color: var(--fg); }
+
+::selection { background: var(--selection); color: var(--fg); }
+
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 6px; border: 3px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
+
+/* ── Toolbar (mimics DevTools chrome) ───────────────────────────────────── */
+
+#toolbar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  height: 26px;
+  background: var(--bg-alt);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--fg-dim);
+  user-select: none;
+  white-space: nowrap;
+  overflow: hidden;
+}
+#toolbar .grow { flex: 1; }
+#toolbar .sep  { color: var(--fg-faint); }
+#brand { color: var(--info); font-weight: 600; }
+#model, #page {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 30vw;
+}
+#page { color: var(--fg-faint); }
+
+.btn {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--fg-dim);
+  padding: 2px 8px;
+  border-radius: 3px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+  height: 20px;
+}
+.btn:hover { background: var(--bg-row-hover); color: var(--fg); border-color: var(--border); }
+.btn:active { background: var(--border); }
+
+/* ── Log area ───────────────────────────────────────────────────────────── */
+
+#log {
+  flex: 1;
+  overflow-y: scroll;
+  overflow-x: hidden;
+  padding: 2px 0 6px;
+  outline: none;
+  scroll-behavior: auto;
+}
+
+/* Each row mimics DevTools console row layout: gutter (16px) + body */
+.row {
+  display: flex;
+  align-items: flex-start;
+  padding: 1px 8px 1px 0;
+  min-height: 18px;
+  border-left: 2px solid transparent;
+}
+.row:hover { background: var(--bg-row-hover); }
+
+.row .glyph {
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  color: var(--fg-faint);
+  user-select: none;
+  font-size: 11px;
+  line-height: 18px;
+  margin-left: 2px;
+}
+.row .body {
+  flex: 1;
+  min-width: 0;
+  padding-left: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg);
+}
+
+/* Role variants */
+.row.user .glyph    { color: var(--prompt); font-weight: 600; }
+.row.user .body     { color: var(--user); }
+.row.assistant .glyph { color: var(--info); }
+.row.assistant .body  { color: var(--assistant); }
+.row.tool .glyph    { color: var(--tool); }
+.row.tool .body     { color: var(--tool); }
+.row.info .body, .row.info .glyph { color: var(--fg-dim); }
+.row.ok   .body, .row.ok   .glyph { color: var(--ok); }
+.row.warn .body, .row.warn .glyph { color: var(--warn); }
+.row.warn { background: var(--warn-bg); border-left-color: var(--warn); }
+.row.err  .body, .row.err  .glyph { color: var(--err); }
+.row.err  { background: var(--err-bg); border-left-color: var(--err); }
+.row.dim  .body, .row.dim  .glyph { color: var(--fg-faint); }
+.row.banner .body { color: var(--info); }
+
+/* Streaming caret on the live assistant row */
+.row.assistant.streaming .body::after {
+  content: '▍';
+  color: var(--info);
+  animation: blink 1s step-end infinite;
+  margin-left: 1px;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+/* Tool-call card (collapsed/expanded like DevTools group) */
+.tool-card {
+  display: inline-block;
+  margin: 1px 0;
+  padding: 1px 6px;
+  border: 1px solid var(--tool-card-border);
+  background: var(--tool-card-bg);
+  border-radius: 3px;
+  font-size: 11px;
+  color: var(--tool);
+}
+.tool-card.ok    { border-left: 2px solid var(--ok); }
+.tool-card.bad   { border-left: 2px solid var(--err); }
+.tool-card .name { font-weight: 600; }
+.tool-card .meta { color: var(--fg-faint); margin-left: 6px; }
+
+/* Reasoning (italic gray, like DevTools secondary) */
+.row.reasoning .body { color: var(--reasoning); font-style: italic; }
+
+/* Code / inline keys */
+kbd {
+  font-family: inherit;
+  font-size: 10px;
+  padding: 1px 4px;
+  background: var(--kbd-bg);
+  border: 1px solid var(--kbd-border);
+  border-radius: 3px;
+  color: var(--fg-dim);
+}
+
+/* ── Prompt row (the active "›" line at the bottom) ─────────────────────── */
+
+#prompt-row {
+  flex-shrink: 0;
+  display: flex;
+  align-items: flex-start;
+  padding: 4px 8px 6px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+#prompt-glyph {
+  color: var(--prompt);
+  font-weight: 600;
+  font-size: 14px;
+  line-height: 18px;
+  flex-shrink: 0;
+  width: 14px;
+  text-align: center;
+  margin-top: -1px;
+  user-select: none;
+}
+#cmd {
+  flex: 1;
+  background: transparent;
+  border: 0;
+  outline: 0;
+  resize: none;
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 11px;
+  line-height: 1.45;
+  padding: 1px 0 1px 4px;
+  margin: 0;
+  max-height: 120px;
+  overflow-y: auto;
+  caret-color: var(--prompt);
+}
+#cmd::placeholder { color: var(--fg-faint); }
+#cmd:disabled { opacity: 0.5; }
+
+/* ── Theme override (via /theme) ────────────────────────────────────────── */
+
+html[data-theme="dark"] {
+  --bg:        #1e1e1e;
+  --bg-alt:    #2a2a2a;
+  --bg-row-hover: rgba(255,255,255,0.06);
+  --fg:        #e8eaed;
+  --fg-dim:    #9aa0a6;
+  --fg-faint:  #6e7177;
+  --border:    #3c4043;
+  --border-strong: #5f6368;
+  --prompt:    #8ab4f8;
+  --user:      #e8eaed;
+  --assistant: #e8eaed;
+  --tool:      #c58af9;
+  --info:      #8ab4f8;
+  --ok:        #81c995;
+  --warn:      #fdd663;
+  --err:       #f28b82;
+  --err-bg:    rgba(242, 139, 130, 0.15);
+  --warn-bg:   rgba(253, 214, 99, 0.12);
+  --link:      #8ab4f8;
+  --selection: rgba(138, 180, 248, 0.35);
+  --kbd-bg:    #2d2e30;
+  --kbd-border:#5f6368;
+  --tool-card-bg: rgba(255,255,255,0.04);
+  --tool-card-border: #3c4043;
+  --reasoning: #9aa0a6;
+}
+html[data-theme="light"] {
+  --bg:        #ffffff;
+  --bg-alt:    #f3f3f3;
+  --bg-row-hover: rgba(0,0,0,0.05);
+  --fg:        #202124;
+  --fg-dim:    #5f6368;
+  --fg-faint:  #9aa0a6;
+  --border:    #d0d0d0;
+  --border-strong: #b8b8b8;
+  --prompt:    #1a73e8;
+  --user:      #202124;
+  --assistant: #202124;
+  --tool:      #8430ce;
+  --info:      #0b57d0;
+  --ok:        #1e7e34;
+  --warn:      #b06000;
+  --err:       #c5221f;
+  --err-bg:    #fce8e6;
+  --warn-bg:   #fff8c5;
+  --link:      #1a73e8;
+  --selection: #b3d4fc;
+  --kbd-bg:    #f5f5f5;
+  --kbd-border:#dadce0;
+  --tool-card-bg: #f7f7f9;
+  --tool-card-border: #e0e0e0;
+  --reasoning: #5f6368;
+}
+
+/* ── Autocomplete dropdown ──────────────────────────────────────────────── */
+
+#ac {
+  position: absolute;
+  bottom: 32px; /* sits just above the prompt row */
+  left: 16px;
+  min-width: 320px;
+  max-width: 60%;
+  max-height: 200px;
+  overflow-y: auto;
+  background: var(--bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.25);
+  z-index: 10;
+  font-size: 11px;
+}
+#ac.hidden { display: none; }
+.ac-item {
+  display: flex;
+  padding: 3px 8px;
+  cursor: pointer;
+  color: var(--fg);
+  white-space: nowrap;
+  align-items: baseline;
+}
+.ac-item .name { color: var(--prompt); width: 110px; flex-shrink: 0; }
+.ac-item .desc { color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; }
+.ac-item.sel  { background: var(--bg-row-hover); }
+
+/* Clickable rows (model picker, tabs list, sessions list) */
+.row.clickable { cursor: pointer; }
+.row.clickable:hover { background: var(--bg-row-hover); }
+.row.clickable:hover .body { color: var(--fg); }
+
+/* When busy, dim the glyph */
+#prompt-row.busy #prompt-glyph {
+  color: var(--warn);
+  animation: blink 1s step-end infinite;
+}
+

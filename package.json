@@ -1,0 +1,69 @@
+{
+  "name": "browy",
+  "version": "0.1.0",
+  "description": "Copilot-powered AI agent that lives in your browser",
+  "type": "module",
+  "bin": {
+    "browy": "./dist/cli-bin.js"
+  },
+  "files": [
+    "dist/**/*",
+    "!dist/**/*.map",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "build:prod": "cross-env BA_PROD=1 node build.mjs",
+    "start": "node dist/cli-bin.js",
+    "test": "node tests/run.mjs",
+    "repl": "node tests/repl.mjs",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build:prod",
+    "stage:win":     "npm run build:prod && node scripts/fetch-node.mjs --target=win-x64 && node scripts/stage.mjs --target=win-x64",
+    "stage:mac-x64": "npm run build:prod && node scripts/fetch-node.mjs --target=darwin-x64 && node scripts/stage.mjs --target=darwin-x64",
+    "stage:mac-arm": "npm run build:prod && node scripts/fetch-node.mjs --target=darwin-arm64 && node scripts/stage.mjs --target=darwin-arm64",
+    "stage:linux":     "npm run build:prod && node scripts/fetch-node.mjs --target=linux-x64 && node scripts/stage.mjs --target=linux-x64",
+    "stage:linux-arm": "npm run build:prod && node scripts/fetch-node.mjs --target=linux-arm64 && node scripts/stage.mjs --target=linux-arm64",
+    "pack:win":     "node scripts/pack.mjs --target=win-x64",
+    "pack:mac-x64": "node scripts/pack.mjs --target=darwin-x64",
+    "pack:mac-arm": "node scripts/pack.mjs --target=darwin-arm64",
+    "pack:linux":     "node scripts/pack.mjs --target=linux-x64",
+    "pack:linux-arm": "node scripts/pack.mjs --target=linux-arm64",
+    "pack:extension": "node scripts/pack-extension.mjs",
+    "dist:win":     "npm run stage:win     && npm run pack:win",
+    "dist:win-nsis": "npm run stage:win     && makensis installer/browy.nsi",
+    "dist:mac-x64": "npm run stage:mac-x64 && npm run pack:mac-x64",
+    "dist:mac-arm": "npm run stage:mac-arm && npm run pack:mac-arm",
+    "dist:linux":     "npm run stage:linux     && npm run pack:linux",
+    "dist:linux-arm": "npm run stage:linux-arm && npm run pack:linux-arm",
+    "dist:all": "npm run dist:win && npm run dist:mac-x64 && npm run dist:mac-arm && npm run dist:linux && npm run dist:linux-arm && npm run pack:extension"
+  },
+  "keywords": [
+    "browser",
+    "agent",
+    "ai",
+    "cdp",
+    "automation",
+    "copilot"
+  ],
+  "author": "ritabratamaiti",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@types/ws": "^8.18.1",
+    "cross-env": "^7.0.3",
+    "esbuild": "^0.28.0",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "@azure/identity": "^4.13.1",
+    "@github/copilot-sdk": "^0.3.0",
+    "chalk": "^5.6.2",
+    "playwright-core": "^1.59.1",
+    "ws": "^8.20.0"
+  }
+}

@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Browy — Settings</title>
+  <style>
+    :root {
+      --bg:        #0d1310;
+      --bg-2:      #0f1815;
+      --line:      #1d2a23;
+      --line-2:    #243228;
+      --ink:       #d8e3d8;
+      --ink-dim:   #6e8276;
+      --ink-mute:  #4f6157;
+      --green:     #4ade80;
+      --lime:      #c5f04b;
+      --amber:     #ffcc55;
+      --err:       #f87171;
+      --mono:      'JetBrains Mono', ui-monospace, 'Cascadia Mono', Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    body {
+      display: flex; justify-content: center;
+      padding: 36px 24px 80px;
+      min-height: 100vh;
+    }
+    main { width: 100%; max-width: 720px; }
+
+    /* ── Header ────────────────────────────────────────────────────── */
+    .hdr { display: flex; align-items: baseline; gap: 12px; margin-bottom: 28px; }
+    .hdr .brand { font-size: 16px; color: var(--lime); letter-spacing: 0.06em; font-weight: 600; }
+    .hdr .crumb { color: var(--ink-mute); font-size: 11px; letter-spacing: 0.08em; }
+    .hdr .ver   { margin-left: auto; color: var(--ink-mute); font-size: 10px; letter-spacing: 0.08em; }
+
+    /* ── Status strip ──────────────────────────────────────────────── */
+    .status {
+      display: flex; gap: 18px; flex-wrap: wrap;
+      padding: 10px 14px;
+      background: var(--bg-2);
+      border: 1px solid var(--line);
+      margin-bottom: 22px;
+    }
+    .status .item { display: flex; align-items: center; gap: 8px; }
+    .status .label { color: var(--ink-mute); font-size: 10px; letter-spacing: 0.10em; text-transform: uppercase; }
+    .status .val { color: var(--ink); font-size: 11px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-mute); display: inline-block; }
+    .dot.live { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    .dot.err  { background: var(--err);   box-shadow: 0 0 6px var(--err); }
+    .dot.warn { background: var(--amber); box-shadow: 0 0 6px var(--amber); }
+
+    /* ── Sections ──────────────────────────────────────────────────── */
+    section {
+      margin-bottom: 28px;
+      border: 1px solid var(--line);
+      background: var(--bg-2);
+    }
+    section .sec-hdr {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+      display: flex; align-items: center; gap: 10px;
+    }
+    section .sec-hdr h2 {
+      margin: 0; font-size: 11px;
+      color: var(--lime);
+      letter-spacing: 0.10em; text-transform: uppercase; font-weight: 600;
+    }
+    section .sec-hdr .sec-hint { color: var(--ink-mute); font-size: 10px; }
+    section .sec-body { padding: 12px 14px; }
+
+    /* ── Model list ────────────────────────────────────────────────── */
+    .toolbar { display: flex; gap: 8px; margin-bottom: 10px; align-items: center; }
+    .search {
+      flex: 1; min-width: 0;
+      background: #0a110e; border: 1px solid var(--line-2);
+      color: var(--ink); padding: 6px 10px;
+      font-family: var(--mono); font-size: 11px;
+      outline: none;
+    }
+    .search:focus { border-color: var(--green); }
+    .toolbar .count { color: var(--ink-mute); font-size: 10px; letter-spacing: 0.05em; }
+
+    .models {
+      display: flex; flex-direction: column;
+      max-height: 50vh; overflow-y: auto;
+      border: 1px solid var(--line-2);
+    }
+    .model {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line-2);
+      cursor: pointer;
+      transition: background 0.08s ease;
+    }
+    .model:last-child { border-bottom: none; }
+    .model:hover { background: rgba(74, 222, 128, 0.04); }
+    .model.selected { background: rgba(74, 222, 128, 0.10); }
+    .model .radio {
+      width: 12px; height: 12px; border-radius: 50%;
+      border: 1px solid var(--ink-mute); flex: none; position: relative;
+    }
+    .model.selected .radio { border-color: var(--green); }
+    .model.selected .radio::after {
+      content: ''; position: absolute; inset: 2px;
+      border-radius: 50%; background: var(--green);
+    }
+    .model .meta { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+    .model .name { color: var(--ink); font-size: 12px; }
+    .model .sub  { color: var(--ink-mute); font-size: 10px; letter-spacing: 0.04em; }
+    .model .badges { display: flex; gap: 6px; flex: none; }
+    .model .badge {
+      font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+      padding: 2px 6px; border: 1px solid var(--line-2); color: var(--ink-mute);
+    }
+    .model .badge.cur { border-color: var(--green); color: var(--green); }
+
+    .empty {
+      padding: 20px; text-align: center; color: var(--ink-mute);
+      font-size: 11px; letter-spacing: 0.05em;
+    }
+
+    /* ── Buttons / row actions ─────────────────────────────────────── */
+    .btn {
+      background: transparent; color: var(--ink);
+      border: 1px solid var(--line-2);
+      padding: 6px 12px;
+      font-family: var(--mono); font-size: 11px;
+      letter-spacing: 0.06em;
+      cursor: pointer;
+      transition: all 0.08s ease;
+    }
+    .btn:hover { border-color: var(--green); color: var(--green); }
+    .btn.primary { border-color: var(--green); color: var(--green); }
+    .btn.primary:hover { background: rgba(74, 222, 128, 0.10); }
+    .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .btn.warn { border-color: var(--amber); color: var(--amber); }
+    .btn.warn:hover { background: rgba(255, 204, 85, 0.08); }
+
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    /* ── Diagnostic / kv ───────────────────────────────────────────── */
+    .kv { display: grid; grid-template-columns: 140px 1fr; gap: 8px 16px; }
+    .kv .k { color: var(--ink-mute); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; align-self: center; }
+    .kv .v { color: var(--ink); font-size: 11px; word-break: break-all; }
+
+    .toast {
+      position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+      background: var(--bg-2); border: 1px solid var(--green);
+      color: var(--green);
+      padding: 8px 14px; font-size: 11px; letter-spacing: 0.06em;
+      opacity: 0; pointer-events: none;
+      transition: opacity 0.2s ease;
+    }
+    .toast.show { opacity: 1; }
+    .toast.err { border-color: var(--err); color: var(--err); }
+
+    /* ── Install backend (offline only) ────────────────────────────── */
+    .install-cmd { margin-bottom: 12px; }
+    .install-cmd:last-of-type { margin-bottom: 0; }
+    .install-label { color: var(--ink-mute); font-size: 10px; letter-spacing: 0.06em; margin-bottom: 4px; }
+    .install-row { display: flex; gap: 8px; align-items: stretch; }
+    .install-code {
+      flex: 1; min-width: 0;
+      padding: 6px 10px;
+      background: #0a110e; border: 1px solid var(--line-2);
+      color: var(--ink); font-family: var(--mono); font-size: 11px;
+      white-space: nowrap; overflow-x: auto;
+    }
+    .copy-btn { flex: none; }
+
+    /* scrollbar */
+    ::-webkit-scrollbar { width: 8px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--line); }
+    ::-webkit-scrollbar-thumb:hover { background: var(--line-2); }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="hdr">
+      <div class="brand">▮ BROWY</div>
+      <div class="crumb">// settings</div>
+      <div class="ver" id="verLabel">—</div>
+    </div>
+
+    <div class="status">
+      <div class="item">
+        <span class="dot" id="hostDot"></span>
+        <span class="label">host</span>
+        <span class="val" id="hostVal">connecting…</span>
+      </div>
+      <div class="item">
+        <span class="dot" id="authDot"></span>
+        <span class="label">copilot</span>
+        <span class="val" id="authVal">checking…</span>
+      </div>
+      <div class="item">
+        <span class="label">current</span>
+        <span class="val" id="currentVal">—</span>
+      </div>
+    </div>
+
+    <section id="installSection" style="display:none;border-color:var(--amber)">
+      <div class="sec-hdr" style="border-bottom-color:var(--line)">
+        <h2 style="color:var(--amber)">Install Backend</h2>
+        <span class="sec-hint">// the desktop helper isn't running — install it, then this page reconnects automatically</span>
+      </div>
+      <div class="sec-body">
+        <div class="install-cmd" data-os="Windows (PowerShell)">
+          <div class="install-label">// Windows (PowerShell)</div>
+          <div class="install-row">
+            <code class="install-code">irm https://browy.dev/install.ps1 | iex</code>
+            <button class="btn copy-btn" type="button">copy</button>
+          </div>
+        </div>
+        <div class="install-cmd" data-os="macOS / Linux">
+          <div class="install-label">// macOS / Linux</div>
+          <div class="install-row">
+            <code class="install-code">curl -fsSL https://browy.dev/install.sh | bash</code>
+            <button class="btn copy-btn" type="button">copy</button>
+          </div>
+        </div>
+        <div style="margin-top:14px;color:var(--ink-mute);font-size:10px">
+          // or download a build from
+          <a href="https://github.com/browyhq/browy/releases/latest" target="_blank" rel="noopener" style="color:var(--lime);text-decoration:underline">github releases</a>
+          · after installing, click
+          <a href="#" id="recheckLink" style="color:var(--lime);text-decoration:underline">recheck</a>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="sec-hdr">
+        <h2>Model</h2>
+        <span class="sec-hint">// pick the LLM that powers Browy</span>
+      </div>
+      <div class="sec-body">
+        <div class="toolbar">
+          <input class="search" id="search" type="text" placeholder="filter models — name, vendor, id…" />
+          <span class="count" id="modelCount">—</span>
+        </div>
+        <div class="models" id="modelList">
+          <div class="empty" id="modelEmpty">loading models…</div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="sec-hdr">
+        <h2>Authentication</h2>
+        <span class="sec-hint">// github copilot credentials</span>
+      </div>
+      <div class="sec-body">
+        <div class="kv" style="margin-bottom: 10px;">
+          <span class="k">status</span><span class="v" id="authDetail">—</span>
+        </div>
+        <div class="actions">
+          <button class="btn warn" id="signinBtn">open sign-in terminal</button>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="sec-hdr">
+        <h2>Diagnostics</h2>
+        <span class="sec-hint">// logs &amp; identifiers</span>
+      </div>
+      <div class="sec-body">
+        <div class="kv">
+          <span class="k">extension id</span><span class="v" id="extId">—</span>
+          <span class="k">native host</span><span class="v">com.browy.host</span>
+          <span class="k">log file</span><span class="v">~/.browseragent/native-host.log</span>
+          <span class="k">protocol</span><span class="v">v1</span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="options.js"></script>
+</body>
+</html>

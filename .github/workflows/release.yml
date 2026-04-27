@@ -1,0 +1,91 @@
+name: Release
+
+# Builds installers and publishes them to the PUBLIC repo's Releases.
+# Source stays in this private repo. Trigger by pushing a tag like v0.1.0.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g. 0.1.0). Without leading v.'
+        required: true
+
+env:
+  PUBLIC_REPO: ritabratamaiti/browy-releases
+  NODE_VERSION: '20'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - run: npm ci
+      - run: npm run dist:win
+        env:
+          GH_TOKEN: ''
+
+      - name: List artifacts
+        shell: bash
+        run: ls -la release/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            release/*.exe
+            release/*.exe.blockmap
+            release/latest.yml
+          if-no-files-found: error
+          retention-days: 5
+
+  publish:
+    needs: build-windows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: artifacts
+
+      - name: Publish to public releases repo
+        env:
+          # PAT with `contents:write` scope on the PUBLIC repo.
+          # Store as repo secret PUBLIC_RELEASES_TOKEN in the PRIVATE repo.
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASES_TOKEN }}
+          VERSION: ${{ needs.build-windows.outputs.version }}
+        run: |
+          set -euxo pipefail
+          TAG="v${VERSION}"
+          if ! gh release view "$TAG" --repo "$PUBLIC_REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "$PUBLIC_REPO" \
+              --title "Browy ${VERSION}" \
+              --notes "Browy ${VERSION} — Windows preview. See README for install + setup." \
+              --draft
+          fi
+          gh release upload "$TAG" \
+            --repo "$PUBLIC_REPO" \
+            --clobber \
+            artifacts/*
+          echo "Published ${TAG} (draft) → https://github.com/${PUBLIC_REPO}/releases"

@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "Browy",
+  "version": "0.3.0",
+  "description": "AI agent in your browser. Drives tabs, reads pages, writes code.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAic6seh91XBX5N/FYs/fPAXNXev9RIfLTPBNgBrAX2Pz12MSteFZMCy/vZxNoc8PevytkvX1PQgP1sp7n3e8j0RAV+KOw1PZRtvFqxMEzf6fZhJPV9DqWJubzFB7lERq6m96LHOIbK2fG//aoFph3xJwkbTvI7wkGtxj6hSNXfxNT/yJtyj1Po8ei3ZlVrActpM9qtdxMS5BJ3D4aBh5Y3ZEqPGYsErzHRx4JNDtPH3ZqrvW7jXqCBCV8LmrjctEtnRq44Mwo49wYo0T0b/mWIrNusFiQUTBLnpXvffMh+axKHV/WFyB5TfZROLozKBnYaZbwYRWpplUmU5WtR2X+BwIDAQAB",
+  "minimum_chrome_version": "114",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open Browy",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "devtools_page": "devtools.html",
+  "options_page": "options.html",
+  "permissions": [
+    "sidePanel",
+    "debugger",
+    "tabs",
+    "activeTab",
+    "scripting",
+    "storage",
+    "nativeMessaging",
+    "notifications",
+    "downloads",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ]
+}

@@ -1,0 +1,10 @@
+Browy
+Copyright 2026 Ritabrata Maiti
+
+This product includes software developed by:
+  - The GitHub Copilot SDK team (@github/copilot-sdk, MIT licensed)
+  - The Playwright team (playwright-core, Apache-2.0 licensed)
+  - The Marked authors (marked.min.js, MIT licensed)
+
+Browy bundles a Node.js runtime (https://nodejs.org/) for Windows installers
+under Node's MIT license. See `build-resources/` after `npm run dist:win`.

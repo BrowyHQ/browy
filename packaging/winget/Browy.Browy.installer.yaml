@@ -1,0 +1,26 @@
+# NOTE: Update InstallerSha256 after each release:
+#   (Get-FileHash .\release\Browy-0.1.0-win-x64.zip).Hash
+PackageIdentifier: Browy.Browy
+PackageVersion: 0.1.0
+InstallerLocale: en-US
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+- RelativeFilePath: Browy\node.exe
+  PortableCommandAlias: browy-node
+- RelativeFilePath: Browy\install.bat
+  PortableCommandAlias: browy-install
+Scope: user
+InstallModes:
+- silent
+- interactive
+UpgradeBehavior: install
+Commands:
+- browy-install
+ReleaseDate: 2026-01-01
+Installers:
+- Architecture: x64
+  InstallerUrl: https://github.com/browyhq/browy/releases/download/v0.1.0/Browy-0.1.0-win-x64.zip
+  InstallerSha256: REPLACE_WITH_SHA256_AFTER_BUILD
+ManifestType: installer
+ManifestVersion: 1.6.0

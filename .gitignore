@@ -1,0 +1,22 @@
+node_modules/
+dist/
+release/
+stage/
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+
+# Dev artifacts
+test-screenshots/
+extension-key.pem
+screenshot-*.png
+copilot-test-*.txt
+*-stderr.log
+*-stdout.log
+
+# Bundled runtime fetched at dist time
+build-resources/node.exe
+

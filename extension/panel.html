@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Browy CLI</title>
+  <link rel="stylesheet" href="panel.css" />
+</head>
+<body>
+  <div id="toolbar">
+    <span id="brand">browy</span>
+    <span class="sep">·</span>
+    <span id="model" title="Active model">—</span>
+    <span class="sep">·</span>
+    <span id="page" title="Inspected page">—</span>
+    <span class="grow"></span>
+    <button class="btn" id="btnClear" title="Clear console (Ctrl+L)">Clear</button>
+    <button class="btn" id="btnReset" title="Reset conversation">Reset</button>
+  </div>
+
+  <div id="log" tabindex="0">
+    <!-- console lines go here -->
+  </div>
+
+  <div id="ac" class="hidden" role="listbox" aria-label="commands"></div>
+
+  <div id="prompt-row">
+    <span id="prompt-glyph" aria-hidden="true">›</span>
+    <textarea
+      id="cmd"
+      rows="1"
+      autocomplete="off"
+      autocorrect="off"
+      autocapitalize="off"
+      spellcheck="false"
+      placeholder="ask anything · / for commands · Shift+Enter newline · Esc cancels"
+    ></textarea>
+  </div>
+
+  <script src="panel.js"></script>
+</body>
+</html>

@@ -1,0 +1,1078 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Browy</title>
+  <script src="marked.min.js"></script>
+  <!-- Google Fonts blocked by MV3 CSP; system mono stack instead. -->
+  <style>
+    :root { --font-mono: 'JetBrains Mono', 'Cascadia Code', 'Consolas', 'Menlo', monospace; }
+  </style>
+  <style>
+    /* ════════════════════════════════════════════════════════════════
+       BROWY — minimal pixel-art chat
+       Mascot does the emotional work. Everything else is invisible
+       until it earns its place on screen.
+       Animations: NO tweens. Discrete frame steps only. Pixel art rules.
+       ════════════════════════════════════════════════════════════════ */
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg:        #0d1310;
+      --solid:     #0d1310;                  /* fully opaque surface */
+      --solid-2:   #141a16;
+      /* No more transparency — Chrome's side-panel host shows white behind us
+         when translucent, which made the panel look light. Both vars now alias
+         the solid colors so we always render a stable dark surface. */
+      --translucent:    #0d1310;
+      --translucent-2:  #141a16;
+      --bub-u-bg:  #1c2620;
+      --line:      rgba(160, 180, 160, 0.10);
+      --line-2:    rgba(160, 180, 160, 0.16);
+      --ink:       #d8e3d8;
+      --ink-2:     #6e8276;
+      --green:     #4ade80;
+      --lime:      #c5f04b;
+      --err:       #f87171;
+      --mono:      'JetBrains Mono', 'Cascadia Code', 'Consolas', monospace;
+    }
+
+    /* ──────────────────────────────────────────────────────────────
+       .opaque — semantic utility for any element whose contents
+       (text, icons, code) would be hurt by the panel's blur/alpha.
+       Apply this anywhere a human needs to *read* something.
+       Anything decorative/atmospheric stays transparent.
+       Keep this class flat — no padding/border so it composes cleanly.
+       ────────────────────────────────────────────────────────────── */
+    /* Single-state solid theme. Focus state is no longer used to toggle
+       background or blur — those caused the panel to look "white" when
+       Chrome's side-panel host showed through. */
+    .opaque, .opaque-raised { /* legacy no-op */ }
+
+    /* Always solid — no backdrop blur, no focus-based switching */
+    .panel {
+      background: var(--solid);
+      border-top: 1px solid var(--line);
+    }
+    .corner   { opacity: 1; }
+    .msgs     { opacity: 1; }
+    .inp-row  { background: var(--solid-2); border-top-color: var(--line); opacity: 1; }
+
+    /* MINIMIZED — chat collapses INTO the mascot (scales toward top-left).
+       DOM is preserved; this is purely a visual collapse. */
+    .titlebar, .infobar, .panel {
+      transition: opacity 0.22s steps(4), transform 0.22s steps(4);
+      transform-origin: 30px 24px;  /* anchor at mascot center for collapse-to-avatar feel */
+    }
+    body.minimized .titlebar,
+    body.minimized .infobar,
+    body.minimized .panel {
+      opacity: 0;
+      pointer-events: none;
+      transform: scale(0.04);
+    }
+    body.minimized .corner   { opacity: 0; pointer-events: none; }
+    body.minimized .app      { padding: 0; }
+    body.minimized .mascot   { top: 4px; left: 4px; }
+
+
+    html, body {
+      font-family: var(--mono);
+      background: var(--solid);
+      color: var(--ink);
+      height: 100vh; width: 100vw;
+      overflow: hidden;
+      font-size: 12px;
+      -webkit-font-smoothing: antialiased;
+      cursor: default;
+      user-select: none;
+      image-rendering: pixelated;
+      image-rendering: -moz-crisp-edges;
+    }
+
+    /* App: mascot perches at top-left, panel below ─────────────────── */
+    .app {
+      position: relative;
+      height: 100vh; width: 100vw;
+      padding: 48px 0 0 0;  /* room for mascot above titlebar */
+      display: flex; flex-direction: column;
+      -webkit-app-region: drag;
+      background: var(--solid);
+    }
+
+    /* ── Titlebar (top): controls + brand only ──────────────────────── */
+    .titlebar {
+      flex: 0 0 auto;
+      display: flex; align-items: stretch;
+      padding: 0;
+      border-bottom: 1px solid var(--line);
+      background: var(--translucent);
+      backdrop-filter: blur(20px) saturate(140%);
+      -webkit-backdrop-filter: blur(20px) saturate(140%);
+      -webkit-app-region: drag;
+      font-family: var(--mono);
+      user-select: none;
+      min-height: 38px;
+      transition: background 0.18s steps(3);
+    }
+    body.focused .titlebar { /* legacy no-op — titlebar is always solid now */ }
+
+    .tb-brand-cell {
+      flex: 1; min-width: 0;
+      display: flex; align-items: center; gap: 8px;
+      padding: 0 10px 0 10px;
+    }
+    .tb-dot {
+      width: 8px; height: 8px; flex-shrink: 0;
+      background: var(--ink-2);
+      transition: background 0.15s steps(2);
+    }
+    .tb-dot.live { background: var(--green); box-shadow: 0 0 4px var(--green); }
+    .tb-dot.busy { background: var(--lime); box-shadow: 0 0 6px var(--lime); animation: pulseDot 0.6s steps(2) infinite; }
+    .tb-dot.err  { background: var(--err);  box-shadow: 0 0 6px var(--err);  }
+    .tb-brand {
+      color: var(--green); font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.08em;
+      font-size: 12px;
+    }
+    .tb-tag { color: var(--ink-2); font-size: 10px; opacity: 0.7; letter-spacing: 0.05em; }
+
+    /* Controls cluster — right side */
+    .tb-ctrls {
+      display: flex; align-items: stretch;
+      -webkit-app-region: no-drag;
+      border-left: 1px solid var(--line);
+    }
+    .tb-btn {
+      background: transparent; border: none;
+      color: var(--ink-2); cursor: pointer;
+      font-family: var(--mono); font-size: 16px; font-weight: 600;
+      padding: 0;
+      width: 38px; height: 100%;
+      display: flex; align-items: center; justify-content: center;
+      gap: 0;
+      line-height: 1;
+      border-left: 1px solid transparent;
+      transition: background 0.12s steps(2), color 0.12s steps(2);
+    }
+    .tb-btn:hover { background: rgba(255,255,255,0.06); color: var(--ink); }
+    .tb-btn.danger:hover { background: rgba(248,113,113,0.16); color: var(--err); }
+    .tb-btn .lbl { font-size: 8.5px; letter-spacing: 0.06em; text-transform: uppercase; opacity: 0.75; font-weight: 600; }
+    .tb-stop { display: none; color: var(--err); flex-direction: column; gap: 1px; font-size: 12px; }
+    .tb-stop.show { display: flex; }
+    .tb-btn.close-btn {}
+    .tb-btn#minBtn {}
+    .tb-btn#clearBtn {}
+    .tb-ico { width: 14px; height: 14px; display: block; }
+    .tb-btn.close-btn .tb-ico { width: 16px; height: 16px; }
+
+    /* ── Info bar (below titlebar): browser + tab + url ────────────── */
+    .infobar {
+      flex: 0 0 auto;
+      position: relative;       /* needed so z-index applies */
+      z-index: 50;              /* lift above .panel which creates its own stacking context via backdrop-filter */
+      display: flex; align-items: center; gap: 8px;
+      padding: 5px 10px;
+      border-bottom: 1px solid var(--line);
+      background: var(--translucent-2);
+      backdrop-filter: blur(20px) saturate(140%);
+      -webkit-backdrop-filter: blur(20px) saturate(140%);
+      -webkit-app-region: drag;
+      font-family: var(--mono); font-size: 10.5px;
+      color: var(--ink-2);
+      min-height: 26px;
+      user-select: none;
+      transition: background 0.18s steps(3);
+    }
+    body.focused .infobar { /* legacy no-op — infobar is always solid now */ }
+
+    .ib-browser {
+      color: var(--green); text-transform: uppercase; letter-spacing: 0.06em;
+      font-weight: 700; font-size: 10px;
+      flex-shrink: 0;
+      padding: 1px 5px;
+      border: 1px solid rgba(74,222,128,0.35);
+    }
+    .ib-tabs { color: var(--ink-2); flex-shrink: 0; font-size: 10px; opacity: 0.75; }
+    .ib-sep { color: var(--ink-2); opacity: 0.4; flex-shrink: 0; }
+    .ib-ttl {
+      color: var(--ink); flex: 1; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .ib-ttl.action { color: var(--lime); font-weight: 600; }
+    .ib-host {
+      color: var(--ink-2); opacity: 0.6;
+      max-width: 130px; flex-shrink: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    /* ── Browser launcher button + popover ───────────────────────── */
+    .ib-browsers {
+      flex-shrink: 0;
+      display: inline-flex; align-items: center; gap: 2px;
+      font-family: var(--mono); font-size: 10px;
+      color: var(--ink-2);
+      padding: 1px 6px;
+      border: 1px solid var(--line);
+      background: rgba(255,255,255,0.04);
+      letter-spacing: 0.04em;
+      user-select: none;
+    }
+    .ib-browsers .ib-bcount { color: var(--green); font-weight: 700; }
+    .browser-pop {
+      position: fixed; z-index: 9999;
+      min-width: 220px;
+      background: var(--solid); border: 1px solid var(--line);
+      box-shadow: 0 6px 18px rgba(0,0,0,0.55);
+      padding: 6px;
+      display: none;
+      font-family: var(--mono); font-size: 11px;
+      -webkit-app-region: no-drag;
+      pointer-events: auto;
+    }
+    .browser-pop.open { display: block; }
+    .browser-pop * { -webkit-app-region: no-drag; }
+    .bp-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 6px;
+    }
+    .bp-row + .bp-row { border-top: 1px dashed var(--line); }
+    .bp-name { flex: 1; color: var(--ink); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; }
+    .bp-status {
+      font-size: 9px; padding: 1px 5px;
+      border: 1px solid var(--line); color: var(--ink-2);
+      letter-spacing: 0.05em;
+    }
+    .bp-status.connected { color: var(--green); border-color: rgba(74,222,128,0.4); }
+    .bp-status.notinstalled { color: var(--ink-2); opacity: 0.5; }
+    .bp-launch {
+      font-family: var(--mono); font-size: 10px;
+      padding: 2px 7px; cursor: pointer;
+      background: var(--lime); color: #000; border: none;
+      letter-spacing: 0.05em; font-weight: 700;
+    }
+    .bp-launch:disabled { opacity: 0.35; cursor: not-allowed; background: var(--line); color: var(--ink-2); }
+    .bp-launch:hover:not(:disabled) { filter: brightness(1.15); }
+    .bp-msg {
+      padding: 6px; color: var(--ink-2); font-size: 10px;
+      border-top: 1px dashed var(--line); margin-top: 4px;
+      white-space: pre-wrap;
+    }
+    .bp-msg.err { color: #fca5a5; }
+    .bp-msg.ok { color: var(--green); }
+
+    /* Mascot — perches above the titlebar at top-left, doubles as drag handle.
+       NOTE: We use JS-based dragging (via winctl IPC) instead of -webkit-app-region:drag
+       because Electron's drag region overrides our cursor and swallows click events. */
+    .mascot {
+      position: absolute;
+      top: 2px; left: 6px;
+      width: 56px; height: 56px;
+      z-index: 30;
+      -webkit-app-region: no-drag;
+      cursor: grab;
+      transition: transform 0.18s steps(3);
+    }
+    .mascot:active { cursor: grabbing; }
+    .mascot.dragging { cursor: grabbing; transition: none; }
+    .mascot:hover { transform: translateY(-1px); }
+    .mascot svg { width: 100%; height: 100%; display: block; image-rendering: pixelated; pointer-events: none; }
+    body.minimized .mascot { cursor: grab; }
+    body.minimized .mascot:active { cursor: grabbing; }
+    body.minimized .mascot:hover { transform: translateY(-2px) scale(1.05); }
+    /* (mascot pip removed — minimize is handled by titlebar button; restore by clicking avatar) */
+
+    .panel-shell { display: contents; } /* unused — kept to avoid breaking older styles */
+    .panel {
+      flex: 1 1 auto; min-height: 0;
+      display: flex; flex-direction: column;
+      position: relative;
+      -webkit-app-region: drag;
+    }
+
+    @keyframes pulseDot { 0%,49% { opacity: 1; } 50%,100% { opacity: 0.35; } }
+
+    /* Messages ─────────────────────────────────────────────────────── */
+    .msgs {
+      flex: 1;
+      padding: 14px 14px 12px 14px;
+      overflow-y: auto;
+      display: flex; flex-direction: column;
+      gap: 12px;
+      -webkit-app-region: drag;
+      user-select: text;
+    }
+    .msgs > * { -webkit-app-region: no-drag; }   /* but not bubbles */
+    .msgs::-webkit-scrollbar { width: 4px; }
+    .msgs::-webkit-scrollbar-thumb { background: rgba(74,222,128,0.25); }
+    .msgs::-webkit-scrollbar-track { background: transparent; }
+
+    .bub {
+      max-width: 92%;
+      font-size: 12px; line-height: 1.55;
+      word-wrap: break-word;
+    }
+    .bub.u {
+      align-self: flex-end;
+      background: var(--bub-u-bg);
+      color: var(--ink);
+      padding: 7px 10px;
+      border-left: 2px solid var(--green);
+    }
+    .bub.a {
+      align-self: stretch;
+      max-width: 100%;
+      color: var(--ink);
+      padding: 8px 10px 8px 12px;
+      border-left: 2px solid var(--line-2);
+    }
+    .bub.a p   { margin: 0 0 6px; }
+    .bub.a p:last-child { margin: 0; }
+    .bub.a strong { color: var(--lime); font-weight: 600; }
+    .bub.a em     { color: var(--lime); font-style: normal; }
+    .bub.a code   { font-family: var(--mono); background: rgba(74,222,128,0.10); padding: 1px 5px; color: var(--lime); font-size: 11px; }
+    .bub.a pre    { background: rgba(0,0,0,0.30); padding: 8px 10px; margin: 6px 0; overflow-x: auto; border-left: 2px solid var(--green); }
+    .bub.a pre code { background: none; padding: 0; color: var(--ink); }
+    .bub.a ul, .bub.a ol { padding-left: 16px; margin: 4px 0; }
+    .bub.a a   { color: var(--lime); text-decoration: none; border-bottom: 1px dotted var(--lime); }
+    .bub.a .cursor {
+      display: inline-block; width: 6px; height: 12px;
+      background: var(--green); vertical-align: -2px; margin-left: 1px;
+      animation: blinkCursor 1s steps(2) infinite;
+    }
+    @keyframes blinkCursor { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+
+    .bub.a.err {
+      color: #fca5a5; border-left: 2px solid #f87171;
+      background: rgba(248,113,113,0.06);
+    }
+
+    /* Tool steps — Claude-Code-style inline status lines.
+       Each step renders as one collapsed line; click to expand and see args. */
+    /* Tool calls — Claude Code / Copilot CLI style.
+       Each step is: ⏺ tool(args)              123ms
+                     ⎿ result preview / done summary
+       Colored bullet, monospace, hierarchical with arc-prefix on the result. */
+    .tool-steps { margin: 4px 0 6px; display: flex; flex-direction: column; gap: 4px; font-family: var(--mono); }
+    .tool-step  {
+      font-size: 11px; color: var(--ink-2);
+      display: grid;
+      grid-template-columns: 14px 1fr auto;
+      grid-template-rows: auto auto;
+      column-gap: 4px;
+      row-gap: 1px;
+      cursor: pointer;
+      padding: 1px 0;
+    }
+    .tool-step .glyph {
+      grid-column: 1; grid-row: 1;
+      font-family: var(--mono); font-weight: 700;
+      color: var(--ink-2); text-align: center;
+    }
+    .tool-step.running .glyph { color: var(--lime); }
+    .tool-step.done    .glyph { color: var(--green); }
+    .tool-step.error   .glyph { color: var(--err);  }
+    .tool-step .glyph::before { content: '⏺'; }
+    .tool-step.running .glyph::before { content: '⠋'; animation: spinFrames 0.8s steps(10) infinite; }
+    .tool-step.done    .glyph::before { content: '⏺'; }
+    .tool-step.error   .glyph::before { content: '⏺'; }
+
+    .tool-step .head {
+      grid-column: 2; grid-row: 1;
+      min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .tool-step .name { color: var(--ink); font-weight: 600; }
+    .tool-step .paren { color: var(--ink-2); opacity: 0.7; }
+    .tool-step .args  { color: var(--lime); opacity: 0.85; }
+    .tool-step.error .name { color: var(--err); }
+
+    .tool-step .ms {
+      grid-column: 3; grid-row: 1;
+      color: var(--ink-2); opacity: 0.55; font-size: 10px;
+    }
+
+    .tool-step .out {
+      grid-column: 2 / span 2; grid-row: 2;
+      color: var(--ink-2);
+      display: flex; align-items: baseline; gap: 4px;
+      font-size: 10.5px;
+      min-width: 0;
+    }
+    .tool-step .out .arc { color: var(--ink-2); opacity: 0.5; flex-shrink: 0; }
+    .tool-step .out .arc::before { content: '⎿'; }
+    .tool-step .out .preview {
+      flex: 1; min-width: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .tool-step.error .out { color: var(--err); opacity: 0.85; }
+    .tool-step.running .out { color: var(--ink-2); opacity: 0.7; font-style: italic; }
+    .tool-step.expanded .out .preview { white-space: pre-wrap; word-break: break-word; }
+
+    /* Once final response arrives, collapse the entire tool list into a
+       single click-to-expand summary. The full list re-appears on click. */
+    .tool-steps.collapsed .tool-step { display: none; }
+    .tool-steps.collapsed .tools-summary { display: flex; }
+    .tools-summary {
+      display: none; align-items: center; gap: 6px;
+      font-family: var(--mono); font-size: 10.5px;
+      color: var(--ink-2); cursor: pointer;
+      padding: 1px 0;
+      opacity: 0.7;
+    }
+    .tools-summary:hover { opacity: 1; color: var(--ink); }
+    .tools-summary .glyph { color: var(--ink-2); font-weight: 700; width: 14px; text-align: center; }
+    .tools-summary .glyph::before { content: '⏺'; }
+    .tools-summary .arrow::before { content: '▸'; opacity: 0.5; }
+    .tool-steps.expanded-back .tools-summary .arrow::before { content: '▾'; }
+    .tool-steps.expanded-back.collapsed .tool-step { display: grid; }
+    .tool-steps.expanded-back.collapsed .tools-summary { color: var(--ink); opacity: 1; }
+
+    @keyframes spinFrames {
+      0%   { content: '⠋'; }
+      10%  { content: '⠙'; }
+      20%  { content: '⠹'; }
+      30%  { content: '⠸'; }
+      40%  { content: '⠼'; }
+      50%  { content: '⠴'; }
+      60%  { content: '⠦'; }
+      70%  { content: '⠧'; }
+      80%  { content: '⠇'; }
+      90%  { content: '⠏'; }
+      100% { content: '⠋'; }
+    }
+
+    /* Reasoning peek — quiet italic line above the answer */
+    .reasoning {
+      font-size: 10px; color: var(--ink-2); opacity: 0.7;
+      font-style: italic;
+      margin: 2px 0 6px;
+      padding-left: 2px;
+      border-left: 1px dashed var(--line);
+      padding-left: 6px;
+    }
+
+    /* Empty state — minimal greeting */
+    .empty {
+      align-self: center;
+      margin: auto 0;
+      text-align: center;
+      color: var(--ink-2);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+    }
+    .empty .greet { color: var(--green); font-size: 14px; margin-bottom: 4px; }
+    .empty .hint  { opacity: 0.7; }
+
+    /* Input ─ seamless with chat, just a thin top line to delineate ── */
+    .inp-row {
+      display: flex; align-items: stretch;
+      padding: 8px 8px 10px 14px;
+      border-top: 1px solid var(--line-2);
+      background: transparent;
+      gap: 8px;
+      -webkit-app-region: no-drag;
+      min-height: 50px;
+    }
+    body.focused .inp-row { /* legacy no-op — inp-row is always solid now */ }
+    .inp-row .field {
+      flex: 1; min-width: 0;
+      display: flex; align-items: stretch;
+      border: none;
+      background: transparent;
+    }
+    .inp-row .prompt {
+      color: var(--green); font-weight: 700; user-select: none;
+      font-size: 15px;
+      padding: 4px 6px 4px 0;
+      align-self: center;
+    }
+    .inp-row textarea {
+      flex: 1;
+      background: transparent;
+      border: none; outline: none; resize: none;
+      color: var(--ink);
+      font-family: var(--mono); font-size: 13px;
+      max-height: 120px; min-height: 28px;
+      line-height: 1.5;
+      caret-color: var(--green);
+      padding: 6px 4px;
+    }
+    .inp-row textarea::placeholder { color: var(--ink-2); opacity: 0.5; }
+    .inp-row .send {
+      background: transparent;
+      border: none;
+      color: var(--green); cursor: pointer;
+      font-family: var(--mono); font-size: 24px; font-weight: 700;
+      padding: 0 12px;
+      min-width: 44px;
+      display: flex; align-items: center; justify-content: center;
+      line-height: 1;
+      transition: color 0.12s steps(2), transform 0.06s steps(2), opacity 0.12s steps(2);
+    }
+    .inp-row .send:hover:not(:disabled) { color: var(--lime); transform: scale(1.1); }
+    .inp-row .send:active:not(:disabled) { transform: translateY(1px) scale(1.05); }
+    .inp-row .send:disabled {
+      color: var(--ink-2);
+      background: transparent; cursor: default;
+      opacity: 0.4;
+    }
+
+    /* ════════════════════════════════════════════════════════════════
+       MASCOT — pure pixel grid, rect-only SVG.
+       16×16 logical grid, each cell = 5px. Total 80×80.
+       Poses are <g> layers; JS toggles which is visible.
+       ════════════════════════════════════════════════════════════════ */
+    .browy { display: block; }
+    .browy g.pose { display: none; }
+    .browy[data-pose="idle"]  g.pose-idle  { display: block; }
+    .browy[data-pose="left"]  g.pose-left  { display: block; }
+    .browy[data-pose="right"] g.pose-right { display: block; }
+    .browy[data-pose="up"]    g.pose-up    { display: block; }
+    .browy[data-pose="blink"] g.pose-blink { display: block; }
+    .browy[data-pose="happy"] g.pose-happy { display: block; }
+    .browy[data-pose="think"] g.pose-think { display: block; }
+    .browy[data-pose="err"]   g.pose-err   { display: block; }
+    .browy[data-pose="work"]  g.pose-work  { display: block; }
+    .browy[data-pose="sleep"] g.pose-sleep { display: block; }
+    .browy[data-pose="love"]  g.pose-love  { display: block; }
+    .browy[data-pose="wow"]   g.pose-wow   { display: block; }
+
+    /* Antenna ball "powered" pulse — 2 discrete steps */
+    .browy .ant-ball { animation: antPulse 1.6s steps(2) infinite; transform-origin: 40px 8px; }
+    .browy .ant      { transform-origin: 40px 18px; animation: antSway 4s steps(4) infinite; }
+    .browy .ant-glow { animation: glowPulse 1.6s steps(2) infinite; }
+    .browy[data-pose="think"] .ant-ball { animation: antThink 0.4s steps(2) infinite; }
+    .browy[data-pose="think"] .ant      { animation: antSway 1.2s steps(4) infinite; }
+    .browy[data-pose="work"]  .ant-ball { animation: antThink 0.25s steps(2) infinite; fill: var(--lime); }
+    .browy[data-pose="work"]  .ant      { animation: antSway 0.8s steps(4) infinite; }
+    .browy[data-pose="err"]   .ant-ball { fill: var(--err); animation: antPulse 0.3s steps(2) infinite; }
+    .browy[data-pose="sleep"] .ant-ball { animation: antPulse 3s steps(2) infinite; opacity: 0.5; }
+    .browy[data-pose="sleep"] .ant      { animation: none; transform: rotate(-4deg); }
+    .browy[data-pose="love"]  .ant-ball { fill: var(--err); }
+    @keyframes antPulse  { 0%,49% { opacity: 1; } 50%,100% { opacity: 0.4; } }
+    @keyframes antThink  { 0%,49% { fill: var(--lime); } 50%,100% { fill: var(--green); } }
+    @keyframes antSway   { 0%,100% { transform: rotate(0deg); } 25% { transform: rotate(-3deg); } 75% { transform: rotate(3deg); } }
+    @keyframes glowPulse { 0%,49% { opacity: 1; } 50%,100% { opacity: 0.55; } }
+
+    /* Scanline subtle scroll — gives the screen life */
+    .browy .scan { animation: scanShift 2.4s steps(3) infinite; }
+    @keyframes scanShift { 0% { transform: translateY(0); } 33% { transform: translateY(1px); } 66% { transform: translateY(2px); } 100% { transform: translateY(0); } }
+
+    /* Arms — default at sides, animate per pose */
+    .browy .arm-l, .browy .arm-l-hand { transform-origin: 8px 50px; }
+    .browy .arm-r, .browy .arm-r-hand { transform-origin: 72px 50px; }
+    .browy[data-pose="happy"] .arm-l       { transform: rotate(-30deg); }
+    .browy[data-pose="happy"] .arm-l-hand  { transform: rotate(-30deg); }
+    .browy[data-pose="happy"] .arm-r       { transform: rotate(30deg); }
+    .browy[data-pose="happy"] .arm-r-hand  { transform: rotate(30deg); }
+    .browy[data-pose="work"]  .arm-l, .browy[data-pose="work"] .arm-l-hand { animation: typeL 0.35s steps(2) infinite; }
+    .browy[data-pose="work"]  .arm-r, .browy[data-pose="work"] .arm-r-hand { animation: typeR 0.35s steps(2) infinite; }
+    @keyframes typeL { 0%,49% { transform: translateY(0); } 50%,100% { transform: translateY(2px); } }
+    @keyframes typeR { 0%,49% { transform: translateY(2px); } 50%,100% { transform: translateY(0); } }
+    .browy[data-pose="wow"] .arm-l, .browy[data-pose="wow"] .arm-l-hand { transform: rotate(-15deg) translateX(-2px); }
+    .browy[data-pose="wow"] .arm-r, .browy[data-pose="wow"] .arm-r-hand { transform: rotate(15deg)  translateX(2px); }
+    .browy[data-pose="sleep"] .arm-l, .browy[data-pose="sleep"] .arm-l-hand,
+    .browy[data-pose="sleep"] .arm-r, .browy[data-pose="sleep"] .arm-r-hand { opacity: 0.5; }
+
+    /* Idle breathing — head body lifts 1px every 2s */
+    .browy { animation: breathe 2.4s steps(2) infinite; transform-origin: 40px 78px; }
+    @keyframes breathe { 0%,49% { transform: translateY(0); } 50%,100% { transform: translateY(-1px); } }
+    .browy[data-pose="sleep"] { animation: sleepBreathe 3.6s steps(3) infinite; }
+    @keyframes sleepBreathe { 0%,33% { transform: translateY(0); } 34%,66% { transform: translateY(1px); } 67%,100% { transform: translateY(0); } }
+
+    /* Ground shadow contracts when bouncing */
+    .browy.bounce ~ * .ground, .browy.bounce .ground { animation: shadowSquish 0.3s steps(2) 1; }
+    @keyframes shadowSquish { 0%,100% { transform: scaleX(1); } 50% { transform: scaleX(0.7); } }
+
+    /* Reaction nudges — discrete 1-pixel shifts, no tween */
+    .browy.nod    { animation: nod    0.3s steps(2) 1; }
+    .browy.shake  { animation: shake  0.4s steps(2) 2; }
+    .browy.bounce { animation: bounce 0.36s steps(3) 1; }
+    .browy.spin   { animation: spin   0.45s steps(4) 1; }
+    .browy.wave   { animation: none; } /* wave handled via arm transforms */
+    .browy.wave .arm-r, .browy.wave .arm-r-hand { animation: waveArm 0.5s steps(2) 3; }
+    @keyframes waveArm { 0%,100% { transform: rotate(20deg); } 50% { transform: rotate(60deg) translateX(2px); } }
+    @keyframes nod    { 0% { transform: translateY(0); } 50% { transform: translateY(3px); } 100% { transform: translateY(0); } }
+    @keyframes shake  { 0% { transform: translateX(0); } 25% { transform: translateX(-3px); } 75% { transform: translateX(3px); } 100% { transform: translateX(0); } }
+    @keyframes bounce { 0%,100% { transform: translateY(0); } 33% { transform: translateY(-5px); } 66% { transform: translateY(-2px); } }
+    @keyframes spin   { 0% { transform: rotate(0); } 100% { transform: rotate(360deg); } }
+
+    /* ── Chats overlay (history picker) ─────────────────────────────── */
+    .chats-overlay {
+      position: absolute; inset: 0;
+      background: var(--solid);
+      z-index: 50;
+      display: none;
+      flex-direction: column;
+      -webkit-app-region: no-drag;
+    }
+    .chats-overlay.open { display: flex; }
+    .chats-head {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      background: var(--solid-2);
+      min-height: 40px;
+    }
+    .chats-head .title {
+      flex: 1;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--ink-2);
+    }
+    .chats-head .title b { color: var(--green); font-weight: 600; }
+    .chats-head .close-x {
+      background: transparent; border: 0; color: var(--ink-2);
+      width: 26px; height: 26px;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; border-radius: 3px;
+      font-family: var(--mono); font-size: 14px;
+    }
+    .chats-head .close-x:hover { background: rgba(255,255,255,0.06); color: var(--ink); }
+    .chats-search {
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--line);
+      background: var(--solid);
+    }
+    .chats-search input {
+      width: 100%;
+      background: var(--solid-2);
+      border: 1px solid var(--line);
+      color: var(--ink);
+      font-family: var(--mono); font-size: 12px;
+      padding: 6px 8px;
+      outline: none;
+    }
+    .chats-search input:focus { border-color: var(--green); }
+    .chats-list {
+      flex: 1; overflow-y: auto;
+      padding: 4px 0;
+    }
+    .chats-list::-webkit-scrollbar { width: 4px; }
+    .chats-list::-webkit-scrollbar-thumb { background: rgba(74,222,128,0.25); }
+    .chats-empty {
+      padding: 32px 16px;
+      color: var(--ink-2);
+      text-align: center;
+      font-family: var(--mono); font-size: 11px;
+    }
+    .chat-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      cursor: pointer;
+      transition: background 0.12s;
+    }
+    .chat-row:hover { background: rgba(74,222,128,0.06); }
+    .chat-row.current { background: rgba(74,222,128,0.10); border-left: 2px solid var(--green); padding-left: 10px; }
+    .chat-row .chat-body { flex: 1; min-width: 0; }
+    .chat-row .chat-title {
+      color: var(--ink);
+      font-family: var(--mono); font-size: 12px;
+      font-weight: 500;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .chat-row .chat-meta {
+      color: var(--ink-2);
+      font-family: var(--mono); font-size: 10px;
+      margin-top: 3px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .chat-row .chat-meta .dot { color: var(--green); }
+    .chat-row .chat-del {
+      background: transparent; border: 0; color: var(--ink-2);
+      width: 24px; height: 24px;
+      display: none; align-items: center; justify-content: center;
+      cursor: pointer; border-radius: 3px;
+      flex-shrink: 0;
+    }
+    .chat-row:hover .chat-del { display: flex; }
+    .chat-row .chat-del:hover { background: rgba(248,113,113,0.16); color: var(--err); }
+    .chat-row .chat-del svg { width: 12px; height: 12px; }
+    .chats-foot {
+      border-top: 1px solid var(--line);
+      padding: 8px 12px;
+      display: flex; gap: 8px; align-items: center;
+      background: var(--solid-2);
+    }
+    .chats-foot button {
+      background: transparent;
+      border: 1px solid var(--line);
+      color: var(--ink); cursor: pointer;
+      font-family: var(--mono); font-size: 11px;
+      padding: 5px 10px;
+      letter-spacing: 0.05em;
+    }
+    .chats-foot button:hover { border-color: var(--green); color: var(--green); }
+    .chats-foot .spacer { flex: 1; }
+    .chats-foot .hint { color: var(--ink-2); font-family: var(--mono); font-size: 10px; }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <div class="mascot" id="mascotBox" title="Browy">
+    <svg class="browy" id="browy" data-pose="idle" viewBox="0 0 80 80" xmlns="http://www.w3.org/2000/svg" shape-rendering="crispEdges">
+      <!-- Grid: 80×80, 2px sub-grid. -->
+
+      <!-- ── ANTENNA: segmented stalk + octagonal bulb + glow halo ── -->
+      <g class="ant" id="ant">
+        <!-- glow halo (diffuse, behind bulb) -->
+        <rect x="28" y="4" width="24" height="6" fill="rgba(74,222,128,0.18)" class="ant-glow"/>
+        <rect x="30" y="2" width="20" height="2" fill="rgba(74,222,128,0.12)" class="ant-glow"/>
+        <rect x="30" y="10" width="20" height="2" fill="rgba(74,222,128,0.12)" class="ant-glow"/>
+        <!-- octagonal bulb body -->
+        <rect x="34" y="2" width="12" height="2" fill="#4ade80" class="ant-ball"/>
+        <rect x="32" y="4" width="16" height="6" fill="#4ade80" class="ant-ball"/>
+        <rect x="34" y="10" width="12" height="2" fill="#4ade80" class="ant-ball"/>
+        <!-- bulb shine -->
+        <rect x="34" y="4" width="4" height="2" fill="#a3f3b8" class="ant-shine"/>
+        <rect x="32" y="6" width="2" height="2" fill="#a3f3b8" class="ant-shine"/>
+        <!-- bulb shadow underside -->
+        <rect x="42" y="8" width="4" height="2" fill="#15803d"/>
+        <!-- segmented stalk -->
+        <rect x="38" y="12" width="4" height="2" fill="#22c55e"/>
+        <rect x="38" y="14" width="4" height="2" fill="#15803d"/>
+        <rect x="38" y="16" width="4" height="2" fill="#1f3826"/>
+      </g>
+
+      <!-- ── HEAD: bezel with octagonal corner cuts ── -->
+      <!-- Top rounded edge -->
+      <rect x="14" y="18" width="52" height="2" fill="#22c55e"/>
+      <rect x="12" y="20" width="56" height="2" fill="#22c55e"/>
+      <!-- Main bezel body (full 60×42) -->
+      <rect x="10" y="22" width="60" height="42" fill="#15803d"/>
+      <!-- Bottom rounded edge -->
+      <rect x="12" y="64" width="56" height="2" fill="#15803d"/>
+      <rect x="14" y="66" width="52" height="2" fill="#15803d"/>
+      <rect x="16" y="68" width="48" height="2" fill="#1f3826"/>
+      <!-- Top inner highlight band -->
+      <rect x="12" y="22" width="56" height="2" fill="#22c55e"/>
+      <!-- Left side highlight (subtle 3D) -->
+      <rect x="10" y="22" width="2" height="42" fill="#22c55e" opacity="0.45"/>
+      <!-- Right side shadow -->
+      <rect x="68" y="22" width="2" height="42" fill="#0a1f12" opacity="0.35"/>
+
+      <!-- side ear-knobs (volume/power) -->
+      <rect x="8" y="32" width="2" height="6" fill="#1f3826"/>
+      <rect x="6" y="33" width="2" height="4" fill="#1f3826"/>
+      <rect x="8" y="42" width="2" height="6" fill="#1f3826"/>
+      <rect x="6" y="43" width="2" height="4" fill="#1f3826"/>
+      <rect x="70" y="32" width="2" height="6" fill="#1f3826"/>
+      <rect x="72" y="33" width="2" height="4" fill="#1f3826"/>
+      <rect x="70" y="42" width="2" height="6" fill="#1f3826"/>
+      <rect x="72" y="43" width="2" height="4" fill="#1f3826"/>
+
+      <!-- bezel corner bolts -->
+      <rect x="12" y="22" width="2" height="2" fill="#0a1f12"/>
+      <rect x="66" y="22" width="2" height="2" fill="#0a1f12"/>
+      <rect x="12" y="62" width="2" height="2" fill="#0a1f12"/>
+      <rect x="66" y="62" width="2" height="2" fill="#0a1f12"/>
+      <rect x="13" y="23" width="1" height="1" fill="#22c55e"/>
+      <rect x="67" y="23" width="1" height="1" fill="#22c55e"/>
+
+      <!-- ── SCREEN inset (deep CRT, full 40 tall so poses work) ── -->
+      <rect x="15" y="25" width="50" height="40" fill="#0a1f12"/>
+      <!-- inner screen border (1px lighter inset) -->
+      <rect x="15" y="25" width="50" height="1" fill="#1f3826"/>
+      <rect x="15" y="64" width="50" height="1" fill="#1f3826"/>
+      <rect x="15" y="25" width="1" height="40" fill="#1f3826"/>
+      <rect x="64" y="25" width="1" height="40" fill="#1f3826"/>
+      <!-- scanline stripes -->
+      <rect x="15" y="32" width="50" height="1" fill="rgba(74,222,128,0.07)" class="scan"/>
+      <rect x="15" y="42" width="50" height="1" fill="rgba(74,222,128,0.07)" class="scan"/>
+      <rect x="15" y="52" width="50" height="1" fill="rgba(74,222,128,0.07)" class="scan"/>
+      <!-- screen glare top-left corner -->
+      <rect x="16" y="26" width="8" height="1" fill="rgba(165,243,184,0.22)"/>
+      <rect x="16" y="27" width="3" height="1" fill="rgba(165,243,184,0.15)"/>
+      <rect x="16" y="28" width="1" height="1" fill="rgba(165,243,184,0.10)"/>
+
+      <!-- speaker grille (on the rounded bottom bezel band) -->
+      <rect x="22" y="66" width="36" height="1" fill="#0a1f12"/>
+      <!-- power LED -->
+      <rect x="60" y="66" width="2" height="1" fill="#c5f04b" class="power-led"/>
+
+      <!-- ── POSE: idle (looking forward) ── -->
+      <g class="pose pose-idle">
+        <!-- Eye whites (left + right) -->
+        <rect x="22" y="35" width="12" height="10" fill="#d8e3d8"/>
+        <rect x="46" y="35" width="12" height="10" fill="#d8e3d8"/>
+        <!-- Pupils centered -->
+        <rect x="26" y="38" width="4" height="4" fill="#0a1f12"/>
+        <rect x="50" y="38" width="4" height="4" fill="#0a1f12"/>
+        <!-- Mouth (small grin pixel) -->
+        <rect x="34" y="55" width="12" height="2" fill="#4ade80"/>
+      </g>
+
+      <!-- ── POSE: looking left ── -->
+      <g class="pose pose-left">
+        <rect x="22" y="35" width="12" height="10" fill="#d8e3d8"/>
+        <rect x="46" y="35" width="12" height="10" fill="#d8e3d8"/>
+        <rect x="22" y="38" width="4" height="4" fill="#0a1f12"/>
+        <rect x="46" y="38" width="4" height="4" fill="#0a1f12"/>
+        <rect x="34" y="55" width="12" height="2" fill="#4ade80"/>
+      </g>
+
+      <!-- ── POSE: looking right ── -->
+      <g class="pose pose-right">
+        <rect x="22" y="35" width="12" height="10" fill="#d8e3d8"/>
+        <rect x="46" y="35" width="12" height="10" fill="#d8e3d8"/>
+        <rect x="30" y="38" width="4" height="4" fill="#0a1f12"/>
+        <rect x="54" y="38" width="4" height="4" fill="#0a1f12"/>
+        <rect x="34" y="55" width="12" height="2" fill="#4ade80"/>
+      </g>
+
+      <!-- ── POSE: looking up (curious) ── -->
+      <g class="pose pose-up">
+        <rect x="22" y="35" width="12" height="10" fill="#d8e3d8"/>
+        <rect x="46" y="35" width="12" height="10" fill="#d8e3d8"/>
+        <rect x="26" y="35" width="4" height="4" fill="#0a1f12"/>
+        <rect x="50" y="35" width="4" height="4" fill="#0a1f12"/>
+        <rect x="34" y="55" width="12" height="2" fill="#4ade80"/>
+      </g>
+
+      <!-- ── POSE: blink (closed) ── -->
+      <g class="pose pose-blink">
+        <rect x="22" y="40" width="12" height="2" fill="#4ade80"/>
+        <rect x="46" y="40" width="12" height="2" fill="#4ade80"/>
+        <rect x="34" y="55" width="12" height="2" fill="#4ade80"/>
+      </g>
+
+      <!-- ── POSE: happy (eyes-up, ^^ smile) ── -->
+      <g class="pose pose-happy">
+        <!-- Happy eye arcs ^_^ — built from 3-rect arches -->
+        <rect x="24" y="40" width="2" height="2" fill="#4ade80"/>
+        <rect x="26" y="38" width="6" height="2" fill="#4ade80"/>
+        <rect x="32" y="40" width="2" height="2" fill="#4ade80"/>
+        <rect x="48" y="40" width="2" height="2" fill="#4ade80"/>
+        <rect x="50" y="38" width="6" height="2" fill="#4ade80"/>
+        <rect x="56" y="40" width="2" height="2" fill="#4ade80"/>
+        <!-- Big smile -->
+        <rect x="30" y="54" width="20" height="2" fill="#c5f04b"/>
+        <rect x="28" y="52" width="2"  height="2" fill="#c5f04b"/>
+        <rect x="50" y="52" width="2"  height="2" fill="#c5f04b"/>
+      </g>
+
+      <!-- ── POSE: thinking (eyes look up + dots) ── -->
+      <g class="pose pose-think">
+        <rect x="22" y="35" width="12" height="10" fill="#d8e3d8"/>
+        <rect x="46" y="35" width="12" height="10" fill="#d8e3d8"/>
+        <rect x="28" y="35" width="4" height="4" fill="#0a1f12"/>
+        <rect x="52" y="35" width="4" height="4" fill="#0a1f12"/>
+        <rect x="34" y="55" width="12" height="2" fill="#4ade80"/>
+        <!-- thought dots -->
+        <rect x="30" y="60" width="3" height="3" fill="#c5f04b"/>
+        <rect x="38" y="60" width="3" height="3" fill="#c5f04b"/>
+        <rect x="46" y="60" width="3" height="3" fill="#c5f04b"/>
+      </g>
+
+      <!-- ── POSE: error (X eyes, frown) ── -->
+      <g class="pose pose-err">
+        <rect x="22" y="35" width="12" height="10" fill="#d8e3d8"/>
+        <rect x="46" y="35" width="12" height="10" fill="#d8e3d8"/>
+        <!-- X over left eye -->
+        <rect x="24" y="36" width="2" height="2" fill="#f87171"/>
+        <rect x="26" y="38" width="2" height="2" fill="#f87171"/>
+        <rect x="28" y="40" width="2" height="2" fill="#f87171"/>
+        <rect x="30" y="42" width="2" height="2" fill="#f87171"/>
+        <rect x="30" y="36" width="2" height="2" fill="#f87171"/>
+        <rect x="28" y="38" width="2" height="2" fill="#f87171"/>
+        <rect x="26" y="40" width="2" height="2" fill="#f87171"/>
+        <rect x="24" y="42" width="2" height="2" fill="#f87171"/>
+        <!-- X over right eye -->
+        <rect x="48" y="36" width="2" height="2" fill="#f87171"/>
+        <rect x="50" y="38" width="2" height="2" fill="#f87171"/>
+        <rect x="52" y="40" width="2" height="2" fill="#f87171"/>
+        <rect x="54" y="42" width="2" height="2" fill="#f87171"/>
+        <rect x="54" y="36" width="2" height="2" fill="#f87171"/>
+        <rect x="52" y="38" width="2" height="2" fill="#f87171"/>
+        <rect x="50" y="40" width="2" height="2" fill="#f87171"/>
+        <rect x="48" y="42" width="2" height="2" fill="#f87171"/>
+        <!-- Frown -->
+        <rect x="34" y="56" width="12" height="2" fill="#f87171"/>
+        <rect x="32" y="58" width="2"  height="2" fill="#f87171"/>
+        <rect x="46" y="58" width="2"  height="2" fill="#f87171"/>
+      </g>
+
+      <!-- ── POSE: work (typing — focused eyes + small mouth, gear icon) ── -->
+      <g class="pose pose-work">
+        <rect x="22" y="35" width="12" height="10" fill="#d8e3d8"/>
+        <rect x="46" y="35" width="12" height="10" fill="#d8e3d8"/>
+        <rect x="26" y="38" width="4" height="4" fill="#0a1f12" class="work-eye-l"/>
+        <rect x="50" y="38" width="4" height="4" fill="#0a1f12" class="work-eye-r"/>
+        <!-- Determined mouth -->
+        <rect x="36" y="55" width="8" height="2" fill="#c5f04b"/>
+        <!-- gear/cog accent bottom-right -->
+        <rect x="52" y="60" width="2" height="2" fill="#c5f04b"/>
+        <rect x="56" y="60" width="2" height="2" fill="#c5f04b"/>
+        <rect x="54" y="58" width="2" height="2" fill="#c5f04b"/>
+        <rect x="54" y="62" width="2" height="2" fill="#c5f04b"/>
+      </g>
+
+      <!-- ── POSE: sleep (closed eyes + Z) ── -->
+      <g class="pose pose-sleep">
+        <rect x="22" y="40" width="12" height="2" fill="#4ade80"/>
+        <rect x="46" y="40" width="12" height="2" fill="#4ade80"/>
+        <rect x="34" y="55" width="12" height="2" fill="#1f3826"/>
+        <!-- Z's floating right -->
+        <rect x="58" y="28" width="6" height="2" fill="#c5f04b" class="zzz"/>
+        <rect x="62" y="30" width="2" height="2" fill="#c5f04b" class="zzz"/>
+        <rect x="60" y="32" width="2" height="2" fill="#c5f04b" class="zzz"/>
+        <rect x="58" y="34" width="6" height="2" fill="#c5f04b" class="zzz"/>
+      </g>
+
+      <!-- ── POSE: love (heart eyes) ── -->
+      <g class="pose pose-love">
+        <!-- left heart -->
+        <rect x="24" y="36" width="2" height="2" fill="#f87171"/>
+        <rect x="30" y="36" width="2" height="2" fill="#f87171"/>
+        <rect x="22" y="38" width="12" height="2" fill="#f87171"/>
+        <rect x="22" y="40" width="12" height="2" fill="#f87171"/>
+        <rect x="24" y="42" width="8" height="2" fill="#f87171"/>
+        <rect x="26" y="44" width="4" height="2" fill="#f87171"/>
+        <!-- right heart -->
+        <rect x="48" y="36" width="2" height="2" fill="#f87171"/>
+        <rect x="54" y="36" width="2" height="2" fill="#f87171"/>
+        <rect x="46" y="38" width="12" height="2" fill="#f87171"/>
+        <rect x="46" y="40" width="12" height="2" fill="#f87171"/>
+        <rect x="48" y="42" width="8" height="2" fill="#f87171"/>
+        <rect x="50" y="44" width="4" height="2" fill="#f87171"/>
+        <rect x="30" y="54" width="20" height="2" fill="#c5f04b"/>
+      </g>
+
+      <!-- ── POSE: wow (surprised — wide eyes + O mouth) ── -->
+      <g class="pose pose-wow">
+        <rect x="20" y="33" width="14" height="14" fill="#d8e3d8"/>
+        <rect x="46" y="33" width="14" height="14" fill="#d8e3d8"/>
+        <rect x="24" y="37" width="6" height="6" fill="#0a1f12"/>
+        <rect x="50" y="37" width="6" height="6" fill="#0a1f12"/>
+        <!-- O mouth -->
+        <rect x="36" y="54" width="8" height="2" fill="#0a1f12"/>
+        <rect x="34" y="56" width="2" height="4" fill="#0a1f12"/>
+        <rect x="44" y="56" width="2" height="4" fill="#0a1f12"/>
+        <rect x="36" y="60" width="8" height="2" fill="#0a1f12"/>
+      </g>
+
+      <!-- ── ARMS (overlay, animatable) ── -->
+      <g class="arms" id="arms">
+        <!-- Default position: small stub arms tucked at sides -->
+        <rect class="arm-l" x="6"  y="50" width="2" height="6" fill="#1f3826"/>
+        <rect class="arm-r" x="72" y="50" width="2" height="6" fill="#1f3826"/>
+        <!-- Hand pixels -->
+        <rect class="arm-l-hand" x="6"  y="54" width="2" height="2" fill="#15803d"/>
+        <rect class="arm-r-hand" x="72" y="54" width="2" height="2" fill="#15803d"/>
+      </g>
+
+      <!-- ── BODY STAND (neck + base) ── -->
+      <rect x="36" y="70" width="8" height="2" fill="#1f3826"/>
+      <rect x="32" y="72" width="16" height="2" fill="#15803d"/>
+      <rect x="32" y="72" width="16" height="1" fill="#22c55e"/>
+
+      <!-- ── FEET (chunkier with toe detail) ── -->
+      <rect x="22" y="74" width="10" height="4" fill="#1f3826"/>
+      <rect x="48" y="74" width="10" height="4" fill="#1f3826"/>
+      <!-- toe highlights -->
+      <rect x="22" y="74" width="10" height="1" fill="#15803d"/>
+      <rect x="48" y="74" width="10" height="1" fill="#15803d"/>
+      <!-- toe gaps (between toes) -->
+      <rect x="26" y="76" width="1" height="2" fill="#0a1f12"/>
+      <rect x="29" y="76" width="1" height="2" fill="#0a1f12"/>
+      <rect x="52" y="76" width="1" height="2" fill="#0a1f12"/>
+      <rect x="55" y="76" width="1" height="2" fill="#0a1f12"/>
+
+      <!-- ── GROUND SHADOW (dotted) ── -->
+      <rect x="20" y="78" width="2" height="1" fill="rgba(0,0,0,0.35)" class="ground"/>
+      <rect x="24" y="78" width="6" height="1" fill="rgba(0,0,0,0.4)" class="ground"/>
+      <rect x="32" y="78" width="16" height="1" fill="rgba(0,0,0,0.45)" class="ground"/>
+      <rect x="50" y="78" width="6" height="1" fill="rgba(0,0,0,0.4)" class="ground"/>
+      <rect x="58" y="78" width="2" height="1" fill="rgba(0,0,0,0.35)" class="ground"/>
+    </svg>
+    <!-- mascot pip removed -->
+
+  </div>
+
+  <div class="titlebar">
+    <div class="tb-brand-cell">
+      <span class="tb-dot" id="dot"></span>
+      <span class="tb-brand">browy</span>
+      <span class="tb-tag" id="modeTag" title="Current chat">// browser agent</span>
+    </div>
+    <div class="tb-ctrls">
+      <button class="tb-btn tb-stop danger" id="stopBtn" title="Stop generation (Esc)">
+        ■<span class="lbl">stop</span>
+      </button>
+      <button class="tb-btn" id="newChatBtn" title="Start a new chat (saves the current one to history)">
+        <svg class="tb-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M3 3h7l3 3v7a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/>
+          <path d="M8 7v4M6 9h4"/>
+        </svg>
+      </button>
+      <button class="tb-btn" id="chatsBtn" title="Open past chats">
+        <svg class="tb-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M2 4h12M2 8h12M2 12h8"/>
+        </svg>
+      </button>
+      <button class="tb-btn" id="settingsBtn" title="Control panel — browsers, model, settings">
+        <svg class="tb-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true">
+          <path d="M9.4 1.5h-2.8l-.4 1.8a4.7 4.7 0 0 0-1.4.8l-1.7-.7-1.4 2.4 1.4 1.2a4.7 4.7 0 0 0 0 1.6l-1.4 1.2 1.4 2.4 1.7-.7c.43.34.9.6 1.4.8l.4 1.8h2.8l.4-1.8c.5-.2.97-.46 1.4-.8l1.7.7 1.4-2.4-1.4-1.2a4.7 4.7 0 0 0 0-1.6l1.4-1.2-1.4-2.4-1.7.7a4.7 4.7 0 0 0-1.4-.8L9.4 1.5z"/>
+          <circle cx="8" cy="8" r="1.9"/>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <div class="infobar">
+    <span class="ib-browser" id="brand">—</span>
+    <span class="ib-tabs" id="tabs">0 tabs</span>
+    <span class="ib-sep">│</span>
+    <span class="ib-ttl" id="ttl" title="">connecting…</span>
+    <span class="ib-host" id="host"></span>
+    <span class="ib-browsers" id="browsersChip" title="Connected / installed browsers (open settings to launch)">
+      <span class="ib-bcount" id="browsersCount">0</span>/<span id="browsersTotal">0</span>
+    </span>
+  </div>
+
+  <div class="panel">
+
+    <div class="msgs" id="msgs">
+      <div class="empty" id="empty">
+        <div class="greet">browy</div>
+        <div class="hint">// type below</div>
+      </div>
+    </div>
+
+    <div class="inp-row" id="inpRow">
+      <div class="field">
+        <span class="prompt">&gt;</span>
+        <textarea id="inp" rows="1" placeholder="ask browy…" autofocus></textarea>
+      </div>
+      <button class="send" id="goBtn" disabled>↵</button>
+    </div>
+
+    <!-- Past-chats overlay (slides in over .panel) -->
+    <div class="chats-overlay" id="chatsOverlay" aria-hidden="true">
+      <div class="chats-head">
+        <span class="title"><b>chats</b> // history</span>
+        <button class="close-x" id="chatsCloseBtn" title="Back to current chat">×</button>
+      </div>
+      <div class="chats-search">
+        <input type="text" id="chatsSearch" placeholder="filter chats…" autocomplete="off" spellcheck="false" />
+      </div>
+      <div class="chats-list" id="chatsList"></div>
+      <div class="chats-foot">
+        <button id="chatsNewBtn" title="Start a brand new chat">+ new chat</button>
+        <span class="spacer"></span>
+        <span class="hint" id="chatsHint">0 chats</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="sidepanel.js"></script>
+</body>
+</html>

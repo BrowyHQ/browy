@@ -1,0 +1,31 @@
+PackageIdentifier: Browy.Browy
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: Browy HQ
+PublisherUrl: https://github.com/browyhq
+PublisherSupportUrl: https://github.com/browyhq/browy/issues
+Author: Browy HQ
+PackageName: Browy
+PackageUrl: https://github.com/browyhq/browy
+License: Apache-2.0
+LicenseUrl: https://github.com/browyhq/browy/blob/main/LICENSE
+Copyright: Copyright (c) 2026 Browy HQ
+ShortDescription: AI agent that lives in your browser DevTools side panel.
+Description: |-
+  Browy is an open-source AI assistant that runs as a Chrome/Edge/Brave
+  extension paired with a small native helper. It can inspect the DOM,
+  read console + network logs, take screenshots, and automate clicks and
+  navigation across your existing browser session.
+Moniker: browy
+Tags:
+- ai
+- agent
+- automation
+- browser
+- chrome-extension
+- copilot
+- devtools
+- llm
+ReleaseNotes: See https://github.com/browyhq/browy/releases
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0
