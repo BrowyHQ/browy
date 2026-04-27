@@ -291,7 +291,7 @@ function cmdTheme(arg) {
 }
 
 function cmdFeedback() {
-  const url = 'https://github.com/copilot-extensions/browy/issues/new';
+  const url = 'https://github.com/BrowyHQ/browy/issues/new';
   try { chrome.tabs.create({ url }); } catch {}
   appendRow('info', '→', url);
 }

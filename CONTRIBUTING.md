@@ -5,7 +5,7 @@ Thanks for being interested! Browy is in **0.1.0 preview** — the API surface i
 ## Quick start
 
 ```bash
-git clone https://github.com/ritabratamaiti/browy
+git clone https://github.com/BrowyHQ/browy
 cd browy
 npm install
 npm run build
@@ -50,3 +50,4 @@ By contributing you agree your contributions are licensed under [Apache-2.0](LIC
 ## Questions
 
 Open a discussion or ping the maintainer in an issue.
+

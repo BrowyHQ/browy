@@ -128,7 +128,7 @@ Full tool reference + JSON schemas: read [`src/agent/loop.ts`](agent/loop.ts) â€
 ### One-time setup
 
 ```bash
-git clone https://github.com/ritabratamaiti/browy
+git clone https://github.com/BrowyHQ/browy
 cd browy
 npm install
 npm run build
@@ -275,3 +275,4 @@ Each produces an artifact in `release/`. The Windows installer registers the nat
 ## Contributing
 
 See [`../CONTRIBUTING.md`](../CONTRIBUTING.md).
+

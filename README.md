@@ -19,12 +19,12 @@ There are two surfaces you can talk to Browy from:
 
 **Windows** (recommended for first install — bundles Node):
 ```powershell
-irm https://github.com/ritabratamaiti/browy/releases/latest/download/install.ps1 | iex
+irm https://github.com/BrowyHQ/browy/releases/latest/download/install.ps1 | iex
 ```
 
 **macOS / Linux**:
 ```bash
-curl -fsSL https://github.com/ritabratamaiti/browy/releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/BrowyHQ/browy/releases/latest/download/install.sh | bash
 ```
 
 After install, load `extension/` as an unpacked extension at `chrome://extensions` (Developer Mode → Load unpacked → pick the folder the installer printed). Pin the toolbar icon, click it to open the side panel.
@@ -105,3 +105,4 @@ Found a vulnerability? See [SECURITY.md](SECURITY.md). Please **don't** open a p
 ## License
 
 Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+

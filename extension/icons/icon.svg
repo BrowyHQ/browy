@@ -1,0 +1,50 @@
+<!--
+  Browy icon — simplified mascot for browser/org use.
+  64x64 grid, 4px units. Reads cleanly at 16/32/48/128.
+  Solid background fill so the icon is fully visible against any browser theme.
+  Color palette matches the in-app mascot (greens #22c55e / #15803d, dark #0a1f12).
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" shape-rendering="crispEdges">
+  <!-- Solid dark backdrop with rounded corners (pixel-style) -->
+  <rect x="2"  y="0"  width="60" height="2"  fill="#0a1f12"/>
+  <rect x="0"  y="2"  width="64" height="60" fill="#0a1f12"/>
+  <rect x="2"  y="62" width="60" height="2"  fill="#0a1f12"/>
+
+  <!-- Antenna bulb (top center) — single bright pixel cluster -->
+  <rect x="28" y="6"  width="8"  height="2" fill="#4ade80"/>
+  <rect x="26" y="8"  width="12" height="4" fill="#4ade80"/>
+  <rect x="28" y="12" width="8"  height="2" fill="#4ade80"/>
+  <!-- Bulb shine -->
+  <rect x="28" y="8"  width="2"  height="2" fill="#a3f3b8"/>
+  <!-- Antenna stalk -->
+  <rect x="30" y="14" width="4"  height="4" fill="#22c55e"/>
+  <rect x="30" y="18" width="4"  height="2" fill="#15803d"/>
+
+  <!-- Head bezel: bright top edge → main green body -->
+  <rect x="10" y="20" width="44" height="2"  fill="#22c55e"/>
+  <rect x="8"  y="22" width="48" height="2"  fill="#22c55e"/>
+  <rect x="6"  y="24" width="52" height="28" fill="#15803d"/>
+  <rect x="8"  y="52" width="48" height="2"  fill="#15803d"/>
+  <rect x="10" y="54" width="44" height="2"  fill="#0a1f12"/>
+
+  <!-- Side knobs (volume) -->
+  <rect x="4"  y="32" width="2"  height="4" fill="#1f3826"/>
+  <rect x="4"  y="40" width="2"  height="4" fill="#1f3826"/>
+  <rect x="58" y="32" width="2"  height="4" fill="#1f3826"/>
+  <rect x="58" y="40" width="2"  height="4" fill="#1f3826"/>
+
+  <!-- CRT screen (dark inset) -->
+  <rect x="12" y="26" width="40" height="22" fill="#0a1f12"/>
+  <!-- Subtle scanline inside -->
+  <rect x="12" y="36" width="40" height="1"  fill="#15803d" opacity="0.18"/>
+
+  <!-- Eyes — two bright lime squares -->
+  <rect x="20" y="32" width="6" height="6" fill="#4ade80"/>
+  <rect x="38" y="32" width="6" height="6" fill="#4ade80"/>
+  <!-- Eye shine pixels -->
+  <rect x="20" y="32" width="2" height="2" fill="#d8ffe7"/>
+  <rect x="38" y="32" width="2" height="2" fill="#d8ffe7"/>
+
+  <!-- Smile line (single pixel row, centered, friendly) -->
+  <rect x="26" y="44" width="12" height="2" fill="#22c55e"/>
+</svg>
