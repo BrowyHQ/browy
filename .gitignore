@@ -18,5 +18,10 @@ copilot-test-*.txt
 *-stdout.log
 
 # Bundled runtime fetched at dist time
-build-resources/node.exe
+build-resources/
 
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
