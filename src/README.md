@@ -21,10 +21,10 @@ If you want to **use** Browy, see the [main README](../README.md). This document
 └─────────────────────┬────────────────────────┘
                       │  stdio (4-byte LE length + JSON)
                       ▼
-┌─────────────── native-host.js ───────────────┐
-│  src/transports/native-messaging.ts          │
-│  ─────────────────────────────────────────   │
-│            ┌── Agent (src/agent/loop.ts) ──┐ │
+┌─────────────── native-host.js ────────────────┐
+│  src/transports/native-messaging.ts           │
+│  ─────────────────────────────────────────    │
+│            ┌── Agent (src/agent/loop.ts) ──┐  │
 │            │                                │ │
 │            │  copilotClient ─ @github/      │ │
 │            │      copilot-sdk session       │ │
@@ -42,9 +42,9 @@ If you want to **use** Browy, see the [main README](../README.md). This document
 │                                               │
 │  Chrome via chrome.debugger ←── CDP ──┐       │
 │                                       ▼       │
-│                              extension-context │
-│                              (tab focus,       │
-│                               viewport, ...)   │
+│                              extension-context│
+│                              (tab focus,      │
+│                               viewport, ...)  │
 └───────────────────────────────────────────────┘
 ```
 
