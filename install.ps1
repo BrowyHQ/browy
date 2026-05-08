@@ -88,7 +88,16 @@ try {
         throw "install-host failed (exit $LASTEXITCODE)"
     }
 
-    $extensionDir = Join-Path $installDir 'extension'
+    # 6. Copy the extension to Downloads so the user can Load unpacked from a
+    # folder they can actually find. Refreshed on every install so it stays in
+    # sync with the host. Chrome's unpacked-extension entry points at THIS path.
+    $downloadsDir = Join-Path $env:USERPROFILE 'Downloads'
+    if (-not (Test-Path $downloadsDir)) { New-Item -ItemType Directory -Path $downloadsDir -Force | Out-Null }
+    $extensionDir = Join-Path $downloadsDir 'Browy-Extension'
+    if (Test-Path $extensionDir) { Remove-Item $extensionDir -Recurse -Force -ErrorAction SilentlyContinue }
+    New-Item -ItemType Directory -Path $extensionDir -Force | Out-Null
+    Copy-Item -Path (Join-Path $installDir 'extension\*') -Destination $extensionDir -Recurse -Force
+
     Write-Host ""
     Write-Host "✓ Browy $version installed to $installDir" -ForegroundColor Green
     Write-Host ""
@@ -99,7 +108,7 @@ try {
     Write-Host "     $extensionDir" -ForegroundColor Yellow
     Write-Host "  4. Pin Browy and click it to open the side panel"
     Write-Host ""
-    Write-Host "To uninstall: & '$installDir\uninstall.bat'; Remove-Item '$installDir' -Recurse"
+    Write-Host "To uninstall: & '$installDir\uninstall.bat'; Remove-Item '$installDir','$extensionDir' -Recurse"
 
     if (-not $env:BROWY_NO_OPEN -and (Test-Path $extensionDir)) {
         try {

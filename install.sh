@@ -88,8 +88,21 @@ tar -xzf "$TARBALL" -C "$INSTALL_DIR" --strip-components=1
 echo "Browy: registering native messaging host..."
 "$INSTALL_DIR/node" "$INSTALL_DIR/dist/cli-bin.js" install-host
 
-# 7. Done
-EXT_DIR="$INSTALL_DIR/extension"
+# 7. Copy the extension to ~/Downloads so the user can Load unpacked from a
+#    folder they can actually find. Refreshed every install so it stays in
+#    sync with the host. Chrome's unpacked-extension entry points at THIS path.
+DOWNLOADS_DIR="$HOME/Downloads"
+if command -v xdg-user-dir >/dev/null 2>&1; then
+  _xdg="$(xdg-user-dir DOWNLOAD 2>/dev/null || true)"
+  [ -n "$_xdg" ] && DOWNLOADS_DIR="$_xdg"
+fi
+mkdir -p "$DOWNLOADS_DIR"
+EXT_DIR="$DOWNLOADS_DIR/Browy-Extension"
+rm -rf "$EXT_DIR"
+mkdir -p "$EXT_DIR"
+cp -R "$INSTALL_DIR/extension/." "$EXT_DIR/"
+
+# 8. Done
 echo ""
 echo "✓ Browy $BROWY_VERSION installed to $INSTALL_DIR"
 echo ""
@@ -100,9 +113,9 @@ echo "  3. Click 'Load unpacked' and select:"
 echo "     $EXT_DIR"
 echo "  4. Pin Browy and click it to open the side panel"
 echo ""
-echo "To uninstall:  $INSTALL_DIR/uninstall.sh && rm -rf $INSTALL_DIR"
+echo "To uninstall:  $INSTALL_DIR/uninstall.sh && rm -rf $INSTALL_DIR $EXT_DIR"
 
-# 8. Optionally open the folder + chrome://extensions for the user.
+# 9. Optionally open the folder + chrome://extensions for the user.
 if [ -z "${BROWY_NO_OPEN:-}" ] && [ -d "$EXT_DIR" ]; then
   if [ "$uname_s" = "Darwin" ]; then
     open "$EXT_DIR" 2>/dev/null || true
