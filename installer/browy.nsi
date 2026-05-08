@@ -6,6 +6,7 @@
 ;     node.exe
 ;     dist\
 ;     node_modules\
+;     extension\          (browser extension — load unpacked from here)
 ;     package.json
 ;     uninstall.exe
 ;
@@ -17,7 +18,7 @@
 !define APP_NAME       "Browy"
 !define APP_PUBLISHER  "Ritabrata Maiti"
 !define APP_VERSION    "0.1.0"
-!define APP_URL        "https://github.com/ritabratamaiti/browy"
+!define APP_URL        "https://github.com/BrowyHQ/browy"
 !define UNINST_KEY     "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
 
 Name "${APP_NAME} ${APP_VERSION}"
@@ -42,9 +43,21 @@ VIAddVersionKey "LegalCopyright"  "Copyright (c) Ritabrata Maiti"
 !include "MUI2.nsh"
 
 !define MUI_ABORTWARNING
-!define MUI_FINISHPAGE_TEXT "Browy is installed.$\r$\n$\r$\nNext steps:$\r$\n  1. Install the Browy extension from the Chrome Web Store$\r$\n  2. Open the side panel and sign in to GitHub Copilot"
-!define MUI_FINISHPAGE_LINK "Get the browser extension"
-!define MUI_FINISHPAGE_LINK_LOCATION "${APP_URL}#install"
+!define MUI_FINISHPAGE_TITLE "Browy is installed"
+!define MUI_FINISHPAGE_TEXT "The Browy backend is registered with Chrome / Edge / Brave.$\r$\n$\r$\nTo finish, install the browser extension:$\r$\n  1. Open chrome://extensions$\r$\n  2. Enable 'Developer mode' (top-right)$\r$\n  3. Click 'Load unpacked' and select:$\r$\n     $INSTDIR\extension$\r$\n  4. Pin Browy and open the side panel"
+
+; Two clickable shortcuts on the Finish page.
+!define MUI_FINISHPAGE_RUN
+!define MUI_FINISHPAGE_RUN_FUNCTION OpenExtensionFolder
+!define MUI_FINISHPAGE_RUN_TEXT "Open the extension folder in Explorer"
+
+!define MUI_FINISHPAGE_SHOWREADME ""
+!define MUI_FINISHPAGE_SHOWREADME_FUNCTION OpenChromeExtensions
+!define MUI_FINISHPAGE_SHOWREADME_TEXT "Open chrome://extensions"
+!define MUI_FINISHPAGE_SHOWREADME_NOTCHECKED
+
+!define MUI_FINISHPAGE_LINK "Browy on GitHub"
+!define MUI_FINISHPAGE_LINK_LOCATION "${APP_URL}"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -94,6 +107,17 @@ Section "Install"
 
   WriteUninstaller "$INSTDIR\uninstall.exe"
 SectionEnd
+
+; ── Finish-page button handlers ─────────────────────────────────────────
+Function OpenExtensionFolder
+  ExecShell "open" "$INSTDIR\extension"
+FunctionEnd
+
+Function OpenChromeExtensions
+  ; Try Chrome first (handles chrome:// natively); fall back to start-shell
+  ; which lets the OS pick the registered handler (Chrome / Edge / Brave).
+  ExecShell "open" "chrome://extensions"
+FunctionEnd
 
 ; ── Uninstall ───────────────────────────────────────────────────────────
 Section "Uninstall"

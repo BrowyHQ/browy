@@ -1,17 +1,18 @@
 ﻿# Browy installer for Windows (PowerShell).
 #
 # Usage:
-#   irm https://browy.dev/install.ps1 | iex
-#   irm https://raw.githubusercontent.com/browyhq/browy/main/install.ps1 | iex
+#   irm https://github.com/BrowyHQ/browy/releases/latest/download/install.ps1 | iex
 #
 # What it does:
 #   1. Downloads the latest Browy-<version>-win-x64.zip from GitHub Releases
-#   2. Extracts to %LOCALAPPDATA%\Browy\app\
+#   2. Extracts to %LOCALAPPDATA%\Browy\app\  (includes the browser extension)
 #   3. Registers the native messaging manifest for Chrome, Edge, Brave
+#   4. Opens Explorer + chrome://extensions so you can Load unpacked
 #
 # Override version:    $env:BROWY_VERSION = "0.2.1"; irm ... | iex
 # Override repo:       $env:BROWY_REPO = "youruser/yourfork"; irm ... | iex
 # Test local zip:      $env:BROWY_LOCAL_ZIP = "C:\path\Browy-x.zip"; irm ... | iex
+# Skip browser open:   $env:BROWY_NO_OPEN = "1"; irm ... | iex
 
 #Requires -Version 5.1
 $ErrorActionPreference = 'Stop'
@@ -62,7 +63,7 @@ try {
 
     # 4. Wipe known subdirs and extract
     if (Test-Path $installDir) {
-        foreach ($sub in 'dist','node_modules','node.exe','package.json','package-lock.json','install.bat','uninstall.bat','README.txt') {
+        foreach ($sub in 'dist','node_modules','extension','node.exe','package.json','package-lock.json','install.bat','uninstall.bat','README.txt') {
             $p = Join-Path $installDir $sub
             if (Test-Path $p) { Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue }
         }
@@ -87,14 +88,27 @@ try {
         throw "install-host failed (exit $LASTEXITCODE)"
     }
 
+    $extensionDir = Join-Path $installDir 'extension'
     Write-Host ""
     Write-Host "✓ Browy $version installed to $installDir" -ForegroundColor Green
     Write-Host ""
-    Write-Host "Next steps:"
-    Write-Host "  1. Install the Browy extension from the Chrome Web Store"
-    Write-Host "  2. Pin the extension and click it to open the side panel"
+    Write-Host "To finish setup, load the extension into Chrome / Edge / Brave:" -ForegroundColor Cyan
+    Write-Host "  1. Open chrome://extensions"
+    Write-Host "  2. Enable 'Developer mode' (top-right)"
+    Write-Host "  3. Click 'Load unpacked' and select:"
+    Write-Host "     $extensionDir" -ForegroundColor Yellow
+    Write-Host "  4. Pin Browy and click it to open the side panel"
     Write-Host ""
     Write-Host "To uninstall: & '$installDir\uninstall.bat'; Remove-Item '$installDir' -Recurse"
+
+    if (-not $env:BROWY_NO_OPEN -and (Test-Path $extensionDir)) {
+        try {
+            Start-Process explorer.exe $extensionDir
+            Start-Process 'chrome://extensions'
+        } catch {
+            # Non-fatal — user can navigate manually using the path printed above.
+        }
+    }
 } finally {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }

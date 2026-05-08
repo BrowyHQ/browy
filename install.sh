@@ -2,19 +2,20 @@
 # Browy installer for macOS and Linux.
 #
 # Usage:
-#   curl -fsSL https://browy.dev/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/browyhq/browy/main/install.sh | bash
+#   curl -fsSL https://github.com/BrowyHQ/browy/releases/latest/download/install.sh | bash
 #
 # What it does:
 #   1. Detects platform (darwin-x64, darwin-arm64, linux-x64, linux-arm64)
 #   2. Downloads the matching Browy-<version>-<target>.tar.gz from GitHub Releases
-#   3. Extracts to ~/.browy/app/
+#   3. Extracts to ~/.browy/app/  (includes the browser extension)
 #   4. Runs the bundled install-host to register the native messaging manifest
 #      for Chrome, Edge, and Brave.
+#   5. Opens the extension folder + chrome://extensions so you can Load unpacked.
 #
 # Override version: BROWY_VERSION=0.2.1 curl ... | bash
-# Override repo: BROWY_REPO=youruser/yourfork curl ... | bash
-# Test/local mode: BROWY_LOCAL_TARBALL=/path/to/Browy-x.tar.gz bash install.sh
+# Override repo:    BROWY_REPO=youruser/yourfork curl ... | bash
+# Test/local mode:  BROWY_LOCAL_TARBALL=/path/to/Browy-x.tar.gz bash install.sh
+# Skip browser open: BROWY_NO_OPEN=1 curl ... | bash
 
 set -euo pipefail
 
@@ -76,8 +77,8 @@ pkill -f "browy.*native-host" 2>/dev/null || true
 # 5. Wipe previous install and extract
 mkdir -p "$INSTALL_DIR"
 # Only wipe known subdirs so we don't nuke a user-placed file by mistake
-rm -rf "$INSTALL_DIR/dist" "$INSTALL_DIR/node_modules" "$INSTALL_DIR/node" \
-       "$INSTALL_DIR/package.json" "$INSTALL_DIR/package-lock.json" \
+rm -rf "$INSTALL_DIR/dist" "$INSTALL_DIR/node_modules" "$INSTALL_DIR/extension" \
+       "$INSTALL_DIR/node" "$INSTALL_DIR/package.json" "$INSTALL_DIR/package-lock.json" \
        "$INSTALL_DIR/install.sh" "$INSTALL_DIR/uninstall.sh" "$INSTALL_DIR/README.txt"
 
 echo "Browy: extracting to $INSTALL_DIR"
@@ -88,12 +89,26 @@ echo "Browy: registering native messaging host..."
 "$INSTALL_DIR/node" "$INSTALL_DIR/dist/cli-bin.js" install-host
 
 # 7. Done
+EXT_DIR="$INSTALL_DIR/extension"
 echo ""
 echo "✓ Browy $BROWY_VERSION installed to $INSTALL_DIR"
 echo ""
-echo "Next steps:"
-echo "  1. Install the Browy extension from the Chrome Web Store"
-echo "     (or load extension/ unpacked from this repo)"
-echo "  2. Pin the extension and click it to open the side panel"
+echo "To finish setup, load the extension into Chrome / Edge / Brave:"
+echo "  1. Open chrome://extensions"
+echo "  2. Enable 'Developer mode' (top-right)"
+echo "  3. Click 'Load unpacked' and select:"
+echo "     $EXT_DIR"
+echo "  4. Pin Browy and click it to open the side panel"
 echo ""
 echo "To uninstall:  $INSTALL_DIR/uninstall.sh && rm -rf $INSTALL_DIR"
+
+# 8. Optionally open the folder + chrome://extensions for the user.
+if [ -z "${BROWY_NO_OPEN:-}" ] && [ -d "$EXT_DIR" ]; then
+  if [ "$uname_s" = "Darwin" ]; then
+    open "$EXT_DIR" 2>/dev/null || true
+    open "chrome://extensions" 2>/dev/null || true
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$EXT_DIR" >/dev/null 2>&1 || true
+    xdg-open "chrome://extensions" >/dev/null 2>&1 || true
+  fi
+fi

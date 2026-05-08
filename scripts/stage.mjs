@@ -101,6 +101,20 @@ if (exists(copilotPrebuilds) && prebuildName) {
   }
 }
 
+// 7.5 Bundle the browser extension at a stable path next to the host so the
+// installer can lay it down somewhere the user can `Load unpacked` from
+// without hunting through %TEMP% or downloading a separate zip.
+const extSrc = path.join(root, 'extension');
+if (exists(extSrc)) {
+  copyDir(extSrc, path.join(stage, 'extension'), (s) => {
+    const base = path.basename(s);
+    return base !== '.DS_Store' && base !== 'Thumbs.db';
+  });
+  log('extension → bundled');
+} else {
+  console.warn('[stage] WARNING: extension/ not found — installer will ship without it');
+}
+
 // 8. Drop a thin platform-appropriate installer wrapper into the bundle so
 // users can run a single command after extracting the archive.
 if (isWin) {
@@ -142,13 +156,15 @@ fs.writeFileSync(path.join(stage, 'README.txt'),
   '========================\n\n' +
   'Quick start:\n' +
   (isWin
-    ? '  1. Double-click install.bat\n'
-    : '  1. Run ./install.sh in this directory\n') +
-  '  2. Install the Browy extension from the Chrome Web Store\n' +
-  '     (or load extension/ unpacked from this archive)\n' +
-  '  3. Pin the extension and click it to open the side panel\n\n' +
+    ? '  1. Double-click install.bat to register the native host\n'
+    : '  1. Run ./install.sh in this directory to register the native host\n') +
+  '  2. Open chrome://extensions in Chrome or Edge\n' +
+  '  3. Enable "Developer mode" (top-right toggle)\n' +
+  '  4. Click "Load unpacked" and select the extension/ folder next to\n' +
+  '     this README\n' +
+  '  5. Pin the Browy extension and click it to open the side panel\n\n' +
   'Uninstall: run ' + (isWin ? 'uninstall.bat' : './uninstall.sh') + '\n' +
-  'Source & docs: https://github.com/browyhq/browy\n');
+  'Source & docs: https://github.com/BrowyHQ/browy\n');
 
 // 9. Final size report
 function dirSize(p) {
