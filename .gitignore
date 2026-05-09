@@ -25,3 +25,19 @@ build-resources/
 .idea/
 *.swp
 Thumbs.db
+
+# Local plans / notes / scratch — never check in. Pre-public audit.
+plan.md
+PLAN.md
+TODO.md
+TODOS.md
+NOTES.md
+SCRATCH.md
+WIP.md
+DRAFT.md
+DEMO_SCRIPT.md
+SCREENSHOT_SHOTLIST.md
+*-architecture.md
+.copilot/
+.session/
+*.local.md
