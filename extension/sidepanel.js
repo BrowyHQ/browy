@@ -631,7 +631,7 @@ function handle(m) {
     // Auth state is shown ONLY as an inline red error bubble when a real
     // chat fails with an auth code. Probe-driven advisories are ignored.
     if (m._fromError && m.state === 'unauth') {
-      addBub('a err', `⚠ ${m.detail || 'github copilot needs sign-in. run \`copilot\` in a terminal to authenticate.'}`);
+      addAuthErrorBubble(m.detail);
     }
   }
   // launch_result, active_browsers, models_list, current_model are handled
@@ -836,6 +836,36 @@ function addBub(role, text) {
   } else {
     d.innerHTML = renderMd(text);
   }
+  msgs.scrollTop = msgs.scrollHeight;
+  return d;
+}
+
+// Auth-error bubble with an inline "Sign in" CTA. Clicking the button
+// triggers auth.signin → native host opens a terminal running the
+// `copilot` CLI device flow. After the user completes sign-in, the next
+// chat send works and clearAuthBannerOnSuccess fires.
+function addAuthErrorBubble(detail) {
+  const d = addBub('a err', `⚠ ${detail || 'GitHub Copilot needs sign-in to chat.'}`);
+  if (!d) return;
+  const row = document.createElement('div');
+  row.style.cssText = 'margin-top:8px; display:flex; gap:8px; align-items:center; flex-wrap:wrap;';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = 'Sign in to GitHub Copilot';
+  btn.style.cssText = 'background:var(--accent,#4ade80); color:#0a1f12; border:none; border-radius:4px; padding:6px 12px; font-family:inherit; font-size:12px; font-weight:600; cursor:pointer; text-transform:uppercase; letter-spacing:0.04em;';
+  btn.addEventListener('click', () => {
+    browyPost({ type: 'auth.signin' });
+    btn.disabled = true;
+    btn.textContent = 'Opening sign-in terminal…';
+    btn.style.opacity = '0.6';
+    btn.style.cursor = 'default';
+    const hint = document.createElement('span');
+    hint.textContent = 'Complete sign-in there, then send your message again.';
+    hint.style.cssText = 'font-size:11px; opacity:0.75;';
+    row.appendChild(hint);
+  });
+  row.appendChild(btn);
+  d.appendChild(row);
   msgs.scrollTop = msgs.scrollHeight;
 }
 
