@@ -4,11 +4,16 @@
 
 **Please do not open a public GitHub issue for security vulnerabilities.**
 
-Email `security@<TODO-domain>` (or DM the maintainer on GitHub) with:
+Use GitHub's private vulnerability reporting instead:
+👉 https://github.com/BrowyHQ/browy/security/advisories/new
+
+Include:
 - A description of the issue
 - Steps to reproduce
-- Affected version (`browy --version` or check `package.json`)
+- Affected version (check `package.json` or the GitHub release tag)
 - Your assessment of severity
+
+If GitHub advisories are unavailable, DM the maintainer on GitHub.
 
 We aim to acknowledge reports within 72 hours and to ship a fix or workaround within 14 days for high-severity issues.
 

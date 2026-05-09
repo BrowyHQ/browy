@@ -2,9 +2,9 @@
 
 > A pixel-art Copilot for your browser — drag the mascot anywhere, ask it to do something, watch it drive your real tabs.
 
-![Browy hero shot — replace with screenshots/hero.png](docs/screenshots/hero.png)
+<!-- TODO: add docs/screenshots/hero.png after first public demo -->
 
-Browy is a Chromium extension (Chrome / Edge / Brave) backed by a small Node native-messaging host that wraps the [GitHub Copilot SDK](https://www.npmjs.com/package/@github/copilot-sdk) and drives the page through the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) via `chrome.debugger`. It works against your **real** profile — your cookies, your sessions, your logins — so most "log in to do X" tasks just work.
+Browy isa Chromium extension (Chrome / Edge / Brave) backed by a small Node native-messaging host that wraps the [GitHub Copilot SDK](https://www.npmjs.com/package/@github/copilot-sdk) and drives the page through the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) via `chrome.debugger`. It works against your **real** profile — your cookies, your sessions, your logins — so most "log in to do X" tasks just work.
 
 There are two surfaces you can talk to Browy from:
 
