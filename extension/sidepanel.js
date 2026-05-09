@@ -413,7 +413,37 @@ const wsShim = {
 // the extension was reloaded and our chrome.runtime context is stale → reload
 // the side panel page itself so we get a fresh context.
 let reconnectAttempts = 0;
-const RELOAD_AFTER_FAILURES = 3;
+const RELOAD_AFTER_FAILURES = 5;
+const INSTALL_PS1_URL = 'https://github.com/BrowyHQ/browy/releases/latest/download/install.ps1';
+const INSTALL_SH_URL = 'https://github.com/BrowyHQ/browy/releases/latest/download/install.sh';
+
+// Reconnect / host-loss banner shown above the chat panel.
+function showConnBanner(text, opts = {}) {
+  const el = document.getElementById('connBanner');
+  const txt = document.getElementById('connBannerText');
+  const act = document.getElementById('connBannerAction');
+  if (!el || !txt || !act) return;
+  txt.textContent = text;
+  act.innerHTML = '';
+  if (opts.action) {
+    const a = document.createElement('a');
+    a.textContent = opts.action.label;
+    a.href = opts.action.href || '#';
+    if (opts.action.href) {
+      a.target = '_blank';
+      a.rel = 'noopener noreferrer';
+    } else if (opts.action.onClick) {
+      a.addEventListener('click', (e) => { e.preventDefault(); opts.action.onClick(); });
+    }
+    act.appendChild(a);
+  }
+  el.classList.toggle('warn', !!opts.warn);
+  el.classList.add('show');
+}
+function hideConnBanner() {
+  const el = document.getElementById('connBanner');
+  if (el) el.classList.remove('show');
+}
 
 function isExtensionContextInvalidated() {
   // chrome.runtime.id is undefined once the extension's context is invalidated.
@@ -461,6 +491,7 @@ function connect() {
   bgPort.onMessage.addListener((raw) => {
     if (raw.type === '__host_ready') {
       reconnectAttempts = 0;
+      hideConnBanner();
       setLive(true); setError(false); brand.textContent = '·';
       try {
         const hint = document.querySelector('#empty .hint');
@@ -489,6 +520,16 @@ function connect() {
         if (hint) hint.textContent = '// offline — check that the browy backend is installed and running';
         setOnlineControls(false);
         if (typeof closeChatsOverlay === 'function') closeChatsOverlay();
+        if (raw.type === '__host_missing') {
+          showConnBanner('Browy host not installed.', {
+            action: { label: 'Install →', href: INSTALL_PS1_URL },
+          });
+        } else {
+          showConnBanner('Host disconnected. Retrying…', {
+            warn: true,
+            action: { label: 'Reinstall →', href: INSTALL_PS1_URL },
+          });
+        }
       } catch {}
       return;
     }
@@ -497,7 +538,7 @@ function connect() {
       // Safety net: any real message from the host proves it's alive, so
       // make sure the online controls reflect that even if __host_ready
       // was somehow missed during a fast SW restart.
-      try { setOnlineControls(true); } catch {}
+      try { setOnlineControls(true); hideConnBanner(); } catch {}
       refreshActiveTab();
       flushPendingHostMsgs();
       return;
@@ -518,13 +559,20 @@ function connect() {
     }
     reconnectAttempts++;
     if (reconnectAttempts >= RELOAD_AFTER_FAILURES) {
-      // Repeated disconnects → likely stale context that just hasn't
-      // surfaced as `id===undefined` yet. Reload to be safe.
-      try { location.reload(); } catch {}
+      // After RELOAD_AFTER_FAILURES failures, surface a reinstall CTA
+      // instead of silently page-reloading. The user almost certainly
+      // has a broken host install at this point.
+      showConnBanner(`Host unreachable after ${RELOAD_AFTER_FAILURES} retries.`, {
+        action: { label: 'Reinstall host →', href: INSTALL_PS1_URL },
+      });
       return;
     }
+    showConnBanner(
+      `Host disconnected — reconnecting (${reconnectAttempts}/${RELOAD_AFTER_FAILURES})…`,
+      { warn: true }
+    );
     // Quick first retry; back off if it keeps failing.
-    const delay = reconnectAttempts === 1 ? 500 : 2000;
+    const delay = reconnectAttempts === 1 ? 500 : Math.min(2000 * reconnectAttempts, 8000);
     setTimeout(connect, delay);
   });
 }

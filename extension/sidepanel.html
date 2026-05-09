@@ -188,6 +188,31 @@
     }
     body.focused .infobar { /* legacy no-op — infobar is always solid now */ }
 
+    /* Connection banner — appears only during reconnect cycle / fatal host loss */
+    .conn-banner {
+      flex: 0 0 auto;
+      display: none;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      font-family: var(--mono);
+      font-size: 10.5px;
+      letter-spacing: 0.04em;
+      border-bottom: 1px solid var(--line);
+      background: rgba(248, 113, 113, 0.10);
+      color: var(--err);
+    }
+    .conn-banner.show { display: flex; }
+    .conn-banner.warn { background: rgba(250, 204, 21, 0.10); color: #facc15; }
+    .conn-banner .cb-spinner {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: currentColor; opacity: 0.5;
+      animation: cbpulse 0.8s steps(2) infinite;
+    }
+    @keyframes cbpulse { 0%,100% { opacity: 0.3; } 50% { opacity: 0.9; } }
+    .conn-banner a { color: inherit; text-decoration: underline; cursor: pointer; }
+    .conn-banner .cb-spacer { flex: 1; }
+
     .ib-browser {
       color: var(--green); text-transform: uppercase; letter-spacing: 0.06em;
       font-weight: 700; font-size: 10px;
@@ -1035,6 +1060,13 @@
     <span class="ib-browsers" id="browsersChip" title="Connected / installed browsers (open settings to launch)">
       <span class="ib-bcount" id="browsersCount">0</span>/<span id="browsersTotal">0</span>
     </span>
+  </div>
+
+  <div class="conn-banner" id="connBanner" role="status" aria-live="polite">
+    <span class="cb-spinner" aria-hidden="true"></span>
+    <span id="connBannerText">host disconnected — reconnecting…</span>
+    <span class="cb-spacer"></span>
+    <span id="connBannerAction"></span>
   </div>
 
   <div class="panel">
