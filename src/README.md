@@ -63,7 +63,6 @@ src/
 │   ├── foreground.ts      ← OS focus detection (which Chromium window is on top)
 │   ├── llm.ts             ← optional standalone LLM bridge (legacy)
 │   ├── page-snapshot.ts   ← indexed [N] page snapshot (the model's "eyes")
-│   ├── redact.ts          ← scrub secrets/tokens from logs and tool outputs
 │   └── runner.ts          ← per-port lifecycle, message routing
 └── transports/
     ├── native-messaging.ts ← stdio length-prefixed JSON framer

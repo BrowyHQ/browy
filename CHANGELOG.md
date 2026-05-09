@@ -4,6 +4,14 @@ All notable changes to Browy will be documented in this file. The format follows
 
 ## [Unreleased]
 
+### Removed
+- Automatic secret-redaction filter for console/network/log surfaces.
+  Browy now passes URLs, headers, and console text through unchanged.
+  You — not Browy — decide what to share with the agent. This restores
+  full power-user workflows like pasting API keys into chat to test
+  backends, inspecting `Authorization` headers, and reading raw OAuth
+  redirect URLs from the network log.
+
 ## [0.1.1] — fixes
 *Released 2026-05-09*
 

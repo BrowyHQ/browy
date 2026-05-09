@@ -1,6 +1,5 @@
 import type { ToolDef } from '../../types.js';
 import type { CDPSession, Browser, BrowserContext, Page } from 'playwright-core';
-import { redactText, redactUrl } from '../redact.js';
 import {
   capturePageSnapshot, ensureSnapshot, resolveIndex, serializeSnapshot,
   type ResolvedElement,
@@ -1322,18 +1321,18 @@ function ensureConsoleBuffer(cdp: CDPSession): ConsoleEntry[] {
       if (a.description) return a.description;
       return a.type;
     }).join(' ');
-    buf!.push({ ts: Date.now(), level: ev.type, text: redactText(text).slice(0, 500) });
+    buf!.push({ ts: Date.now(), level: ev.type, text: text.slice(0, 500) });
     if (buf!.length > 500) buf!.shift();
   });
   cdp.on('Runtime.exceptionThrown' as any, (ev: any) => {
     const ex = ev.exceptionDetails;
     const text = ex?.exception?.description || ex?.text || 'exception';
-    buf!.push({ ts: Date.now(), level: 'error', text: redactText(text).slice(0, 500), url: redactUrl(ex?.url || ''), line: ex?.lineNumber });
+    buf!.push({ ts: Date.now(), level: 'error', text: text.slice(0, 500), url: ex?.url || '', line: ex?.lineNumber });
     if (buf!.length > 500) buf!.shift();
   });
   cdp.on('Log.entryAdded' as any, (ev: any) => {
     const e = ev.entry;
-    buf!.push({ ts: Date.now(), level: e.level, text: redactText(e.text || '').slice(0, 500), url: redactUrl(e.url || ''), line: e.lineNumber });
+    buf!.push({ ts: Date.now(), level: e.level, text: (e.text || '').slice(0, 500), url: e.url || '', line: e.lineNumber });
     if (buf!.length > 500) buf!.shift();
   });
   return buf;
@@ -1349,7 +1348,7 @@ function ensureNetworkBuffer(cdp: CDPSession): Map<string, NetEntry> {
     buf!.set(ev.requestId, {
       ts: Date.now(),
       requestId: ev.requestId,
-      url: redactUrl(ev.request?.url || ''),
+      url: ev.request?.url || '',
       method: ev.request?.method || '',
       type: ev.type,
     });

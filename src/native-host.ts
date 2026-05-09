@@ -44,27 +44,8 @@
     } catch { consoleStream = { write: () => {} }; }
     return consoleStream;
   };
-  // Inline secret redaction (this hook runs before module imports resolve,
-  // so we can't import redact.ts here). Match the same shapes as redact.ts.
-  const SECRET_RX: Array<[RegExp, string]> = [
-    [/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{4,}/g, '[REDACTED_JWT]'],
-    [/\b(?:ghp|ghs|gho|ghu|ghr|github_pat)_[A-Za-z0-9_]{20,}/g, '[REDACTED_GITHUB_TOKEN]'],
-    [/\bsk-[A-Za-z0-9_-]{20,}/g, '[REDACTED_API_KEY]'],
-    [/\b(?:sk|pk|rk)_(?:live|test)_[A-Za-z0-9]{16,}/g, '[REDACTED_API_KEY]'],
-    [/\bAKIA[0-9A-Z]{16}\b/g, '[REDACTED_AWS_KEY]'],
-    [/(authorization|x-api-key|cookie|set-cookie)\s*:\s*[^\r\n]+/gi, '$1: [REDACTED]'],
-    [/\bBearer\s+[A-Za-z0-9._\-+/=]{8,}/gi, 'Bearer [REDACTED]'],
-    // OAuth-style query params
-    [/([?&#])(token|access_token|refresh_token|id_token|api_key|apikey|password|secret|client_secret|jwt|bearer|signature|sig|code)=[^&\s#]+/gi, '$1$2=[REDACTED]'],
-  ];
-  const redact = (s: string) => {
-    let out = s;
-    for (const [rx, repl] of SECRET_RX) out = out.replace(rx, repl);
-    return out;
-  };
   const w = (chunk: unknown) => {
-    const raw = typeof chunk === 'string' ? chunk : String(chunk);
-    const s = redact(raw);
+    const s = typeof chunk === 'string' ? chunk : String(chunk);
     try { process.stderr.write(s); } catch {}
     try { ensureStream().write(s); } catch {}
   };
