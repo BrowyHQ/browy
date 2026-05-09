@@ -1,50 +1,69 @@
 <!--
-  Browy icon — simplified mascot for browser/org use.
-  64x64 grid, 4px units. Reads cleanly at 16/32/48/128.
-  Solid background fill so the icon is fully visible against any browser theme.
-  Color palette matches the in-app mascot (greens #22c55e / #15803d, dark #0a1f12).
+  Browy icon — faithful port of the in-app mascot (sidepanel.html).
+  Same 80×80 grid and palette, "idle pose" eyes + grin.
+  Rendered with nearest-neighbour scaling for crisp pixels at all sizes.
 -->
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" shape-rendering="crispEdges">
-  <!-- Solid dark backdrop with rounded corners (pixel-style) -->
-  <rect x="2"  y="0"  width="60" height="2"  fill="#0a1f12"/>
-  <rect x="0"  y="2"  width="64" height="60" fill="#0a1f12"/>
-  <rect x="2"  y="62" width="60" height="2"  fill="#0a1f12"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80" shape-rendering="crispEdges">
+  <!-- Solid dark backdrop with rounded pixel-style corners -->
+  <rect x="2"  y="0"  width="76" height="2"  fill="#0a1f12"/>
+  <rect x="0"  y="2"  width="80" height="76" fill="#0a1f12"/>
+  <rect x="2"  y="78" width="76" height="2"  fill="#0a1f12"/>
 
-  <!-- Antenna bulb (top center) — single bright pixel cluster -->
-  <rect x="28" y="6"  width="8"  height="2" fill="#4ade80"/>
-  <rect x="26" y="8"  width="12" height="4" fill="#4ade80"/>
-  <rect x="28" y="12" width="8"  height="2" fill="#4ade80"/>
-  <!-- Bulb shine -->
-  <rect x="28" y="8"  width="2"  height="2" fill="#a3f3b8"/>
-  <!-- Antenna stalk -->
-  <rect x="30" y="14" width="4"  height="4" fill="#22c55e"/>
-  <rect x="30" y="18" width="4"  height="2" fill="#15803d"/>
+  <!-- ANTENNA: octagonal bulb + segmented stalk -->
+  <rect x="34" y="2"  width="12" height="2" fill="#4ade80"/>
+  <rect x="32" y="4"  width="16" height="6" fill="#4ade80"/>
+  <rect x="34" y="10" width="12" height="2" fill="#4ade80"/>
+  <rect x="34" y="4"  width="4"  height="2" fill="#a3f3b8"/>
+  <rect x="32" y="6"  width="2"  height="2" fill="#a3f3b8"/>
+  <rect x="42" y="8"  width="4"  height="2" fill="#15803d"/>
+  <rect x="38" y="12" width="4"  height="2" fill="#22c55e"/>
+  <rect x="38" y="14" width="4"  height="2" fill="#15803d"/>
+  <rect x="38" y="16" width="4"  height="2" fill="#1f3826"/>
 
-  <!-- Head bezel: bright top edge → main green body -->
-  <rect x="10" y="20" width="44" height="2"  fill="#22c55e"/>
-  <rect x="8"  y="22" width="48" height="2"  fill="#22c55e"/>
-  <rect x="6"  y="24" width="52" height="28" fill="#15803d"/>
-  <rect x="8"  y="52" width="48" height="2"  fill="#15803d"/>
-  <rect x="10" y="54" width="44" height="2"  fill="#0a1f12"/>
+  <!-- HEAD bezel with rounded top/bottom edges -->
+  <rect x="14" y="18" width="52" height="2"  fill="#22c55e"/>
+  <rect x="12" y="20" width="56" height="2"  fill="#22c55e"/>
+  <rect x="10" y="22" width="60" height="42" fill="#15803d"/>
+  <rect x="12" y="22" width="56" height="2"  fill="#22c55e"/>
+  <rect x="12" y="64" width="56" height="2"  fill="#15803d"/>
+  <rect x="14" y="66" width="52" height="2"  fill="#15803d"/>
+  <rect x="16" y="68" width="48" height="2"  fill="#1f3826"/>
 
-  <!-- Side knobs (volume) -->
-  <rect x="4"  y="32" width="2"  height="4" fill="#1f3826"/>
-  <rect x="4"  y="40" width="2"  height="4" fill="#1f3826"/>
-  <rect x="58" y="32" width="2"  height="4" fill="#1f3826"/>
-  <rect x="58" y="40" width="2"  height="4" fill="#1f3826"/>
+  <!-- SIDE EAR-KNOBS -->
+  <rect x="8"  y="32" width="2" height="6" fill="#1f3826"/>
+  <rect x="6"  y="33" width="2" height="4" fill="#1f3826"/>
+  <rect x="8"  y="42" width="2" height="6" fill="#1f3826"/>
+  <rect x="6"  y="43" width="2" height="4" fill="#1f3826"/>
+  <rect x="70" y="32" width="2" height="6" fill="#1f3826"/>
+  <rect x="72" y="33" width="2" height="4" fill="#1f3826"/>
+  <rect x="70" y="42" width="2" height="6" fill="#1f3826"/>
+  <rect x="72" y="43" width="2" height="4" fill="#1f3826"/>
 
-  <!-- CRT screen (dark inset) -->
-  <rect x="12" y="26" width="40" height="22" fill="#0a1f12"/>
-  <!-- Subtle scanline inside -->
-  <rect x="12" y="36" width="40" height="1"  fill="#15803d" opacity="0.18"/>
+  <!-- BEZEL CORNER BOLTS -->
+  <rect x="12" y="22" width="2" height="2" fill="#0a1f12"/>
+  <rect x="66" y="22" width="2" height="2" fill="#0a1f12"/>
+  <rect x="12" y="62" width="2" height="2" fill="#0a1f12"/>
+  <rect x="66" y="62" width="2" height="2" fill="#0a1f12"/>
 
-  <!-- Eyes — two bright lime squares -->
-  <rect x="20" y="32" width="6" height="6" fill="#4ade80"/>
-  <rect x="38" y="32" width="6" height="6" fill="#4ade80"/>
-  <!-- Eye shine pixels -->
-  <rect x="20" y="32" width="2" height="2" fill="#d8ffe7"/>
-  <rect x="38" y="32" width="2" height="2" fill="#d8ffe7"/>
+  <!-- CRT SCREEN inset -->
+  <rect x="15" y="25" width="50" height="40" fill="#0a1f12"/>
+  <rect x="15" y="25" width="50" height="1"  fill="#1f3826"/>
+  <rect x="15" y="64" width="50" height="1"  fill="#1f3826"/>
+  <rect x="15" y="25" width="1"  height="40" fill="#1f3826"/>
+  <rect x="64" y="25" width="1"  height="40" fill="#1f3826"/>
+  <rect x="16" y="26" width="6"  height="1"  fill="#a3f3b8" opacity="0.45"/>
+  <rect x="16" y="27" width="2"  height="1"  fill="#a3f3b8" opacity="0.30"/>
 
-  <!-- Smile line (single pixel row, centered, friendly) -->
-  <rect x="26" y="44" width="12" height="2" fill="#22c55e"/>
+  <!-- EYES (idle pose: looking forward) -->
+  <rect x="22" y="35" width="12" height="10" fill="#d8e3d8"/>
+  <rect x="46" y="35" width="12" height="10" fill="#d8e3d8"/>
+  <rect x="26" y="38" width="4"  height="4"  fill="#0a1f12"/>
+  <rect x="50" y="38" width="4"  height="4"  fill="#0a1f12"/>
+
+  <!-- GRIN -->
+  <rect x="34" y="55" width="12" height="2"  fill="#4ade80"/>
+
+  <!-- SPEAKER GRILLE + POWER LED -->
+  <rect x="22" y="66" width="36" height="1" fill="#0a1f12"/>
+  <rect x="60" y="66" width="2"  height="1" fill="#c5f04b"/>
 </svg>
