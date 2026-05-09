@@ -2,6 +2,8 @@
 
 > A pixel-art Copilot for your browser — drag the mascot anywhere, ask it to do something, watch it drive your real tabs.
 
+📖 **Documentation:** [browyhq.github.io/docs](https://browyhq.github.io/docs/) — install, first chat, tools reference, DevTools CLI, architecture.
+
 <!-- TODO: add docs/screenshots/hero.png after first public demo -->
 
 Browy isa Chromium extension (Chrome / Edge / Brave) backed by a small Node native-messaging host that wraps the [GitHub Copilot SDK](https://www.npmjs.com/package/@github/copilot-sdk) and drives the page through the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) via `chrome.debugger`. It works against your **real** profile — your cookies, your sessions, your logins — so most "log in to do X" tasks just work.
@@ -49,6 +51,7 @@ Detailed install + troubleshooting → [extension/README.md](extension/README.md
   - [Switching models](extension/README.md#switching-models)
 
 - 🔧 **[Architecture & developing locally](src/README.md)** — extension ↔ port ↔ native host ↔ Copilot SDK + CDP
+- 📖 **[Documentation site](https://browyhq.github.io/docs/)** — install, first chat, tools reference, DevTools CLI, privacy
 
 ---
 
