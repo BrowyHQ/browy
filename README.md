@@ -1,12 +1,12 @@
-# Browy
+# Browy — AI agent for Chrome / Edge / Brave, powered by GitHub Copilot
 
-> A pixel-art Copilot for your browser — drag the mascot anywhere, ask it to do something, watch it drive your real tabs.
+> Free, open-source browser AI agent. Local. Uses your own GitHub Copilot subscription. 41 browser tools. No cloud, no separate API keys.
 
-📖 **Documentation:** [browyhq.github.io/docs](https://browyhq.github.io/docs/) — install, first chat, tools reference, DevTools CLI, architecture.
+📖 **Documentation:** [browyhq.github.io/docs](https://browyhq.github.io/docs/) — install, first chat, tools reference, DevTools CLI, architecture, FAQ.
 
 <!-- TODO: add docs/screenshots/hero.png after first public demo -->
 
-Browy isa Chromium extension (Chrome / Edge / Brave) backed by a small Node native-messaging host that wraps the [GitHub Copilot SDK](https://www.npmjs.com/package/@github/copilot-sdk) and drives the page through the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) via `chrome.debugger`. It works against your **real** profile — your cookies, your sessions, your logins — so most "log in to do X" tasks just work.
+**Think Claude Code or Aider, but in your browser.** Browy is a Chromium extension (Chrome / Edge / Brave) backed by a small Node native-messaging host that wraps the [GitHub Copilot SDK](https://www.npmjs.com/package/@github/copilot-sdk) and drives the page through the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) via `chrome.debugger`. It works against your **real** profile — your cookies, your sessions, your logins — so most "log in to do X" tasks just work. An open-source alternative to Browser-Use and Skyvern that runs locally and uses the GitHub Copilot subscription you already have.
 
 There are two surfaces you can talk to Browy from:
 
@@ -71,6 +71,18 @@ Detailed install + troubleshooting → [extension/README.md](extension/README.md
 - **DevTools-aware.** Network requests, console logs, cookies, storage — all available as tools. Great for debugging your own apps.
 - **Bring your own model.** Powered by Copilot SDK, so you pick from any model your Copilot subscription exposes (Claude, GPT, Gemini, Llama, ...). Switch via `/model` in the DevTools CLI or in Settings.
 - **Open source, Apache-2.0.** Audit the host. Audit the extension. Pin a known-good build.
+
+## Browy vs alternatives
+
+| | **Browy** | Browser-Use | Skyvern | Aider |
+|---|---|---|---|---|
+| Open source | ✅ Apache-2.0 | ✅ | ✅ | ✅ |
+| Runs locally | ✅ | ✅ (Python) | ❌ Cloud | ✅ |
+| Uses your real browser profile | ✅ | ❌ Fresh sandbox | ❌ Cloud | n/a (terminal) |
+| Browser extension UI | ✅ | ❌ | ❌ | ❌ |
+| Native DevTools panel | ✅ | ❌ | ❌ | ❌ |
+| BYO model via subscription | ✅ GitHub Copilot | ❌ Per-token API | ❌ Per-task | ❌ Per-token API |
+| Headless CLI mode | ✅ `browy run` | ✅ | ✅ | ✅ |
 
 ---
 
