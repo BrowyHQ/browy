@@ -423,7 +423,9 @@ function isExtensionContextInvalidated() {
 // Disable/enable every interactive control that requires the backend.
 // Called on __host_ready (true) and any offline event (false).
 function setOnlineControls(online) {
-  const ids = ['inp', 'goBtn', 'stopBtn', 'newChatBtn', 'chatsBtn'];
+  // newChatBtn is intentionally NOT gated on the backend — it's a pure
+  // local reset and should always work, even offline.
+  const ids = ['inp', 'goBtn', 'stopBtn', 'chatsBtn'];
   for (const id of ids) {
     const el = document.getElementById(id);
     if (!el) continue;
@@ -492,6 +494,10 @@ function connect() {
     }
     if (raw.type === 'session.ready') {
       sessionReady = true;
+      // Safety net: any real message from the host proves it's alive, so
+      // make sure the online controls reflect that even if __host_ready
+      // was somehow missed during a fast SW restart.
+      try { setOnlineControls(true); } catch {}
       refreshActiveTab();
       flushPendingHostMsgs();
       return;
