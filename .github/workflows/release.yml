@@ -1,7 +1,9 @@
 name: Release
 
-# Builds installers and publishes them to the PUBLIC repo's Releases.
-# Source stays in this private repo. Trigger by pushing a tag like v0.1.0.
+# Builds release artifacts on tag push (v*) and uploads them to the GitHub
+# Release for that tag in THIS repo. Publishing to a separate public repo
+# is intentionally disabled — flip back on when a public distribution
+# channel is decided.
 
 on:
   push:
@@ -10,12 +12,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version (e.g. 0.1.0). Without leading v.'
+        description: 'Version (e.g. 0.1.1). Without leading v.'
         required: true
 
 env:
-  PUBLIC_REPO: ritabratamaiti/browy-releases
-  NODE_VERSION: '20'
+  NODE_VERSION: '22'
 
 jobs:
   build-windows:
@@ -41,9 +42,9 @@ jobs:
           fi
 
       - run: npm ci
+      - run: npm run typecheck
       - run: npm run dist:win
-        env:
-          GH_TOKEN: ''
+      - run: npm run pack:extension
 
       - name: List artifacts
         shell: bash
@@ -51,41 +52,39 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: windows-installer
+          name: windows-release-${{ steps.ver.outputs.version }}
           path: |
-            release/*.exe
-            release/*.exe.blockmap
-            release/latest.yml
+            release/Browy-*-win-x64.zip
+            release/Browy-Extension-*.zip
           if-no-files-found: error
-          retention-days: 5
+          retention-days: 14
 
-  publish:
+  attach-to-release:
     needs: build-windows
     runs-on: ubuntu-latest
+    # Skip on workflow_dispatch — only auto-attach when a real tag was pushed.
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: windows-installer
+          name: windows-release-${{ needs.build-windows.outputs.version }}
           path: artifacts
 
-      - name: Publish to public releases repo
+      - name: Attach build artifacts to the release
         env:
-          # PAT with `contents:write` scope on the PUBLIC repo.
-          # Store as repo secret PUBLIC_RELEASES_TOKEN in the PRIVATE repo.
-          GH_TOKEN: ${{ secrets.PUBLIC_RELEASES_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build-windows.outputs.version }}
+        shell: bash
         run: |
           set -euxo pipefail
           TAG="v${VERSION}"
-          if ! gh release view "$TAG" --repo "$PUBLIC_REPO" >/dev/null 2>&1; then
-            gh release create "$TAG" \
-              --repo "$PUBLIC_REPO" \
-              --title "Browy ${VERSION}" \
-              --notes "Browy ${VERSION} — Windows preview. See README for install + setup." \
-              --draft
-          fi
+          # Always also include the install scripts from the source tree
+          # so the GH release has everything a user needs in one place.
           gh release upload "$TAG" \
-            --repo "$PUBLIC_REPO" \
+            --repo "${{ github.repository }}" \
             --clobber \
-            artifacts/*
-          echo "Published ${TAG} (draft) → https://github.com/${PUBLIC_REPO}/releases"
+            artifacts/* install.ps1 install.sh
+          echo "Attached artifacts to ${TAG} → https://github.com/${{ github.repository }}/releases/tag/${TAG}"
