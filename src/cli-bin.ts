@@ -43,6 +43,11 @@ if (cmd === 'repl') {
     process.exit(2);
   }
   await runOneShot(message);
+} else if (cmd === 'run') {
+  // Headless terminal agent — Copilot SDK with default toolset
+  // (read_file, write_file, bash, web_fetch, …). No browser needed.
+  const { runHeadless } = await import('./cli-run.js');
+  await runHeadless(argv.slice(1));
 } else if (cmd === 'install-host') {
   await runInstallHost(argv.slice(1));
 } else if (cmd === 'uninstall-host') {
@@ -61,8 +66,12 @@ usage:
                          (run this once after install — lets the Browy
                          browser extension connect to the agent)
   browy uninstall-host   remove native messaging host registration
-  browy repl             interactive terminal REPL (power-user mode)
-  browy chat "<msg>"     one-shot chat, prints reply
+  browy repl             interactive terminal REPL bound to a browser
+  browy chat "<msg>"     one-shot chat (browser-coupled), prints reply
+  browy run "<task>"     headless terminal agent — no browser needed.
+                         Has full SDK toolset (read_file, write_file, bash,
+                         web_fetch, …) scoped to your current directory.
+                         Use \`browy run --help\` for flags.
   browy --help           show this help
   browy --version        print version
 

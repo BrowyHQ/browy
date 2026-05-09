@@ -183,6 +183,10 @@ export class Agent {
    *  used as the Copilot SDK sessionId so that reloading the panel resumes
    *  the same conversation instead of starting fresh. */
   private browyProtocolSessionId: string | null = null;
+  /** Names of tools the user has disabled from the built-in browser-tool
+   *  registry. ensureSession() removes these from the SDK's allowlist before
+   *  creating/resuming a session. Empty set = no overrides (all built-ins). */
+  private disabledTools: Set<string> = new Set();
   private onActivity: ActivityCallback = () => {};
   private currentTabInfo: { url: string; title: string; brand: string; tabCount: number } = {
     url: '', title: '', brand: 'Browser', tabCount: 0,
@@ -648,6 +652,15 @@ export class Agent {
     this.browyProtocolSessionId = id;
   }
 
+  /** Per-user tool blocklist set by the client (typically the extension
+   *  Settings page via session.start). ensureSession() removes these names
+   *  from the SDK's allowlist. Pass an empty array to clear all overrides.
+   *  Does not affect the SDK session that's already open — call after a
+   *  history.clear or session.end/start cycle for it to take effect. */
+  setDisabledTools(names: readonly string[]): void {
+    this.disabledTools = new Set(names);
+  }
+
   private async ensureSession() {
     if (this.copilotSession) return;
     // Tools close over `self.getBrowserContext()` and read the current CDP at
@@ -663,7 +676,15 @@ export class Agent {
     // unavailable, regardless of the SDK's defaults. (NB: the previous
     // `includeDefaultTools: false` flag was *not* a real SDK option and was
     // being silently ignored.)
-    const allowedToolNames = tools.map((t) => t.name);
+    //
+    // PER-USER OVERLAY: when the user has disabled tools via the extension
+    // Settings page (forwarded on session.start), we further trim the
+    // allowlist. Disabled names are also stripped from the `tools` array we
+    // hand the SDK so even the function definitions don't leak into the
+    // model's prompt.
+    const blocked = this.disabledTools;
+    const filteredTools = blocked.size ? tools.filter((t) => !blocked.has(t.name)) : tools;
+    const allowedToolNames = filteredTools.map((t) => t.name);
 
     // Try to resume an existing on-disk session for this Browy id. This is
     // what makes "reload the side panel and pick up where I left off" work.
@@ -673,7 +694,7 @@ export class Agent {
           clientName: BROWSERAGENT_CLIENT_NAME,
           workingDirectory: BROWSERAGENT_WORKDIR,
           model: this.config.model,
-          tools,
+          tools: filteredTools,
           availableTools: allowedToolNames,
           onPermissionRequest: approveAll,
         });
@@ -692,7 +713,7 @@ export class Agent {
       workingDirectory: BROWSERAGENT_WORKDIR,
       systemPrompt: SYSTEM_PROMPT,
       model: this.config.model,
-      tools,
+      tools: filteredTools,
       availableTools: allowedToolNames,
       onPermissionRequest: approveAll,
     });

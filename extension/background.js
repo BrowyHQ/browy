@@ -177,6 +177,23 @@ chrome.runtime.onConnect.addListener((port) => {
       if (msg.inspectedTabId != null) {
         sessionToTab.set(msg.sessionId, Number(msg.inspectedTabId));
       }
+      // Stamp the per-user tool blocklist from chrome.storage onto every
+      // session.start. The host keeps no preference state of its own — the
+      // extension is the source of truth, so reloads + multiple panels
+      // always converge on the user's most recent setting.
+      if (msg.disabledTools === undefined) {
+        chrome.storage.local.get(['settings']).then(({ settings }) => {
+          const toolsMap = settings && settings.tools;
+          let disabled = [];
+          if (toolsMap && typeof toolsMap === 'object') {
+            disabled = Object.entries(toolsMap)
+              .filter(([, v]) => v === false)
+              .map(([k]) => k);
+          }
+          sendToHost({ ...msg, disabledTools: disabled });
+        }).catch(() => sendToHost(msg));
+        return;
+      }
     }
     if (msg.type === 'session.end' && msg.sessionId) {
       sessionToClient.delete(msg.sessionId);

@@ -216,7 +216,7 @@ export class Runner {
     }
   }
 
-  private onSessionStart(transport: Transport, msg: SessionStart): void {
+  private async onSessionStart(transport: Transport, msg: SessionStart): Promise<void> {
     const state: SessionState = {
       id: msg.sessionId,
       transport,
@@ -232,6 +232,13 @@ export class Runner {
 
     this.sessions.set(msg.sessionId, state);
     this.transportSessions.get(transport.id)?.add(msg.sessionId);
+
+    // Apply user's per-tool toggles BEFORE the next ensureSession() runs.
+    // Empty list = no overrides; presence of names means user has disabled
+    // them via the extension Settings page.
+    if (msg.disabledTools !== undefined) {
+      this.agent.setDisabledTools(msg.disabledTools);
+    }
 
     transport.send({
       type: 'session.ready',

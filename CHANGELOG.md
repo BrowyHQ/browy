@@ -4,6 +4,23 @@ All notable changes to Browy will be documented in this file. The format follows
 
 ## [Unreleased]
 
+### Added
+- **Tool toggles** in extension Settings — disable any built-in browser
+  tool (e.g. `evaluate_js` for paranoid mode, `download_file`, etc.).
+  Disabled tools are stripped from the SDK's allowlist AND from the tool
+  definitions sent to the model, so the agent never sees they exist.
+  Persisted in `chrome.storage.local.settings.tools`; forwarded on every
+  `session.start` so multiple panels and reloads converge on the same
+  preferences.
+- **`browy run`** — headless terminal agent (no browser required) backed
+  by the Copilot SDK's full default toolset (`read_file`, `write_file`,
+  `bash`, `web_fetch`, …) scoped to your current directory.
+  - `browy run "<task>"` — one-shot, prints reply, exits
+  - `browy run` — interactive REPL
+  - `browy run --resume <id>` / `--list` / `--model <id>` / `--cwd <path>`
+  - Sessions stored under `~/.browy/cli-sessions/`, isolated from both
+    the browser-coupled Browy sessions and the user's own `copilot` CLI.
+
 ### Removed
 - Automatic secret-redaction filter for console/network/log surfaces.
   Browy now passes URLs, headers, and console text through unchanged.

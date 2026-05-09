@@ -126,6 +126,57 @@
       font-size: 11px; letter-spacing: 0.05em;
     }
 
+    /* ── Tool toggles ──────────────────────────────────────────────── */
+    .tool-groups { display: flex; flex-direction: column; gap: 14px; }
+    .tool-group { border: 1px solid var(--line-2); }
+    .tool-group .gh {
+      padding: 6px 10px;
+      background: rgba(74, 222, 128, 0.04);
+      border-bottom: 1px solid var(--line-2);
+      display: flex; align-items: baseline; gap: 8px;
+    }
+    .tool-group .gh .gtitle {
+      color: var(--lime); font-size: 10px;
+      letter-spacing: 0.10em; text-transform: uppercase;
+    }
+    .tool-group .gh .ghint { color: var(--ink-mute); font-size: 10px; }
+    .tool-group .glist { display: flex; flex-direction: column; }
+    .tool-row {
+      display: grid; grid-template-columns: 22px 1fr auto;
+      align-items: start; gap: 10px;
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--line-2);
+      cursor: pointer;
+      transition: background 0.08s ease;
+    }
+    .tool-row:last-child { border-bottom: none; }
+    .tool-row:hover { background: rgba(74, 222, 128, 0.04); }
+    .tool-row.off { opacity: 0.55; }
+    .tool-row .chk {
+      width: 14px; height: 14px;
+      border: 1px solid var(--ink-mute);
+      background: transparent; position: relative; flex: none;
+      margin-top: 2px;
+    }
+    .tool-row.on .chk { border-color: var(--green); background: var(--green); }
+    .tool-row.on .chk::after {
+      content: '✓'; position: absolute; inset: 0;
+      color: #0a110e; font-size: 10px; line-height: 14px;
+      text-align: center; font-weight: bold;
+    }
+    .tool-row .tname {
+      color: var(--ink); font-size: 12px; font-family: var(--mono);
+    }
+    .tool-row .tdesc {
+      color: var(--ink-mute); font-size: 10px;
+      margin-top: 2px; line-height: 1.4;
+    }
+    .tool-row .tcat {
+      font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+      padding: 2px 6px; border: 1px solid var(--line-2); color: var(--ink-mute);
+      align-self: start; white-space: nowrap;
+    }
+
     /* ── Buttons / row actions ─────────────────────────────────────── */
     .btn {
       background: transparent; color: var(--ink);
@@ -250,6 +301,26 @@
         </div>
         <div class="models" id="modelList">
           <div class="empty" id="modelEmpty">loading models…</div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <div class="sec-hdr">
+        <h2>Tools</h2>
+        <span class="sec-hint">// turn off any built-in tool you don't want the agent to call</span>
+      </div>
+      <div class="sec-body">
+        <div class="toolbar">
+          <input class="search" id="toolSearch" type="text" placeholder="filter tools — name, category, description…" />
+          <span class="count" id="toolCount">—</span>
+          <button class="btn" id="toolEnableAll" title="re-enable every tool">enable all</button>
+        </div>
+        <div class="tool-groups" id="toolGroups">
+          <div class="empty">loading tools…</div>
+        </div>
+        <div style="margin-top:10px;color:var(--ink-mute);font-size:10px">
+          // changes apply on the next chat (or after /clear). default is everything on.
         </div>
       </div>
     </section>

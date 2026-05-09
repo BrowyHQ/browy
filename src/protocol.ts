@@ -59,6 +59,12 @@ export interface SessionStart {
    *  host) so per-session cdp.send calls target the panel's inspected tab
    *  instead of whatever tab is foregrounded. */
   inspectedTabId?: number;
+  /** Per-user tool blocklist. Names listed here are removed from the
+   *  Copilot SDK's `availableTools` for THIS session. The extension
+   *  Settings page persists toggles in chrome.storage and forwards the
+   *  disabled subset on every session.start so user preferences survive
+   *  reloads. Tool names not in the host's registry are ignored. */
+  disabledTools?: string[];
 }
 
 export interface SessionEnd {
