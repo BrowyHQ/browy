@@ -86,15 +86,20 @@ async function fetchTarget(target) {
   if (meta.kind === 'raw') {
     fs.writeFileSync(outFile, buf);
   } else {
-    // Extract bin/node from the tarball using system tar (works on Win10+,
-    // mac, linux). Write to a temp dir, copy, clean up. We need 'bin/node'
-    // out of a path like node-v24.11.0-darwin-arm64/bin/node.
+    // Extract bin/node from the tarball. Windows' bundled tar (libarchive)
+    // doesn't support --wildcards, so we ask for the exact path which the
+    // tarball uses (node-vX.Y.Z-<platform>/bin/node) — works on tar
+    // (libarchive) on Windows AND GNU/BSD tar on mac/linux.
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'browy-node-'));
     const arc = path.join(tmp, meta.kind === 'tarball-xz' ? 'node.tar.xz' : 'node.tar.gz');
     fs.writeFileSync(arc, buf);
-    // -x extract, -f file, --strip-components=2 drops "node-vX.Y-platform/bin/"
-    // so we just get a flat "node" file.
-    execSync(`tar -xf "${arc}" -C "${tmp}" --strip-components=2 --wildcards "*/bin/node"`, {
+    const platSeg = target === 'darwin-x64'   ? 'darwin-x64'
+                   : target === 'darwin-arm64' ? 'darwin-arm64'
+                   : target === 'linux-x64'    ? 'linux-x64'
+                   : target === 'linux-arm64'  ? 'linux-arm64'
+                   : (() => { throw new Error(`no platSeg for ${target}`); })();
+    const innerPath = `node-${NODE_VERSION}-${platSeg}/bin/node`;
+    execSync(`tar -xf "${arc}" -C "${tmp}" --strip-components=2 "${innerPath}"`, {
       stdio: 'inherit',
     });
     fs.copyFileSync(path.join(tmp, 'node'), outFile);

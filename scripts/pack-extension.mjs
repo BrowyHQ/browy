@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 /**
- * Packs the Chrome/Edge/Brave extension folder into a zip suitable for
- * "Load unpacked" sideloading from a GitHub Release.
+ * Packs the Chrome/Edge/Brave extension folder into release zips.
  *
- * Output: release/Browy-Extension-<version>.zip
+ * Produces two artifacts in release/:
  *
- * Users install it via:
- *   1. Download and extract the zip
- *   2. chrome://extensions → enable Developer mode → Load unpacked
- *   3. Point at the extracted "extension" folder
+ *   Browy-Extension-<version>.zip       (sideload — wraps in extension/)
+ *     For "Load unpacked" sideloading: extract, then point chrome://extensions
+ *     at the extracted "extension" folder.
+ *
+ *   Browy-Extension-<version>-cws.zip   (Chrome Web Store upload)
+ *     manifest.json sits at the root of the zip — the layout the CWS
+ *     Developer Dashboard expects.
  *
  * The extension's manifest pins a public key, so the assigned extension ID
  * is stable (lfeljbgjlkoabhepbkdbjgpbhfmpgmkc) and matches the native host's
@@ -29,21 +31,45 @@ if (!fs.existsSync(extDir)) {
   process.exit(1);
 }
 
-const releaseDir = path.join(root, 'release');
-fs.mkdirSync(releaseDir, { recursive: true });
-const out = path.join(releaseDir, `Browy-Extension-${pkg.version}.zip`);
-try { fs.unlinkSync(out); } catch {}
-
-console.log(`[pack-ext] → ${out}`);
-
-// tar handles zip on Win10+, mac, and modern Linux. Wrapping in extension/
-// preserves the directory layout users expect when they "Load unpacked".
-try {
-  execSync(`tar -a -cf "${out}" -C "${root}" extension`, { stdio: 'inherit' });
-} catch {
-  // PowerShell fallback (Windows only).
-  execSync(`powershell -NoProfile -Command "Compress-Archive -Path '${extDir}' -DestinationPath '${out}' -Force"`, { stdio: 'inherit' });
+// Cross-check: manifest version must match package version, otherwise CWS
+// will reject the second upload because Chrome expects monotonic versions.
+const manifest = JSON.parse(fs.readFileSync(path.join(extDir, 'manifest.json'), 'utf8'));
+if (manifest.version !== pkg.version) {
+  console.error(`[pack-ext] version mismatch: package.json=${pkg.version} manifest.json=${manifest.version}`);
+  console.error('[pack-ext] aborting — sync them before packing.');
+  process.exit(1);
 }
 
-const sz = fs.statSync(out).size / 1024;
-console.log(`[pack-ext] ✅ ${sz.toFixed(1)}KB → ${out}`);
+const releaseDir = path.join(root, 'release');
+fs.mkdirSync(releaseDir, { recursive: true });
+
+const sideload = path.join(releaseDir, `Browy-Extension-${pkg.version}.zip`);
+const cws      = path.join(releaseDir, `Browy-Extension-${pkg.version}-cws.zip`);
+for (const f of [sideload, cws]) { try { fs.unlinkSync(f); } catch {} }
+
+function zip(cwd, sources, out) {
+  // tar handles zip on Win10+, mac, and modern Linux.
+  const list = sources.map(s => `"${s}"`).join(' ');
+  try {
+    execSync(`tar -a -cf "${out}" -C "${cwd}" ${list}`, { stdio: 'inherit' });
+  } catch {
+    // PowerShell fallback (Windows only). Compress-Archive doesn't support
+    // CWS-flat layout cleanly — only used as a last resort for sideload.
+    const inputs = sources.map(s => `'${path.join(cwd, s)}'`).join(',');
+    execSync(`powershell -NoProfile -Command "Compress-Archive -Path ${inputs} -DestinationPath '${out}' -Force"`, { stdio: 'inherit' });
+  }
+}
+
+console.log(`[pack-ext] sideload → ${sideload}`);
+zip(root, ['extension'], sideload);
+
+console.log(`[pack-ext] cws      → ${cws}`);
+// Pack from inside extension/ so manifest.json lands at the zip root.
+const entries = fs.readdirSync(extDir).filter(n => !n.startsWith('.'));
+zip(extDir, entries, cws);
+
+for (const f of [sideload, cws]) {
+  const sz = fs.statSync(f).size / 1024;
+  console.log(`[pack-ext] ✅ ${sz.toFixed(1)}KB → ${path.relative(root, f)}`);
+}
+

@@ -4,7 +4,13 @@ All notable changes to Browy will be documented in this file. The format follows
 
 ## [Unreleased]
 
+## [0.1.2] — devtools REPL + tool toggles + headless CLI
+*Released 2026-05-10*
+
 ### Added
+- **`/js` REPL** in the DevTools panel — toggle a JavaScript REPL that
+  evaluates each input line against the inspected page via the DevTools
+  runtime. Prompt glyph flips to `js>` while active. No model call.
 - **Tool toggles** in extension Settings — disable any built-in browser
   tool (e.g. `evaluate_js` for paranoid mode, `download_file`, etc.).
   Disabled tools are stripped from the SDK's allowlist AND from the tool
@@ -12,6 +18,9 @@ All notable changes to Browy will be documented in this file. The format follows
   Persisted in `chrome.storage.local.settings.tools`; forwarded on every
   `session.start` so multiple panels and reloads converge on the same
   preferences.
+- **Host SDK tool opt-in** — `read_file`, `write_file`, `bash`, `grep`,
+  `glob`, `web_fetch` are off by default and can be enabled per-tool from
+  Settings. Final gate enforced server-side in `src/agent/loop.ts`.
 - **`browy run`** — headless terminal agent (no browser required) backed
   by the Copilot SDK's full default toolset (`read_file`, `write_file`,
   `bash`, `web_fetch`, …) scoped to your current directory.
