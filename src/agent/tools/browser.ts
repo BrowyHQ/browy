@@ -68,6 +68,66 @@ async function captureUrlTitle(ctx: BrowserToolContext): Promise<{ url: string; 
   } catch { return { url: '', title: '' }; }
 }
 
+// Capture observable post-click state for SPA verification. Cheap single
+// Runtime.evaluate call: URL, title, a 32-bit hash of the first 12KB of
+// visible text, the count of currently-open modals/dialogs, and (when an
+// index is supplied) the aria-pressed/expanded/selected/checked state of
+// that element. Used to detect "the click did nothing observable" — the
+// loop principle #17 mitigation.
+interface ClickState {
+  url: string;
+  title: string;
+  textHash: number;
+  textLen: number;
+  modalCount: number;
+  elState: { pressed?: string; expanded?: string; selected?: string; checked?: string; disabled?: boolean } | null;
+}
+async function captureClickState(ctx: BrowserToolContext, idx?: number): Promise<ClickState> {
+  const idxArg = idx == null ? 'null' : Number(idx);
+  const expr = `(() => {
+    function fnv1a(s) {
+      let h = 0x811c9dc5;
+      for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0; }
+      return h;
+    }
+    const visText = (document.body && document.body.innerText) || '';
+    const slice = visText.slice(0, 12000);
+    const modalSel = '[role="dialog"][aria-modal="true"], [role="alertdialog"], dialog[open], .modal:not([hidden]), [data-modal="true"]';
+    const modals = document.querySelectorAll(modalSel);
+    let elState = null;
+    const i = ${idxArg};
+    if (i != null) {
+      const el = document.querySelector('[data-browy-id="' + i + '"]');
+      if (el) {
+        elState = {
+          pressed: el.getAttribute('aria-pressed') || undefined,
+          expanded: el.getAttribute('aria-expanded') || undefined,
+          selected: el.getAttribute('aria-selected') || undefined,
+          checked: el.getAttribute('aria-checked') || (el.checked === true ? 'true' : el.checked === false ? 'false' : undefined),
+          disabled: el.disabled === true || el.getAttribute('aria-disabled') === 'true' || undefined,
+        };
+      }
+    }
+    return JSON.stringify({
+      url: location.href,
+      title: document.title,
+      textHash: fnv1a(slice),
+      textLen: visText.length,
+      modalCount: modals.length,
+      elState,
+    });
+  })()`;
+  try {
+    const r = await ctx.cdp.send('Runtime.evaluate', {
+      expression: expr,
+      returnByValue: true,
+    }) as { result?: { value?: string } };
+    return JSON.parse(String(r?.result?.value ?? '{}')) as ClickState;
+  } catch {
+    return { url: '', title: '', textHash: 0, textLen: 0, modalCount: 0, elState: null };
+  }
+}
+
 async function dispatchClick(ctx: BrowserToolContext, cx: number, cy: number): Promise<void> {
   await ctx.cdp.send('Input.dispatchMouseEvent', {
     type: 'mouseMoved', x: cx, y: cy, button: 'none', clickCount: 0,
@@ -95,7 +155,7 @@ register({
 register({
   def: {
     type: 'function', name: 'click_index',
-    description: 'Click the element with the given index [N] from the page snapshot. Auto-scrolls into view. Returns urlChanged/titleChanged so you can verify the click had an effect. PREFER this over click_element when the element appears in the snapshot.',
+    description: 'Click the element with the given index [N] from the page snapshot. Auto-scrolls into view. Returns urlChanged/titleChanged/domChanged/modalAppeared/modalClosed/elementStateChanged so you can verify the click had an effect. If all are false, the click had no observable effect — read the hint and try a different approach. PREFER this over click_element when the element appears in the snapshot.',
     parameters: { type: 'object', properties: {
       index: { type: 'number', description: 'The [N] index from the page snapshot.' },
     }, required: ['index'] },
@@ -104,7 +164,7 @@ register({
     const idx = Number(args.index);
     if (!Number.isFinite(idx) || idx < 1) return JSON.stringify({ error: 'index must be a positive integer' });
     const cdp = ctx.cdp as unknown as { send: (m: string, p?: unknown) => Promise<unknown> };
-    const before = await captureUrlTitle(ctx);
+    const before = await captureClickState(ctx, idx);
     const resolved: ResolvedElement = await resolveIndex(cdp, idx);
     if (!resolved.found || !resolved.rect) {
       return JSON.stringify({ success: false, error: resolved.reason || `index ${idx} not found — call inspect_page` });
@@ -112,15 +172,40 @@ register({
     await dispatchClick(ctx, resolved.rect.cx, resolved.rect.cy);
     // Brief wait for navigation/render to settle.
     await new Promise((r) => setTimeout(r, 500));
-    const after = await captureUrlTitle(ctx);
+    const after = await captureClickState(ctx, idx);
+    const urlChanged = before.url !== after.url;
+    const titleChanged = before.title !== after.title;
+    // Visible-text shifted by either content hash or significant length delta.
+    const lenDelta = Math.abs(after.textLen - before.textLen);
+    const lenPct = before.textLen > 0 ? lenDelta / before.textLen : (after.textLen > 0 ? 1 : 0);
+    const domChanged = before.textHash !== after.textHash || lenPct > 0.05;
+    const modalAppeared = (after.modalCount || 0) > (before.modalCount || 0);
+    const modalClosed = (after.modalCount || 0) < (before.modalCount || 0);
+    let elementStateChanged = false;
+    if (before.elState && after.elState) {
+      const keys: (keyof typeof before.elState)[] = ['pressed', 'expanded', 'selected', 'checked'];
+      for (const k of keys) {
+        if (before.elState[k] !== after.elState[k]) { elementStateChanged = true; break; }
+      }
+    }
+    const observed = urlChanged || titleChanged || domChanged || modalAppeared || modalClosed || elementStateChanged;
+    let hint: string | undefined;
+    if (urlChanged) hint = 'Page changed — call inspect_page before next interaction.';
+    else if (modalAppeared) hint = 'A modal/dialog appeared — call inspect_page to see its contents.';
+    else if (modalClosed) hint = 'A modal/dialog closed.';
+    else if (!observed) hint = 'No observable change (no URL/title/DOM/modal/state delta). Click may have been intercepted, the element may be a no-op, or the SPA is still rendering — try wait_for / scroll / different element / await_user.';
     return JSON.stringify({
       success: true,
       tag: resolved.tag,
-      urlChanged: before.url !== after.url,
-      titleChanged: before.title !== after.title,
+      urlChanged,
+      titleChanged,
+      domChanged,
+      modalAppeared: modalAppeared || undefined,
+      modalClosed: modalClosed || undefined,
+      elementStateChanged: elementStateChanged || undefined,
       url: after.url,
       title: after.title,
-      hint: before.url !== after.url ? 'Page changed — call inspect_page before next interaction.' : undefined,
+      hint,
     });
   },
 });
