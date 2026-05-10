@@ -18,6 +18,7 @@ const inspectedTabId = chrome.devtools.inspectedWindow.tabId;
 const $log    = document.getElementById('log');
 const $cmd    = document.getElementById('cmd');
 const $prompt = document.getElementById('prompt-row');
+const $promptGlyph = document.getElementById('prompt-glyph');
 const $ac     = document.getElementById('ac');
 const $model  = document.getElementById('model');
 const $page   = document.getElementById('page');
@@ -33,6 +34,11 @@ let sessionModel = '';
 let liveBodyEl = null;     // streaming target <span>
 let liveText = '';
 let liveRowEl = null;
+let replMode = false;      // /js toggles a JS-REPL mode (no LLM, eval in page)
+const DEFAULT_PROMPT_GLYPH = '›';
+const REPL_PROMPT_GLYPH = 'js>';
+const DEFAULT_PLACEHOLDER = 'ask anything · / for commands · Shift+Enter newline · Esc cancels';
+const REPL_PLACEHOLDER = 'JS REPL · evaluates in the inspected page · /js to exit';
 let lastAssistantText = '';
 let modelsCache = [];      // ModelOption[]
 let chatsCache = [];       // chat.list.result.chats
@@ -215,6 +221,7 @@ const COMMANDS = [
   { name: '/title',    help: 'Print the inspected page <title>',       run: () => evalAndPrint('document.title') },
   { name: '/tabs',     help: 'List open browser tabs (click to switch)', run: cmdTabs },
   { name: '/eval',     help: 'Eval JS in the inspected page: /eval <expr>', run: cmdEval },
+  { name: '/js',       help: 'Toggle JS REPL mode (every line evaluated in the page)', run: cmdReplToggle },
   { name: '/dom',      help: 'querySelectorAll summary: /dom <selector>',   run: cmdDom },
   { name: '/snapshot', help: 'Quick page summary (title/url/headings)', run: cmdSnapshot },
   { name: '/export',   help: 'Download the scrollback as a .txt file', run: cmdExport },
@@ -373,6 +380,22 @@ async function cmdEval(arg) {
   const r = await evalInPage(arg);
   if (r.error) appendRow('err', '✗', r.error);
   else appendRow('info', '→', formatEvalResult(r.value));
+}
+
+function setReplMode(on) {
+  replMode = !!on;
+  if ($promptGlyph) $promptGlyph.textContent = replMode ? REPL_PROMPT_GLYPH : DEFAULT_PROMPT_GLYPH;
+  if ($cmd) $cmd.placeholder = replMode ? REPL_PLACEHOLDER : DEFAULT_PLACEHOLDER;
+}
+
+function cmdReplToggle() {
+  if (replMode) {
+    setReplMode(false);
+    appendRow('info', 'i', 'JS REPL off — back to chat mode.');
+  } else {
+    setReplMode(true);
+    appendRow('info', 'i', 'JS REPL on. Each line is evaluated in the inspected page. /js again to exit.');
+  }
 }
 
 async function cmdDom(arg) {
@@ -638,10 +661,17 @@ async function submit() {
   cmdIdx = cmdHistory.length;
   cmdDraft = '';
 
-  appendRow('user', '›', text);
+  appendRow('user', replMode ? 'js>' : '›', text);
 
   if (text.startsWith('/')) {
     try { await handleSlash(text); } catch (e) { appendRow('err', '✗', String(e)); }
+    return;
+  }
+
+  if (replMode) {
+    const r = await evalInPage(text);
+    if (r.error) appendRow('err', '✗', r.error);
+    else appendRow('info', '→', formatEvalResult(r.value));
     return;
   }
 
