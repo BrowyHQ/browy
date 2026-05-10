@@ -105,7 +105,7 @@ browy/
 
 ## Status
 
-Browy is **0.1.0 preview**. Windows is the most-tested platform; macOS/Linux installers ship with v0.2. Expect rough edges, especially around long-running multi-step automations on hostile SPAs (LinkedIn, Notion, Discord). File issues — they help.
+Browy is **v0.1.2** — first public release. Windows, macOS, and Linux all have native-host installers and packaged builds (see [Releases](https://github.com/BrowyHQ/browy/releases)). Expect rough edges around long-running multi-step automations on hostile SPAs (LinkedIn, Notion, Discord). File issues — they help.
 
 ## Contributing
 
