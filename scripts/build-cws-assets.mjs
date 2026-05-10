@@ -194,8 +194,8 @@ function composeMarquee() {
   // Tagline scale 5 = 30 wide per char chain. 24 chars ≈ 720, fits.
   const tag = drawWord('AI AGENT IN YOUR BROWSER', 5, C.brandSoft, 1);
 
-  // Sub line: scale 4. 25 chars × 24 = 600 wide.
-  const sub = drawWord('POWERED BY GITHUB COPILOT', 4, C.inkDim, 1);
+  // Sub line: scale 4. 21 chars × 24 = 504 wide.
+  const sub = drawWord('GITHUB COPILOT INSIDE', 4, C.inkDim, 1);
 
   const wmY = 130;
   const tagY = wmY + 112 + 40;
@@ -258,12 +258,12 @@ function composeTitleCard() {
 
   const wm  = drawWord('BROWY',                 24, C.brandLite, 1);  // 24*5=120/glyph, 5 letters + 4 gaps = 24*29 = 696 wide
   const tag = drawWord('AI AGENT IN YOUR BROWSER', 8, C.brandSoft, 1); // 8*6=48/glyph chain, 24 chars * 48 = 1152
-  const sub = drawWord('POWERED BY GITHUB COPILOT', 6, C.inkDim, 1);
+  const sub = drawWord('GITHUB COPILOT INSIDE', 6, C.inkDim, 1);
 
   // Center the wordmarks horizontally.
   const wmW  = (5 * 5 + 4) * 24;             // 696
   const tagW = (24 * 5 + 23) * 8;            // 1144
-  const subW = (25 * 5 + 24) * 6;            // 894
+  const subW = (21 * 5 + 20) * 6;            // 750
   const wmX  = (W - wmW)  / 2;
   const tagX = (W - tagW) / 2;
   const subX = (W - subW) / 2;

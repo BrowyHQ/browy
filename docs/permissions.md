@@ -30,25 +30,25 @@ Web Store listing's permission justification.
 |---|---|
 | **`<all_urls>`** | Browy is a *general-purpose* browser agent — you might ask it to operate on any site you can visit. Restricting host permissions to a fixed list would prevent Browy from working on the next site you ask about. Browy only attaches the debugger to tabs **you explicitly target via the side panel**; it does not crawl, scrape, or interact with pages in the background. |
 
-## What Browy does *not* do
+## Scope
 
-- ❌ It does not send your browsing history, page contents, or chat history
-  to any Browy-operated server. There is no Browy server. Page content
-  is sent to **GitHub Copilot** (your subscription) via the locally-installed
-  Copilot CLI, exactly as if you were using `gh copilot` from a terminal.
-- ❌ It does not run continuously in the background. The agent only acts
-  when you send a message in the side panel.
-- ❌ It does not expose the GitHub Copilot CLI's built-in file-system or
-  shell tools to the LLM. Browy locks the SDK to a strict allowlist of
-  browser-only tools (`src/agent/loop.ts`, look for `availableTools`).
-- ❌ It does not collect telemetry. There is no analytics SDK in the
-  extension or the host.
+- The agent only acts when you send a message in the side panel; nothing
+  runs in the background.
+- Page content the agent reads is sent to **GitHub Copilot** (your
+  subscription) via the locally-installed Copilot CLI, exactly as if you
+  were using `gh copilot` from a terminal.
+- The native host runs every model call through a strict tool allowlist
+  (`src/agent/loop.ts`, look for `availableTools`). Browser-driving
+  tools are on by default and can each be turned off in Settings → Tools;
+  host-touching tools (`bash`, `read_file`, `write_file`, `grep`,
+  `glob`, `web_fetch`) are off by default and only enabled if you opt
+  in per-tool.
 
 ## Data handling summary
 
 | Data | Where it goes |
 |---|---|
-| Page snapshots, screenshots, DOM extracts, console/network logs | Sent to GitHub Copilot via the local CLI to inform the next agent step. Secrets in URLs and headers (Bearer tokens, JWTs, OAuth params, GitHub/AWS/Stripe keys, Cookies) are redacted at capture time — see `src/agent/redact.ts`. |
-| Chat history | `chrome.storage.local` on your machine. Never uploaded by Browy. |
+| Page snapshots, screenshots, DOM extracts, console/network logs | Sent to GitHub Copilot via the local CLI to inform the next agent step. |
+| Chat history | `chrome.storage.local` on your machine. |
 | Settings | `chrome.storage.local`. |
-| Native host log | `~/.browy/host/host.log`, rotated at 5 MB, with the same secret-redaction filter applied at capture time. |
+| Native host log | `~/.browy/host/host.log`, rotated at 5 MB. |

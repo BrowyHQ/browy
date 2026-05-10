@@ -3,7 +3,7 @@
 // This is a separate code path from the browser Agent in src/agent/loop.ts.
 // It speaks to the Copilot SDK directly with its own default toolset
 // (read_file, write_file, bash, grep, glob, web_fetch, ...), making it a
-// drop-in `gh copilot`-style CLI powered by the user's existing GitHub
+// drop-in `gh copilot`-style CLI that uses the user's existing GitHub
 // Copilot subscription.
 //
 // Sessions live under ~/.browy/cli-sessions/ so they can never collide with

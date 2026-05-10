@@ -203,7 +203,7 @@ SCENES.push({
 
     // Sub fades in t=2.2..2.8.
     const subAlpha = clamp((t - 2.2) / 0.6);
-    const sub = drawWord('POWERED BY GITHUB COPILOT', 3, C.inkDim, 1);
+    const sub = drawWord('GITHUB COPILOT INSIDE', 3, C.inkDim, 1);
     const subX = (W - sub.w) / 2;
     const subY = tagY + 4 * 7 + 30;
 
