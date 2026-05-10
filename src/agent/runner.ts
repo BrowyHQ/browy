@@ -239,6 +239,9 @@ export class Runner {
     if (msg.disabledTools !== undefined) {
       this.agent.setDisabledTools(msg.disabledTools);
     }
+    if (msg.enabledHostTools !== undefined) {
+      this.agent.setEnabledHostTools(msg.enabledHostTools);
+    }
 
     transport.send({
       type: 'session.ready',

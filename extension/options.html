@@ -176,6 +176,12 @@
       padding: 2px 6px; border: 1px solid var(--line-2); color: var(--ink-mute);
       align-self: start; white-space: nowrap;
     }
+    /* opt-in (host) tools — amber accents to flag they reach the machine */
+    .tool-row.opt-in.on .chk { border-color: #f59e0b; background: #f59e0b; }
+    .tool-row.opt-in.on .tname { color: #f59e0b; }
+    .tool-row.opt-in .tcat { color: #f59e0b; border-color: rgba(245, 158, 11, 0.4); }
+    .tool-group .gh.host-warn .gtitle { color: #f59e0b; }
+    .tool-group .gh.host-warn .ghint { color: #f59e0b; }
 
     /* ── Buttons / row actions ─────────────────────────────────────── */
     .btn {
@@ -314,13 +320,15 @@
         <div class="toolbar">
           <input class="search" id="toolSearch" type="text" placeholder="filter tools — name, category, description…" />
           <span class="count" id="toolCount">—</span>
-          <button class="btn" id="toolEnableAll" title="re-enable every tool">enable all</button>
+          <button class="btn" id="toolEnableAll" title="reset all tools to defaults — browser on, host off">reset defaults</button>
         </div>
         <div class="tool-groups" id="toolGroups">
           <div class="empty">loading tools…</div>
         </div>
-        <div style="margin-top:10px;color:var(--ink-mute);font-size:10px">
-          // changes apply on the next chat (or after /clear). default is everything on.
+        <div style="margin-top:10px;color:var(--ink-mute);font-size:10px;line-height:1.5">
+          // changes apply on the next chat (or after /clear).<br/>
+          // <strong>browser tools</strong> are on by default — turn off any you don't want the agent to call.<br/>
+          // <strong>host tools</strong> (read_file, write_file, bash, grep, glob, web_fetch) reach your machine, not the browser. they're off by default; opt in per-tool only if you trust the pages you'll visit.
         </div>
       </div>
     </section>

@@ -65,6 +65,14 @@ export interface SessionStart {
    *  disabled subset on every session.start so user preferences survive
    *  reloads. Tool names not in the host's registry are ignored. */
   disabledTools?: string[];
+  /** Per-user opt-in for Copilot SDK host tools (read_file, write_file,
+   *  bash, grep, glob, web_fetch). These are OFF by default — they give
+   *  the agent shell + filesystem access on the host machine, which a
+   *  malicious page could potentially abuse via prompt injection. The
+   *  extension Settings page surfaces them under "advanced (host tools)"
+   *  with explicit warnings. Names listed here are added to the strict
+   *  `availableTools` allowlist for this session. */
+  enabledHostTools?: string[];
 }
 
 export interface SessionEnd {

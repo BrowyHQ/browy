@@ -90,6 +90,19 @@ const TOOL_REGISTRY = [
   { cat: 'devtools', name: 'get_cookies',         desc: 'cookies for the current origin' },
   { cat: 'devtools', name: 'download_file',       desc: 'trigger a file download' },
   { cat: 'devtools', name: 'upload_file',         desc: 'upload a file via picker' },
+
+  // ── Host tools (opt-in, OFF by default) ───────────────────────────────
+  // These come from the Copilot SDK and reach the user's machine, not the
+  // browser tab. We hide them behind explicit opt-in because a prompt
+  // injection on a visited page could otherwise read ~/.ssh, run arbitrary
+  // shell, or fetch from internal URLs. Names are validated against
+  // HOST_TOOL_ALLOWLIST in src/agent/loop.ts.
+  { cat: 'host', optIn: true, name: 'read_file',  desc: 'read any file on your machine (the agent runs as your user)' },
+  { cat: 'host', optIn: true, name: 'write_file', desc: 'create or overwrite files on your machine' },
+  { cat: 'host', optIn: true, name: 'bash',       desc: 'run arbitrary shell commands (full user privileges)' },
+  { cat: 'host', optIn: true, name: 'grep',       desc: 'search file contents on your machine' },
+  { cat: 'host', optIn: true, name: 'glob',       desc: 'list files by path pattern on your machine' },
+  { cat: 'host', optIn: true, name: 'web_fetch',  desc: 'fetch arbitrary URLs from your machine (bypasses browser CORS/cookies)' },
 ];
 
 const TOOL_CATEGORY_HINTS = {
@@ -97,6 +110,7 @@ const TOOL_CATEGORY_HINTS = {
   navigate: 'navigate between pages and tabs',
   interact: 'click, type, fill, scroll',
   devtools: 'console, network, screenshots, custom JS',
+  host:     '⚠ advanced — agent reaches your filesystem & shell, not just the browser. opt-in only.',
 };
 
 // ── Connect ───────────────────────────────────────────────────────────────
@@ -321,15 +335,22 @@ function saveToolPrefs() {
 }
 
 function isToolEnabled(name) {
-  // Default: enabled. Only `false` disables.
+  // Default behavior depends on the tool's optIn flag.
+  // - browser tools (optIn !== true): default ON; only `false` disables.
+  // - host tools (optIn === true):    default OFF; only `true` enables.
+  const t = TOOL_REGISTRY.find((x) => x.name === name);
+  if (t && t.optIn) return toolPrefs[name] === true;
   return toolPrefs[name] !== false;
 }
 
 function setToolEnabled(name, enabled) {
-  if (enabled) {
-    delete toolPrefs[name]; // omit from map = enabled (default)
+  const t = TOOL_REGISTRY.find((x) => x.name === name);
+  if (t && t.optIn) {
+    if (enabled) toolPrefs[name] = true;
+    else delete toolPrefs[name]; // omit = disabled (default)
   } else {
-    toolPrefs[name] = false;
+    if (enabled) delete toolPrefs[name]; // omit = enabled (default)
+    else toolPrefs[name] = false;
   }
 }
 
@@ -352,7 +373,7 @@ function renderTools() {
   toolCountEl.textContent = `${totalEnabled} of ${TOOL_REGISTRY.length} on`;
 
   toolGroupsEl.innerHTML = '';
-  const orderedCats = ['inspect', 'navigate', 'interact', 'devtools'];
+  const orderedCats = ['inspect', 'navigate', 'interact', 'devtools', 'host'];
   let renderedAny = false;
   for (const cat of orderedCats) {
     const items = groups[cat];
@@ -360,7 +381,8 @@ function renderTools() {
     renderedAny = true;
     const group = document.createElement('div');
     group.className = 'tool-group';
-    const gh = document.createElement('div'); gh.className = 'gh';
+    const gh = document.createElement('div');
+    gh.className = 'gh' + (cat === 'host' ? ' host-warn' : '');
     const gt = document.createElement('span'); gt.className = 'gtitle'; gt.textContent = cat;
     const gh2 = document.createElement('span'); gh2.className = 'ghint';
     gh2.textContent = TOOL_CATEGORY_HINTS[cat] || '';
@@ -371,9 +393,9 @@ function renderTools() {
     for (const t of items) {
       const row = document.createElement('div');
       const on = isToolEnabled(t.name);
-      row.className = 'tool-row ' + (on ? 'on' : 'off');
+      row.className = 'tool-row ' + (on ? 'on' : 'off') + (t.optIn ? ' opt-in' : '');
       row.tabIndex = 0;
-      row.title = on ? 'click to disable' : 'click to enable';
+      row.title = on ? 'click to disable' : (t.optIn ? 'click to enable (advanced — reaches your machine)' : 'click to enable');
 
       const chk = document.createElement('span'); chk.className = 'chk';
       const meta = document.createElement('div');
@@ -419,7 +441,7 @@ if (toolEnableAllEl) {
     toolPrefs = {};
     saveToolPrefs();
     renderTools();
-    showToast('all tools enabled');
+    showToast('reset to defaults — browser tools on, host tools off');
   });
 }
 

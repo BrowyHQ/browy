@@ -162,6 +162,17 @@ interface BrowserConnection {
   browser: Browser;
 }
 
+/** Host (Copilot SDK) tools the user is allowed to opt into via the
+ *  extension Settings page. These reach the host machine's filesystem and
+ *  shell, so they're OFF by default and added to the strict `availableTools`
+ *  allowlist only when the user explicitly enables them. The names mirror
+ *  the SDK's built-in tool surface — we don't reimplement them, we just
+ *  stop suppressing them from the model. Anything not in this set is
+ *  ignored even if requested, so a compromised renderer can't escalate. */
+const HOST_TOOL_ALLOWLIST = new Set<string>([
+  'read_file', 'write_file', 'bash', 'grep', 'glob', 'web_fetch',
+]);
+
 export class Agent {
   private config: Config;
   /** All currently-connected browsers (Brave, Edge, Chrome, ...). */
@@ -190,6 +201,12 @@ export class Agent {
    *  registry. ensureSession() removes these from the SDK's allowlist before
    *  creating/resuming a session. Empty set = no overrides (all built-ins). */
   private disabledTools: Set<string> = new Set();
+  /** Names of Copilot SDK host tools the user has explicitly opted into via
+   *  the extension Settings (read_file, write_file, bash, grep, glob,
+   *  web_fetch). Default empty — these are off unless the user enables them.
+   *  Names listed here are added to `availableTools` so the SDK's built-in
+   *  implementations become reachable from the model. */
+  private enabledHostTools: Set<string> = new Set();
   private onActivity: ActivityCallback = () => {};
   private currentTabInfo: { url: string; title: string; brand: string; tabCount: number } = {
     url: '', title: '', brand: 'Browser', tabCount: 0,
@@ -664,6 +681,15 @@ export class Agent {
     this.disabledTools = new Set(names);
   }
 
+  /** Mirror of setDisabledTools for the host-tool opt-in. The whitelist of
+   *  acceptable names lives in HOST_TOOL_ALLOWLIST below — anything else is
+   *  ignored so a compromised extension can't quietly enable arbitrary SDK
+   *  capabilities. Empty list (default) keeps all host tools blocked. */
+  setEnabledHostTools(names: readonly string[]): void {
+    const safe = (names || []).filter((n) => HOST_TOOL_ALLOWLIST.has(n));
+    this.enabledHostTools = new Set(safe);
+  }
+
   private async ensureSession() {
     if (this.copilotSession) return;
     // Tools close over `self.getBrowserContext()` and read the current CDP at
@@ -688,6 +714,14 @@ export class Agent {
     const blocked = this.disabledTools;
     const filteredTools = blocked.size ? tools.filter((t) => !blocked.has(t.name)) : tools;
     const allowedToolNames = filteredTools.map((t) => t.name);
+    // Host-tool opt-in: extend the strict allowlist with SDK tools the user
+    // enabled in Settings. We do NOT add their definitions to `tools` — the
+    // SDK ships its own implementations; we just stop suppressing them.
+    if (this.enabledHostTools.size) {
+      for (const name of this.enabledHostTools) {
+        if (!allowedToolNames.includes(name)) allowedToolNames.push(name);
+      }
+    }
 
     // Try to resume an existing on-disk session for this Browy id. This is
     // what makes "reload the side panel and pick up where I left off" work.
