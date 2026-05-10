@@ -10,11 +10,13 @@
  *
  *   Browy-Extension-<version>-cws.zip   (Chrome Web Store upload)
  *     manifest.json sits at the root of the zip — the layout the CWS
- *     Developer Dashboard expects.
+ *     Developer Dashboard expects. The "key" field is also stripped, since
+ *     CWS rejects manifests that pin a public key (CWS assigns its own).
  *
- * The extension's manifest pins a public key, so the assigned extension ID
- * is stable (lfeljbgjlkoabhepbkdbjgpbhfmpgmkc) and matches the native host's
- * allowed_origins regardless of install source.
+ * The sideload manifest pins a public key, so the assigned extension ID is
+ * stable (lfeljbgjlkoabhepbkdbjgpbhfmpgmkc) and matches the native host's
+ * allowed_origins. CWS will mint a different ID — once approved, append it
+ * to the native host manifest's allowed_origins so both install paths work.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -64,9 +66,28 @@ console.log(`[pack-ext] sideload → ${sideload}`);
 zip(root, ['extension'], sideload);
 
 console.log(`[pack-ext] cws      → ${cws}`);
-// Pack from inside extension/ so manifest.json lands at the zip root.
-const entries = fs.readdirSync(extDir).filter(n => !n.startsWith('.'));
-zip(extDir, entries, cws);
+// Stage a copy of extension/ with the "key" field stripped — CWS rejects it.
+const cwsStage = path.join(root, '.cache', `cws-stage-${pkg.version}`);
+fs.rmSync(cwsStage, { recursive: true, force: true });
+fs.mkdirSync(cwsStage, { recursive: true });
+function copyDir(src, dst) {
+  fs.mkdirSync(dst, { recursive: true });
+  for (const e of fs.readdirSync(src, { withFileTypes: true })) {
+    if (e.name.startsWith('.')) continue;
+    const s = path.join(src, e.name);
+    const d = path.join(dst, e.name);
+    if (e.isDirectory()) copyDir(s, d);
+    else fs.copyFileSync(s, d);
+  }
+}
+copyDir(extDir, cwsStage);
+const cwsManifest = JSON.parse(fs.readFileSync(path.join(cwsStage, 'manifest.json'), 'utf8'));
+delete cwsManifest.key;
+fs.writeFileSync(path.join(cwsStage, 'manifest.json'), JSON.stringify(cwsManifest, null, 2) + '\n');
+// Pack from inside the staged dir so manifest.json lands at the zip root.
+const entries = fs.readdirSync(cwsStage).filter(n => !n.startsWith('.'));
+zip(cwsStage, entries, cws);
+fs.rmSync(cwsStage, { recursive: true, force: true });
 
 for (const f of [sideload, cws]) {
   const sz = fs.statSync(f).size / 1024;
