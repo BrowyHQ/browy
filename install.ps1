@@ -101,12 +101,15 @@ try {
     Write-Host ""
     Write-Host "✓ Browy $version installed to $installDir" -ForegroundColor Green
     Write-Host ""
-    Write-Host "To finish setup, load the extension into Chrome / Edge / Brave:" -ForegroundColor Cyan
-    Write-Host "  1. Open chrome://extensions"
-    Write-Host "  2. Enable 'Developer mode' (top-right)"
-    Write-Host "  3. Click 'Load unpacked' and select:"
-    Write-Host "     $extensionDir" -ForegroundColor Yellow
-    Write-Host "  4. Pin Browy and click it to open the side panel"
+    Write-Host "To finish setup, install the Browy extension:" -ForegroundColor Cyan
+    Write-Host "  Easiest: add it from the Chrome Web Store"
+    Write-Host "    https://chromewebstore.google.com/detail/iondecjdokngnlkfpipgolgkfegpmjca" -ForegroundColor Yellow
+    Write-Host "  Or sideload from disk:"
+    Write-Host "    1. Open chrome://extensions"
+    Write-Host "    2. Enable 'Developer mode' (top-right)"
+    Write-Host "    3. Click 'Load unpacked' and select:"
+    Write-Host "       $extensionDir" -ForegroundColor Yellow
+    Write-Host "  Then pin Browy and click it to open the side panel."
     Write-Host ""
     Write-Host "To uninstall: & '$installDir\uninstall.bat'; Remove-Item '$installDir','$extensionDir' -Recurse"
 

@@ -24,7 +24,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 export const HOST_NAME = 'com.browy.host';
+// Sideload (Load-unpacked) ID, pinned via the manifest's `key` field so it's
+// stable across loads.
 export const EXTENSION_ID = 'lfeljbgjlkoabhepbkdbjgpbhfmpgmkc';
+// Chrome Web Store assigned ID. Pre-approved here so users who install from
+// the Web Store get a working native-host connection without re-running the
+// installer with --ext-id.
+export const CWS_EXTENSION_ID = 'iondecjdokngnlkfpipgolgkfegpmjca';
+// Default `allowed_origins` covers both install paths.
+export const DEFAULT_EXTENSION_IDS = [EXTENSION_ID, CWS_EXTENSION_ID];
 
 interface BrowserTarget {
   brand: string;
@@ -109,7 +117,7 @@ interface InstallResult {
   detail: string;
 }
 
-export function installHost(extensionIds: string[] = [EXTENSION_ID]): InstallResult[] {
+export function installHost(extensionIds: string[] = DEFAULT_EXTENSION_IDS): InstallResult[] {
   const hostJs = findHostJs();
   // We keep our own install dir under the user's home so we don't depend on
   // the npm global node_modules path being writable later.

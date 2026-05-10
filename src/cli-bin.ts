@@ -120,13 +120,13 @@ async function runRepl() {
 }
 
 async function runInstallHost(args: string[]) {
-  const { installHost, EXTENSION_ID } = await import('./install-host.js');
-  // Allow extra extension ids via --ext-id (e.g. for the published Web Store id).
+  const { installHost, DEFAULT_EXTENSION_IDS } = await import('./install-host.js');
+  // Allow extra extension ids via --ext-id (e.g. dev builds, forks).
   const extraIds: string[] = [];
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--ext-id' && args[i + 1]) { extraIds.push(args[i + 1]); i++; }
   }
-  const ids = [EXTENSION_ID, ...extraIds];
+  const ids = [...DEFAULT_EXTENSION_IDS, ...extraIds];
   console.log(`installing native messaging host for extension id(s): ${ids.join(', ')}`);
   const results = installHost(ids);
   for (const r of results) {

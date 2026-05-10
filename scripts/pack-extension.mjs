@@ -15,8 +15,9 @@
  *
  * The sideload manifest pins a public key, so the assigned extension ID is
  * stable (lfeljbgjlkoabhepbkdbjgpbhfmpgmkc) and matches the native host's
- * allowed_origins. CWS will mint a different ID — once approved, append it
- * to the native host manifest's allowed_origins so both install paths work.
+ * allowed_origins. CWS minted item ID iondecjdokngnlkfpipgolgkfegpmjca; the
+ * native host pre-approves both IDs by default (see DEFAULT_EXTENSION_IDS in
+ * src/install-host.ts), so a single host install works for either path.
  */
 import fs from 'node:fs';
 import path from 'node:path';

@@ -17,19 +17,26 @@ There are two surfaces you can talk to Browy from:
 
 ## Quick install
 
-**Windows** (recommended for first install, bundles Node):
+**Step 1: install the extension**
+[Add Browy from the Chrome Web Store](https://chromewebstore.google.com/detail/iondecjdokngnlkfpipgolgkfegpmjca) (one click).
+
+> Web Store listing in review; the link is live the moment Google approves it. Until then, the install scripts below also stage an unpacked copy you can `Load unpacked` from `chrome://extensions`.
+
+**Step 2: install the native host**
+
+Windows (bundles Node):
 ```powershell
 irm https://github.com/BrowyHQ/browy/releases/latest/download/install.ps1 | iex
 ```
 
-**macOS / Linux**:
+macOS / Linux:
 ```bash
 curl -fsSL https://github.com/BrowyHQ/browy/releases/latest/download/install.sh | bash
 ```
 
-After install, load `extension/` as an unpacked extension at `chrome://extensions` (Developer Mode → Load unpacked → pick the folder the installer printed). Pin the toolbar icon, click it to open the side panel.
+Pin the Browy toolbar icon, click it to open the side panel, sign in to Copilot on first run.
 
-Detailed install + troubleshooting → [extension/README.md](extension/README.md#installation)
+Detailed install + troubleshooting: [extension/README.md](extension/README.md#installation)
 
 ---
 

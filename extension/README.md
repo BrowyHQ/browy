@@ -11,15 +11,20 @@ Both share session state, model selection, and chat history.
 
 ## Installation
 
-### Windows
-1. Run the installer (`Browy-Setup-X.Y.Z.exe`) or the PowerShell one-liner from the [main README](../README.md#quick-install).
-2. The installer drops the host at `%LOCALAPPDATA%\Browy\app\` and registers the native-messaging manifest under `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.browy.host`.
-3. Open `chrome://extensions`, enable **Developer Mode**, click **Load unpacked**, point it at the `extension/` folder the installer printed.
-4. Pin the Browy toolbar icon. Click it. Side panel opens.
+### Step 1: install the extension
 
-### macOS / Linux
-1. Run the install script. It drops the host at `~/.browy/app/` and writes the native-messaging manifest under `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/` (mac) or `~/.config/google-chrome/NativeMessagingHosts/` (linux).
-2. Same Load-unpacked dance as Windows.
+Add Browy from the [Chrome Web Store](https://chromewebstore.google.com/detail/iondecjdokngnlkfpipgolgkfegpmjca) (one click). This works on Chrome, Edge, and Brave.
+
+> Web Store listing currently in review. Until it's live, the platform installers below also drop an unpacked copy of the extension you can load from `chrome://extensions` (Developer Mode → **Load unpacked** → pick the folder the installer printed). The native host pre-approves both extension IDs, so once CWS is live you can switch to the one-click install without re-running anything.
+
+### Step 2: install the native host
+
+#### Windows
+1. Run the PowerShell one-liner from the [main README](../README.md#quick-install) (or the `Browy-Setup-X.Y.Z.exe` installer).
+2. The installer drops the host at `%LOCALAPPDATA%\Browy\app\` and registers the native-messaging manifest under `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.browy.host`.
+
+#### macOS / Linux
+1. Run the install script from the [main README](../README.md#quick-install). It drops the host at `~/.browy/app/` and writes the native-messaging manifest under `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/` (macOS) or `~/.config/google-chrome/NativeMessagingHosts/` (Linux).
 
 ### First run: sign in
 Browy uses your Copilot subscription. On first message it prompts a device-flow sign-in (one click, copy code, paste in browser, done). After that it just works.
