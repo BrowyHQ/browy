@@ -20,6 +20,7 @@ const goBtn  = document.getElementById('goBtn');
 const stopBtn= document.getElementById('stopBtn');
 const newChatBtn = document.getElementById('newChatBtn');
 const chatsBtn = document.getElementById('chatsBtn');
+const exportBtn = document.getElementById('exportBtn');
 const chatsOverlay = document.getElementById('chatsOverlay');
 const chatsCloseBtn = document.getElementById('chatsCloseBtn');
 const chatsList = document.getElementById('chatsList');
@@ -246,6 +247,98 @@ function chatPreview(html) {
     tmp.innerHTML = html || '';
     return (tmp.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 100);
   } catch { return ''; }
+}
+
+// Export the current chat as a Markdown file. Walks the rendered bubbles
+// (the source of truth for what the user actually saw), preserving role +
+// reasoning + tool-step summaries + body. Assistant bodies are already
+// rendered HTML, so we round-trip them through innerText to get a plain
+// readable transcript without HTML noise.
+function exportChat() {
+  try {
+    const bubs = msgs.querySelectorAll('.bub');
+    if (!bubs.length) {
+      flash('nothing to export');
+      return;
+    }
+    const lines = [];
+    const title = deriveChatTitle(msgs.innerHTML) || 'Untitled chat';
+    lines.push('# ' + title);
+    lines.push('');
+    lines.push('_Exported from Browy on ' + new Date().toISOString() + '_');
+    lines.push('');
+    for (const bub of bubs) {
+      const isUser = bub.classList.contains('u');
+      if (isUser) {
+        lines.push('## You');
+        lines.push('');
+        lines.push((bub.innerText || bub.textContent || '').trim());
+      } else {
+        lines.push('## Browy');
+        lines.push('');
+        const reasoning = bub.querySelector('.reasoning');
+        if (reasoning) {
+          const txt = (reasoning.innerText || '').trim();
+          if (txt) {
+            lines.push('<details><summary>reasoning</summary>');
+            lines.push('');
+            lines.push(txt);
+            lines.push('');
+            lines.push('</details>');
+            lines.push('');
+          }
+        }
+        const steps = bub.querySelector('.tool-steps');
+        if (steps) {
+          const stepLines = [];
+          steps.querySelectorAll('.step, .tool-step').forEach(s => {
+            const t = (s.innerText || '').trim().replace(/\s+/g, ' ');
+            if (t) stepLines.push('- ' + t);
+          });
+          if (stepLines.length) {
+            lines.push('<details><summary>tool calls</summary>');
+            lines.push('');
+            lines.push(...stepLines);
+            lines.push('');
+            lines.push('</details>');
+            lines.push('');
+          }
+        }
+        const body = bub.querySelector('.body');
+        const bodyText = body ? (body.innerText || '').trim() : (bub.innerText || '').trim();
+        if (bodyText) lines.push(bodyText);
+      }
+      lines.push('');
+    }
+    const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const safeTitle = (title || 'chat').replace(/[\\/:*?"<>|]+/g, '-').slice(0, 40);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `browy-${safeTitle}-${ts}.md`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    flash('exported');
+  } catch (e) {
+    console.error('[browy] exportChat failed:', e);
+    flash('export failed');
+  }
+}
+
+// Brief toast at the top of the panel for export feedback. Uses the
+// existing infobar host slot, falling back to console if it's not in the DOM.
+function flash(text, ms = 1600) {
+  try {
+    const slot = document.getElementById('host');
+    if (!slot) return;
+    const prev = slot.textContent;
+    slot.textContent = text;
+    slot.style.opacity = '1';
+    setTimeout(() => { slot.textContent = prev || ''; }, ms);
+  } catch {}
 }
 
 let _persistTimer = null;
@@ -1115,12 +1208,16 @@ newChatBtn?.addEventListener('click', () => {
   startNewChat();
 });
 chatsBtn?.addEventListener('click', () => { openChatsOverlay(); });
+exportBtn?.addEventListener('click', () => { exportChat(); });
 chatsCloseBtn?.addEventListener('click', () => { closeChatsOverlay(); });
 chatsNewBtn?.addEventListener('click', () => { closeChatsOverlay(); startNewChat(); });
 chatsSearch?.addEventListener('input', () => { renderChatsList(chatsSearch.value); });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && chatsOverlay.classList.contains('open')) {
     e.preventDefault(); closeChatsOverlay();
+  }
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'E' || e.key === 'e')) {
+    e.preventDefault(); exportChat();
   }
 });
 // Mascot drag + click — uses main-process polling drag for reliability.
