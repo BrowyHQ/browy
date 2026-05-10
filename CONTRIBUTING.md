@@ -1,6 +1,6 @@
 # Contributing to Browy
 
-Thanks for being interested! Browy is in **0.1.0 preview** — the API surface is fluid, the codebase is small, and a lot is still up for grabs.
+Thanks for being interested! Browy is in early access — the API surface is fluid, the codebase is small, and a lot is still up for grabs.
 
 ## Quick start
 
