@@ -41,3 +41,7 @@ SCREENSHOT_SHOTLIST.md
 .copilot/
 .session/
 *.local.md
+
+# Build/render caches
+.cache/
+

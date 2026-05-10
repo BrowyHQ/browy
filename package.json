@@ -34,7 +34,7 @@
     "pack:linux": "node scripts/pack.mjs --target=linux-x64",
     "pack:linux-arm": "node scripts/pack.mjs --target=linux-arm64",
     "pack:extension": "node scripts/pack-extension.mjs",
-    "build:cws-assets": "node scripts/build-cws-assets.mjs",
+    "build:cws-assets": "node scripts/build-cws-assets.mjs",`n    "build:demo-video": "node scripts/build-demo-video.mjs",
     "dist:win": "npm run stage:win     && npm run pack:win",
     "dist:win-nsis": "npm run stage:win     && makensis installer/browy.nsi",
     "dist:mac-x64": "npm run stage:mac-x64 && npm run pack:mac-x64",
@@ -54,6 +54,7 @@
   "author": "ritabratamaiti",
   "license": "Apache-2.0",
   "devDependencies": {
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@types/node": "^25.6.0",
     "@types/ws": "^8.18.1",
     "cross-env": "^7.0.3",
