@@ -1,6 +1,6 @@
 # Contributing to Browy
 
-Thanks for being interested! Browy is in early access — the API surface is fluid, the codebase is small, and a lot is still up for grabs.
+Thanks for being interested! Browy is in early access. The API surface is fluid, the codebase is small, and a lot is still up for grabs.
 
 ## Quick start
 
@@ -17,22 +17,22 @@ Then load `extension/` as an unpacked extension at `chrome://extensions` and fol
 
 1. Edit code.
 2. `npm run build` (or `node build.mjs --watch` for esbuild watch mode).
-3. Send a message in the side panel — Chrome respawns the native host with your new code automatically.
+3. Send a message in the side panel. Chrome respawns the native host with your new code automatically.
 4. If the host is wedged: `Get-Process node | Where { $_.Path -like "*Browy*" } | Stop-Process -Force`.
 
 ## What we'd love help with
 
-- **Cross-platform install paths** — macOS and Linux installers need more testing
-- **SPA-handling improvements** — LinkedIn, Notion, Discord, Figma all do weird things; better wait/retry strategies welcome
-- **More tools** — anything CDP-backed (intercepting requests, mocking responses, perf profiling)
-- **DevTools panel polish** — slash command UX, keyboard shortcuts
-- **Translations** — i18n hasn't started
+- **Cross-platform install paths**: macOS and Linux installers need more testing
+- **SPA-handling improvements**: LinkedIn, Notion, Discord, Figma all do weird things; better wait/retry strategies welcome
+- **More tools**: anything CDP-backed (intercepting requests, mocking responses, perf profiling)
+- **DevTools panel polish**: slash command UX, keyboard shortcuts
+- **Translations**: i18n hasn't started
 
 ## Coding style
 
 - TypeScript strict mode where it makes sense
 - esbuild bundle, no transpiler config
-- Prefer small focused PRs over giant ones — easier to review, easier to revert
+- Prefer small focused PRs over giant ones. They're easier to review and easier to revert
 - New tools go in `src/agent/loop.ts` near the existing `tools = [` array; copy the shape of an existing tool
 
 ## Tests

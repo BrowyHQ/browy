@@ -1,9 +1,9 @@
 # Browy Extension
 
-The Chromium extension surface — what loads inside your browser. There are **two UIs** that talk to the same Node native-messaging host:
+The Chromium extension surface: what loads inside your browser. There are **two UIs** that talk to the same Node native-messaging host:
 
-1. **Chat (side panel)** — pixel-mascot, day-to-day automation
-2. **DevTools panel — console-style CLI** — power-user REPL
+1. **Chat (side panel)**: pixel-mascot, day-to-day automation
+2. **DevTools panel: console-style CLI**: power-user REPL
 
 Both share session state, model selection, and chat history.
 
@@ -18,21 +18,21 @@ Both share session state, model selection, and chat history.
 4. Pin the Browy toolbar icon. Click it. Side panel opens.
 
 ### macOS / Linux
-1. Run the install script — it drops the host at `~/.browy/app/` and writes the native-messaging manifest under `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/` (mac) or `~/.config/google-chrome/NativeMessagingHosts/` (linux).
+1. Run the install script. It drops the host at `~/.browy/app/` and writes the native-messaging manifest under `~/Library/Application Support/Google/Chrome/NativeMessagingHosts/` (mac) or `~/.config/google-chrome/NativeMessagingHosts/` (linux).
 2. Same Load-unpacked dance as Windows.
 
-### First run — sign in
+### First run: sign in
 Browy uses your Copilot subscription. On first message it prompts a device-flow sign-in (one click, copy code, paste in browser, done). After that it just works.
 
-> ![Sign-in screenshot — sidepanel-signin.png](../docs/screenshots/sidepanel-signin.png)
+> ![Sign-in screenshot: sidepanel-signin.png](../docs/screenshots/sidepanel-signin.png)
 
 ---
 
-## Chat — side panel
+## Chat: side panel
 
 The pixel-art mascot is your daily driver. Type → it acts.
 
-> ![Sidepanel hero — sidepanel-hero.png](../docs/screenshots/sidepanel-hero.png)
+> ![Sidepanel hero: sidepanel-hero.png](../docs/screenshots/sidepanel-hero.png)
 
 ### What's on screen
 
@@ -44,9 +44,9 @@ The pixel-art mascot is your daily driver. Type → it acts.
 | **Composer** | Multiline input. Enter to send, Shift+Enter for newline. ⏵ to send, ⏹ to abort an in-flight turn |
 | **Header buttons** | ➕ new chat · ☰ chat history · ⚙ settings (opens `options.html` in a new tab) |
 
-### 1. Basic flow — talk to your tabs
+### 1. Basic flow: talk to your tabs
 
-> ![Basic flow — sidepanel-basic.png](../docs/screenshots/sidepanel-basic.png)
+> ![Basic flow: sidepanel-basic.png](../docs/screenshots/sidepanel-basic.png)
 
 ```
 You: what is the headline of this page
@@ -55,11 +55,11 @@ Browy:
 The headline reads: "The YC Startup Directory" on ycombinator.com/companies.
 ```
 
-Browy uses your **focused tab** by default. Switch tabs and the next message picks up the new context — the tab strip updates in real time.
+Browy uses your **focused tab** by default. Switch tabs and the next message picks up the new context, and the tab strip updates in real time.
 
-### 2. Multi-tab tasks — it follows your focus
+### 2. Multi-tab tasks: it follows your focus
 
-> ![Multi-tab — sidepanel-multitab.png](../docs/screenshots/sidepanel-multitab.png)
+> ![Multi-tab: sidepanel-multitab.png](../docs/screenshots/sidepanel-multitab.png)
 
 ```
 You: open hacker news and tell me the top 3 stories with comment counts
@@ -73,7 +73,7 @@ Browy:
 
 Browy decides between **using the active tab** vs **opening a new one** based on the request. If you say *"on this page..."* it stays put.
 
-### 3. Form filling — the three-step pattern
+### 3. Form filling: the three-step pattern
 
 The fastest, most reliable form pattern is `extract_form` → `fill_form` (one bulk call) → `submit_form`. Browy knows this.
 
@@ -86,17 +86,17 @@ Browy:
 [submit_form]  url changed → /thanks. Subscribed.
 ```
 
-> ![Form filling — sidepanel-forms.png](../docs/screenshots/sidepanel-forms.png)
+> ![Form filling: sidepanel-forms.png](../docs/screenshots/sidepanel-forms.png)
 
 ### 4. Resuming old chats
 
 Click ☰ to open the chat list. Each entry shows the first-message summary + when you last touched it. Click → resumes from the SDK transcript (full history reloaded, indices fresh).
 
-> ![Chat list — sidepanel-chats.png](../docs/screenshots/sidepanel-chats.png)
+> ![Chat list: sidepanel-chats.png](../docs/screenshots/sidepanel-chats.png)
 
 ### 5. Login walls and `await_user`
 
-When Browy hits a sign-in flow it doesn't try to type your password — it pauses and asks you:
+When Browy hits a sign-in flow it doesn't try to type your password. It pauses and asks you:
 
 ```
 Browy: I hit a Google sign-in. Please log in in the tab I just opened, then say "go" to continue.
@@ -104,24 +104,24 @@ Browy: I hit a Google sign-in. Please log in in the tab I just opened, then say 
 
 You sign in (your password manager helps), reply `go`, Browy resumes. **It never sees your credentials.** Once cookies are set, the next 100 turns just work.
 
-> ![await_user prompt — sidepanel-awaituser.png](../docs/screenshots/sidepanel-awaituser.png)
+> ![await_user prompt: sidepanel-awaituser.png](../docs/screenshots/sidepanel-awaituser.png)
 
 ### Settings (`options.html`)
 
-> ![Settings page — options-page.png](../docs/screenshots/options-page.png)
+> ![Settings page: options-page.png](../docs/screenshots/options-page.png)
 
-- **Model** — pick any model your Copilot subscription exposes
-- **Sign in / sign out** — re-trigger device-flow auth
-- **Install Backend** — visible when the host is offline; one-click copy install commands for Win + Mac/Linux + GitHub Releases link
-- **Build version** — for bug reports
+- **Model**: pick any model your Copilot subscription exposes
+- **Sign in / sign out**: re-trigger device-flow auth
+- **Install Backend**: visible when the host is offline; one-click copy install commands for Win + Mac/Linux + GitHub Releases link
+- **Build version**: for bug reports
 
 ---
 
-## DevTools panel — console CLI
+## DevTools panel: console CLI
 
 Open DevTools (F12 or Cmd-Opt-I) → click the **Browy** tab. You get a console-styled REPL right next to the inspector.
 
-> ![DevTools panel — devtools-hero.png](../docs/screenshots/devtools-hero.png)
+> ![DevTools panel: devtools-hero.png](../docs/screenshots/devtools-hero.png)
 
 ### Why use the DevTools panel over the sidepanel?
 
@@ -143,7 +143,7 @@ Type `/` in the prompt to see available commands.
 | `/signin` | Re-run Copilot device-flow auth |
 | `/help` | Show all commands |
 
-> ![Slash menu — devtools-slash.png](../docs/screenshots/devtools-slash.png)
+> ![Slash menu: devtools-slash.png](../docs/screenshots/devtools-slash.png)
 
 ### Inline `evaluate_js`
 
@@ -157,7 +157,7 @@ Prefix any line with `> ` to evaluate JS directly in the inspected page (top-lev
 { user: "ritabrata", scopes: ["read", "write"] }
 ```
 
-This is just a tool call wrapper — Browy still wraps with safety checks and prints the result inline.
+This is just a tool call wrapper. Browy still wraps with safety checks and prints the result inline.
 
 ### Network + console taps
 
@@ -176,7 +176,7 @@ Browy: [scroll down] → [get_network_requests filter=/graphql]
   POST /graphql  user.preloadProfiles(ids:[...])  →  200  92ms
 ```
 
-> ![Network tap — devtools-network.png](../docs/screenshots/devtools-network.png)
+> ![Network tap: devtools-network.png](../docs/screenshots/devtools-network.png)
 
 ### Switching models
 
@@ -213,7 +213,7 @@ Browy:
 | ...       | ...            | ...                                          |
 ```
 
-> ![YC scrape — example-yc.png](../docs/screenshots/example-yc.png)
+> ![YC scrape: example-yc.png](../docs/screenshots/example-yc.png)
 
 ### Example: GitHub PR review
 

@@ -26,8 +26,8 @@ In scope:
 - The build pipeline (anything that affects what users actually run)
 
 Out of scope:
-- The GitHub Copilot SDK and Copilot service itself — report those to GitHub directly
-- Bugs in `playwright-core` upstream — report to Microsoft / the Playwright maintainers
+- The GitHub Copilot SDK and Copilot service itself: report those to GitHub directly
+- Bugs in `playwright-core` upstream: report to Microsoft / the Playwright maintainers
 
 ## What we consider a vulnerability
 
