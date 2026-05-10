@@ -4,7 +4,7 @@
 
 📖 **Documentation:** [browyhq.github.io/docs](https://browyhq.github.io/docs/) — install, first chat, tools reference, DevTools panel, architecture, FAQ.
 
-**Think Claude Code or Aider, but in your browser.** Browy is the AI agent that lives in your browser — a Chromium extension (Chrome / Edge / Brave) backed by a small Node native-messaging host that wraps the [GitHub Copilot SDK](https://www.npmjs.com/package/@github/copilot-sdk) and drives the page through the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) via `chrome.debugger`. It works against your **real** profile — your cookies, your sessions, your logins — so most "log in to do X" tasks just work. An open-source alternative to Browser-Use and Skyvern.
+**Think Claude Code or Aider, but in your browser.** Browy is the AI agent that lives in your browser — a Chromium extension (Chrome / Edge / Brave) backed by a small Node native-messaging host that drives the page through the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) via `chrome.debugger`. It works against your **real** profile — your cookies, your sessions, your logins — so most "log in to do X" tasks just work. An open-source alternative to Browser-Use and Skyvern.
 
 There are two surfaces you can talk to Browy from:
 
@@ -67,7 +67,7 @@ Detailed install + troubleshooting → [extension/README.md](extension/README.md
 - **Lives in your real browser.** Not a headless puppet. Your cookies, extensions, history, password manager — Browy uses them. Most "first, log in" steps go away.
 - **Indexed page snapshot.** Every turn, Browy gets a numbered list of every visible interactive element (`[12]<button>Submit</button>`). It clicks by index — no flaky CSS selectors, no "find the right XPath" guesswork.
 - **DevTools-aware.** Network requests, console logs, cookies, storage — all available as tools. Great for debugging your own apps.
-- **Bring your own model.** The native host wraps the Copilot SDK, so you pick from any model your Copilot subscription exposes (Claude, GPT, Gemini, Llama, ...). Switch via `/model` in the DevTools CLI or in Settings.
+- **Bring your own model.** Pick from any frontier model the agent has access to (Claude, GPT, Gemini, Llama, ...). Switch via `/model` in the DevTools CLI or in Settings.
 - **Open source, Apache-2.0.** Audit the host. Audit the extension. Pin a known-good build.
 
 ## Browy vs alternatives
@@ -79,7 +79,7 @@ Detailed install + troubleshooting → [extension/README.md](extension/README.md
 | Uses your real browser profile | ✅ | ❌ Fresh sandbox | ❌ Cloud | n/a (terminal) |
 | Browser extension UI | ✅ | ❌ | ❌ | ❌ |
 | Native DevTools panel | ✅ | ❌ | ❌ | ❌ |
-| BYO model via subscription | ✅ GitHub Copilot | ❌ Per-token API | ❌ Per-task | ❌ Per-token API |
+| BYO frontier models | ✅ Claude, GPT, Gemini, Llama | ❌ Per-token API | ❌ Per-task | ❌ Per-token API |
 | Headless CLI mode | ✅ `browy run` | ✅ | ✅ | ✅ |
 
 ---
