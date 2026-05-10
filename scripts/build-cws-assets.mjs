@@ -249,6 +249,93 @@ async function render(svg, name, w, h) {
 await render(composePromo(),    'promo-tile', 440,  280);
 await render(composeMarquee(),  'marquee',    1400, 560);
 
+// ── Demo video title + outro cards (1920x1080) ──────────────────────────
+function composeTitleCard() {
+  const W = 1920, H = 1080;
+  const mascotSize = 520;
+  const mascotX = (W - mascotSize) / 2;
+  const mascotY = 140;
+
+  const wm  = drawWord('BROWY',                 24, C.brandLite, 1);  // 24*5=120/glyph, 5 letters + 4 gaps = 24*29 = 696 wide
+  const tag = drawWord('AI AGENT IN YOUR BROWSER', 8, C.brandSoft, 1); // 8*6=48/glyph chain, 24 chars * 48 = 1152
+  const sub = drawWord('POWERED BY GITHUB COPILOT', 6, C.inkDim, 1);
+
+  // Center the wordmarks horizontally.
+  const wmW  = (5 * 5 + 4) * 24;             // 696
+  const tagW = (24 * 5 + 23) * 8;            // 1144
+  const subW = (25 * 5 + 24) * 6;            // 894
+  const wmX  = (W - wmW)  / 2;
+  const tagX = (W - tagW) / 2;
+  const subX = (W - subW) / 2;
+
+  const wmY  = mascotY + mascotSize + 60;
+  const tagY = wmY + 24 * 7 + 50;
+  const subY = tagY + 8 * 7 + 40;
+
+  const ledStrip = `
+    <rect x="0" y="${H - 12}" width="${W}" height="3" fill="${C.brandDeep}"/>
+    <rect x="120" y="${H - 9}" width="120" height="3" fill="${C.led}"/>
+    <rect x="260" y="${H - 9}" width="40"  height="3" fill="${C.brand}"/>
+  `;
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" shape-rendering="crispEdges">
+  ${gridBg(W, H)}
+  ${mascotG(mascotX, mascotY, mascotSize)}
+  <g transform="translate(${wmX},${wmY})">${wm.svg}</g>
+  <g transform="translate(${tagX},${tagY})">${tag.svg}</g>
+  <g transform="translate(${subX},${subY})">${sub.svg}</g>
+  ${ledStrip}
+</svg>`;
+}
+
+function composeOutroCard() {
+  const W = 1920, H = 1080;
+  const mascotSize = 320;
+  const mascotX = (W - mascotSize) / 2;
+  const mascotY = 120;
+
+  const head = drawWord('TRY IT', 20, C.brandLite, 1);
+  const url1 = drawWord('BROWY.DEV',                 12, C.brandSoft, 1);
+  const url2 = drawWord('GITHUB.COM SLASH BROWYHQ',  8,  C.inkDim, 1);
+
+  const headW = (6 * 5 + 5) * 20;
+  const u1W   = (9  * 5 + 8) * 12;
+  const u2W   = (24 * 5 + 23) * 8;
+
+  const headY = mascotY + mascotSize + 70;
+  const u1Y   = headY + 20 * 7 + 60;
+  const u2Y   = u1Y + 12 * 7 + 50;
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" shape-rendering="crispEdges">
+  ${gridBg(W, H)}
+  ${mascotG(mascotX, mascotY, mascotSize)}
+  <g transform="translate(${(W - headW)/2},${headY})">${head.svg}</g>
+  <g transform="translate(${(W - u1W)/2},${u1Y})">${url1.svg}</g>
+  <g transform="translate(${(W - u2W)/2},${u2Y})">${url2.svg}</g>
+  <rect x="0" y="${H - 12}" width="${W}" height="3" fill="${C.brandDeep}"/>
+  <rect x="120" y="${H - 9}" width="120" height="3" fill="${C.led}"/>
+</svg>`;
+}
+
+const VIDEO_OUT = path.join(REPO, 'extension/icons/video');
+fs.mkdirSync(VIDEO_OUT, { recursive: true });
+
+async function renderTo(dir, svg, name, w, h) {
+  const svgPath = path.join(dir, name + '.svg');
+  const pngPath = path.join(dir, name + '.png');
+  fs.writeFileSync(svgPath, svg);
+  await sharp(Buffer.from(svg)).resize(w, h).png({ compressionLevel: 9 }).toFile(pngPath);
+  const { size } = fs.statSync(pngPath);
+  console.log(`✓ ${path.relative(REPO, pngPath)}  ${w}x${h}  ${(size / 1024).toFixed(1)} KB`);
+}
+
+console.log('\nDemo video cards:');
+await renderTo(VIDEO_OUT, composeTitleCard(), 'title-card', 1920, 1080);
+await renderTo(VIDEO_OUT, composeOutroCard(), 'outro-card', 1920, 1080);
+
+
 // ── CWS screenshots: place each source side-panel capture on a 1280x800 ──
 // canvas so the listing's gallery reads as a coherent set instead of a pile
 // of variously-sized vertical strips.
