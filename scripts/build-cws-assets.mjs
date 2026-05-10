@@ -15,7 +15,7 @@ import sharp from 'sharp';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, '..');
-const OUT = path.join(REPO, 'extension/icons/cws');
+const OUT = path.join(REPO, 'marketing/cws');
 fs.mkdirSync(OUT, { recursive: true });
 
 // ── Palette (matches extension/icons/icon.svg) ───────────────────────────
@@ -319,7 +319,7 @@ function composeOutroCard() {
 </svg>`;
 }
 
-const VIDEO_OUT = path.join(REPO, 'extension/icons/video');
+const VIDEO_OUT = path.join(REPO, 'marketing/video');
 fs.mkdirSync(VIDEO_OUT, { recursive: true });
 
 async function renderTo(dir, svg, name, w, h) {

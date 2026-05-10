@@ -45,3 +45,7 @@ SCREENSHOT_SHOTLIST.md
 # Build/render caches
 .cache/
 
+
+marketing/cws/
+marketing/video/
+

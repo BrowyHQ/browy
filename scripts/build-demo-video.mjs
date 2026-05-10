@@ -18,7 +18,7 @@ import ffmpeg from '@ffmpeg-installer/ffmpeg';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(__dirname, '..');
-const OUT_DIR  = path.join(REPO, 'extension/icons/video');
+const OUT_DIR  = path.join(REPO, 'marketing/video');
 const TMP_DIR  = path.join(REPO, '.cache/demo-frames');
 const OUT_MP4  = path.join(OUT_DIR, 'browy-demo.mp4');
 const SHOT_DIR = path.resolve(REPO, '../browy-docs/src/assets/screenshots');
