@@ -1,10 +1,10 @@
-# Browy — AI agent for Chrome / Edge / Brave, powered by GitHub Copilot
+# Browy — the AI agent that lives in your browser
 
-> Free, open-source browser AI agent. Local. Uses your own GitHub Copilot subscription. 41 browser tools. No cloud, no separate API keys.
+> Open-source Chrome extension that drives your real tabs through chat. Powered by the GitHub Copilot subscription you already use in your editor — no new API key, no cloud round-trip.
 
 📖 **Documentation:** [browyhq.github.io/docs](https://browyhq.github.io/docs/) — install, first chat, tools reference, DevTools panel, architecture, FAQ.
 
-**Think Claude Code or Aider, but in your browser.** Browy is a Chromium extension (Chrome / Edge / Brave) backed by a small Node native-messaging host that wraps the [GitHub Copilot SDK](https://www.npmjs.com/package/@github/copilot-sdk) and drives the page through the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) via `chrome.debugger`. It works against your **real** profile — your cookies, your sessions, your logins — so most "log in to do X" tasks just work. An open-source alternative to Browser-Use and Skyvern that runs locally and uses the GitHub Copilot subscription you already have.
+**Think Claude Code or Aider, but in your browser.** Browy is the AI agent that lives in your browser — a Chromium extension (Chrome / Edge / Brave) backed by a small Node native-messaging host that wraps the [GitHub Copilot SDK](https://www.npmjs.com/package/@github/copilot-sdk) and drives the page through the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) via `chrome.debugger`. It works against your **real** profile — your cookies, your sessions, your logins — so most "log in to do X" tasks just work. An open-source alternative to Browser-Use and Skyvern that runs locally and uses the GitHub Copilot subscription you already pay for.
 
 There are two surfaces you can talk to Browy from:
 

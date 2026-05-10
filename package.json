@@ -1,7 +1,7 @@
 {
   "name": "browy",
   "version": "0.1.2",
-  "description": "Copilot-powered AI agent that lives in your browser",
+  "description": "The AI agent that lives in your browser. Drives real tabs through chat, powered by your GitHub Copilot subscription.",
   "type": "module",
   "bin": {
     "browy": "./dist/cli-bin.js"

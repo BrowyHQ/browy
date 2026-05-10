@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Browy",
   "version": "0.1.2",
-  "description": "AI agent in your browser. Drives tabs, reads pages, writes code.",
+  "description": "The AI agent that lives in your browser. Drive real tabs through chat, powered by your GitHub Copilot subscription.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAic6seh91XBX5N/FYs/fPAXNXev9RIfLTPBNgBrAX2Pz12MSteFZMCy/vZxNoc8PevytkvX1PQgP1sp7n3e8j0RAV+KOw1PZRtvFqxMEzf6fZhJPV9DqWJubzFB7lERq6m96LHOIbK2fG//aoFph3xJwkbTvI7wkGtxj6hSNXfxNT/yJtyj1Po8ei3ZlVrActpM9qtdxMS5BJ3D4aBh5Y3ZEqPGYsErzHRx4JNDtPH3ZqrvW7jXqCBCV8LmrjctEtnRq44Mwo49wYo0T0b/mWIrNusFiQUTBLnpXvffMh+axKHV/WFyB5TfZROLozKBnYaZbwYRWpplUmU5WtR2X+BwIDAQAB",
   "minimum_chrome_version": "114",
   "background": {
