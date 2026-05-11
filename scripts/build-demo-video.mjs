@@ -397,16 +397,106 @@ for (const scene of SCENES) {
 }
 process.stdout.write(`\r  ${totalFrames}/${totalFrames}  done in ${((Date.now() - t0) / 1000).toFixed(1)}s\n`);
 
+// ── Synthesise chiptune audio ──────────────────────────────────────────
+// Pure-Node WAV synth. Square-wave arpeggio over a triangle bass, A minor
+// progression Am-F-C-G repeated 3x to fill the 24s reel. Soft fade in/out
+// so it loops cleanly inside README/CWS embeds.
+console.log('\nSynthesising audio...');
+const SR = 44100;
+const TOTAL_SAMPLES = Math.round(totalDur * SR);
+const audio = new Float32Array(TOTAL_SAMPLES);
+
+const NOTE = {
+  F2: 87.31,  G2: 98.00,  A2: 110.00, C3: 130.81,
+  F4: 349.23, G4: 392.00, A4: 440.00, B4: 493.88,
+  C5: 523.25, D5: 587.33, E5: 659.25, F5: 698.46,
+  G5: 783.99, A5: 880.00, B5: 987.77, C6: 1046.50,
+};
+
+function square(buf, freq, start, dur, vol) {
+  const period = SR / freq;
+  const attack = SR * 0.005;
+  for (let i = 0; i < dur && start + i < buf.length; i++) {
+    const env = Math.min(1, i / attack) * Math.max(0, 1 - i / dur);
+    const phase = (i % period) / period;
+    buf[start + i] += (phase < 0.5 ? 1 : -1) * vol * env;
+  }
+}
+
+function triangle(buf, freq, start, dur, vol) {
+  const period = SR / freq;
+  const attack = SR * 0.02;
+  for (let i = 0; i < dur && start + i < buf.length; i++) {
+    const env = Math.min(1, i / attack) * Math.max(0.4, 1 - i / dur);
+    const phase = (i % period) / period;
+    buf[start + i] += (4 * Math.abs(phase - 0.5) - 1) * vol * env;
+  }
+}
+
+const progression = [
+  { bass: 'A2', arp: ['A4', 'C5', 'E5', 'A5', 'E5', 'C5'] },
+  { bass: 'F2', arp: ['F4', 'A4', 'C5', 'F5', 'C5', 'A4'] },
+  { bass: 'C3', arp: ['C5', 'E5', 'G5', 'C6', 'G5', 'E5'] },
+  { bass: 'G2', arp: ['G4', 'B4', 'D5', 'G5', 'D5', 'B4'] },
+];
+
+const CHORD_DUR_S = 2;
+const CHORDS_TOTAL = Math.floor(totalDur / CHORD_DUR_S);
+for (let c = 0; c < CHORDS_TOTAL; c++) {
+  const chord = progression[c % progression.length];
+  const start = c * CHORD_DUR_S * SR;
+  const dur = CHORD_DUR_S * SR;
+  triangle(audio, NOTE[chord.bass], start, dur, 0.18);
+  const noteDur = Math.floor(dur / chord.arp.length);
+  for (let n = 0; n < chord.arp.length; n++) {
+    square(audio, NOTE[chord.arp[n]], start + n * noteDur, noteDur, 0.10);
+  }
+}
+
+const fadeIn = SR * 0.5;
+const fadeOut = SR * 1.0;
+for (let i = 0; i < fadeIn && i < audio.length; i++) audio[i] *= i / fadeIn;
+for (let i = 0; i < fadeOut && i < audio.length; i++) {
+  audio[audio.length - 1 - i] *= i / fadeOut;
+}
+
+const WAV_PATH = path.join(TMP_DIR, 'audio.wav');
+const dataBytes = audio.length * 2;
+const wav = Buffer.alloc(44 + dataBytes);
+wav.write('RIFF', 0);
+wav.writeUInt32LE(36 + dataBytes, 4);
+wav.write('WAVE', 8);
+wav.write('fmt ', 12);
+wav.writeUInt32LE(16, 16);
+wav.writeUInt16LE(1, 20);
+wav.writeUInt16LE(1, 22);
+wav.writeUInt32LE(SR, 24);
+wav.writeUInt32LE(SR * 2, 28);
+wav.writeUInt16LE(2, 32);
+wav.writeUInt16LE(16, 34);
+wav.write('data', 36);
+wav.writeUInt32LE(dataBytes, 40);
+for (let i = 0; i < audio.length; i++) {
+  const v = Math.max(-1, Math.min(1, audio[i]));
+  wav.writeInt16LE(Math.round(v * 32767), 44 + i * 2);
+}
+fs.writeFileSync(WAV_PATH, wav);
+console.log(`  audio.wav  ${(wav.length / 1024).toFixed(1)} KB`);
+
 // ── Encode with ffmpeg ──────────────────────────────────────────────────
-console.log('\nEncoding mp4...');
+console.log('\nEncoding mp4 (video + audio)...');
 const args = [
   '-y',
   '-framerate', String(FPS),
   '-i', path.join(TMP_DIR, 'f%05d.png'),
+  '-i', WAV_PATH,
   '-c:v', 'libx264',
   '-pix_fmt', 'yuv420p',
   '-preset', 'medium',
   '-crf', '20',
+  '-c:a', 'aac',
+  '-b:a', '128k',
+  '-shortest',
   '-movflags', '+faststart',
   OUT_MP4,
 ];
