@@ -130,7 +130,13 @@ const MASCOT_INNER = RAW_MASCOT
   .replace(/<\?xml[^?]*\?>/, '')
   .replace(/<svg[^>]*>/, '')
   .replace(/<\/svg>/, '')
-  .replace(/<rect[^>]*fill="#0a1f12"[^/]*\/>/g, '');
+  // Strip ONLY the 3 backdrop rects (top notch, full body, bottom notch) so
+  // the mascot composites onto our scanline grid. Earlier this matched any
+  // rect with the dark fill, which was eating the pupils, the CRT inset,
+  // the corner bolts, and the speaker grille — leaving the eyes dead-white.
+  .replace(/<rect\s+x="2"\s+y="0"[^/]*\/>/, '')
+  .replace(/<rect\s+x="0"\s+y="2"[^/]*\/>/, '')
+  .replace(/<rect\s+x="2"\s+y="78"[^/]*\/>/, '');
 
 function mascotG(x, y, size, opacity = 1) {
   const s = size / 256;
