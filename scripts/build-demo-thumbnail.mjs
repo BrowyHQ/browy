@@ -127,7 +127,7 @@ function gridBg() {
 const wordmark = word('BROWY', 18, C.brandLite, 2);
 const tagline1 = word('AI AGENT THAT LIVES', 5, C.ink, 1);
 const tagline2 = word('IN YOUR BROWSER', 5, C.brandSoft, 1);
-const badge    = word('OPEN SOURCE · APACHE 2.0', 4, C.inkDim, 1);
+const badge    = word('OPEN SOURCE BROWSER AGENT', 4, C.inkDim, 1);
 
 const mascotSize = 520;
 const mascotX = 40;

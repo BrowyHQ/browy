@@ -129,7 +129,7 @@ const tagline1 = word('AI AGENT', 14, C.ink, 1);
 const tagline2 = word('THAT LIVES IN', 9, C.brandSoft, 1);
 const tagline3 = word('YOUR BROWSER', 9, C.brandSoft, 1);
 const cta      = word('ADD TO CHROME', 8, C.led, 1);
-const badge    = word('OPEN SOURCE · APACHE 2.0', 5, C.inkDim, 1);
+const badge    = word('OPEN SOURCE BROWSER AGENT', 5, C.inkDim, 1);
 
 // Mascot top-center, large.
 const mascotSize = 560;

@@ -172,7 +172,7 @@ function composePromo() {
   <g transform="translate(${rx},${ry0 + 50})">${tag1.svg}</g>
   <g transform="translate(${rx},${ry0 + 74})">${tag2.svg}</g>
   <g transform="translate(${rx},${ry0 + 98})">${tag3.svg}</g>
-  <g transform="translate(${rx},${ry0 + 138})">${drawWord('APACHE 2.0', 2, C.inkDim, 1).svg}</g>
+  <g transform="translate(${rx},${ry0 + 138})">${drawWord('OPEN SOURCE', 2, C.inkDim, 1).svg}</g>
   ${ledStrip}
 </svg>`;
 }
@@ -194,8 +194,8 @@ function composeMarquee() {
   // Tagline scale 5 = 30 wide per char chain. 24 chars ≈ 720, fits.
   const tag = drawWord('AI AGENT IN YOUR BROWSER', 5, C.brandSoft, 1);
 
-  // Sub line: scale 4. 24 chars × 24 = 576 wide.
-  const sub = drawWord('OPEN SOURCE · APACHE 2.0', 4, C.inkDim, 1);
+  // Sub line: scale 4. 25 chars × 24 = 600 wide.
+  const sub = drawWord('OPEN SOURCE BROWSER AGENT', 4, C.inkDim, 1);
 
   const wmY = 130;
   const tagY = wmY + 112 + 40;
@@ -258,12 +258,12 @@ function composeTitleCard() {
 
   const wm  = drawWord('BROWY',                 24, C.brandLite, 1);  // 24*5=120/glyph, 5 letters + 4 gaps = 24*29 = 696 wide
   const tag = drawWord('AI AGENT IN YOUR BROWSER', 8, C.brandSoft, 1); // 8*6=48/glyph chain, 24 chars * 48 = 1152
-  const sub = drawWord('OPEN SOURCE · APACHE 2.0', 6, C.inkDim, 1);
+  const sub = drawWord('OPEN SOURCE BROWSER AGENT', 6, C.inkDim, 1);
 
   // Center the wordmarks horizontally.
   const wmW  = (5 * 5 + 4) * 24;             // 696
   const tagW = (24 * 5 + 23) * 8;            // 1144
-  const subW = (24 * 5 + 23) * 6;            // 858
+  const subW = (25 * 5 + 24) * 6;            // 894
   const wmX  = (W - wmW)  / 2;
   const tagX = (W - tagW) / 2;
   const subX = (W - subW) / 2;

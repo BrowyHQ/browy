@@ -196,7 +196,7 @@ SCENES.push({
 
     // Subtitle.
     const subAlpha = clamp((t - 2.2) / 0.6);
-    const sub = drawWord('OPEN SOURCE · APACHE 2.0', 5, C.inkDim, 1);
+    const sub = drawWord('OPEN SOURCE BROWSER AGENT', 5, C.inkDim, 1);
     const subX = (W - sub.w) / 2;
     const subY = tag2Y + 8 * 7 + 60;
 
