@@ -4,14 +4,21 @@
  *
  * Produces two artifacts in release/:
  *
- *   Browy-Extension-<version>.zip       (sideload — wraps in extension/)
+ *   Browy-Extension-<version>.zip       (sideload, wraps in extension/, public)
  *     For "Load unpacked" sideloading: extract, then point chrome://extensions
- *     at the extracted "extension" folder.
+ *     at the extracted "extension" folder. Attached to GitHub Releases.
  *
- *   Browy-Extension-<version>-cws.zip   (Chrome Web Store upload)
- *     manifest.json sits at the root of the zip — the layout the CWS
+ *   Browy-Extension-<version>-cws.zip   (Chrome Web Store upload, dev-only)
+ *     manifest.json sits at the root of the zip, the layout the CWS
  *     Developer Dashboard expects. The "key" field is also stripped, since
  *     CWS rejects manifests that pin a public key (CWS assigns its own).
+ *
+ *     ⚠️  This variant is NOT for end users. If sideloaded, Chrome assigns
+ *     a hash-based extension ID that won't match the native host's
+ *     allowed_origins, so the panel loops on "host disconnected". It must
+ *     not be attached to GitHub Releases or otherwise publicly distributed.
+ *     The release workflow excludes it via `!release/Browy-Extension-*-cws.zip`.
+ *     Upload it ONLY through the Chrome Web Store Developer Dashboard.
  *
  * The sideload manifest pins a public key, so the assigned extension ID is
  * stable (lfeljbgjlkoabhepbkdbjgpbhfmpgmkc) and matches the native host's
