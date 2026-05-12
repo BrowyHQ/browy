@@ -49,3 +49,7 @@ SCREENSHOT_SHOTLIST.md
 marketing/cws/
 marketing/video/
 
+# Demo video binaries (re-renderable from scripts/build-demo-video*.mjs).
+*.mp4
+*.mov
+*.webm
