@@ -341,36 +341,103 @@ await renderTo(VIDEO_OUT, composeOutroCard(), 'outro-card', 1920, 1080);
 // of variously-sized vertical strips.
 
 const SCREENSHOT_SRC = path.resolve(REPO, '../browy-docs/src/assets/screenshots');
+
+// Synthesizes a terminal-style REPL mockup PNG so screenshot #3 actually shows
+// the slash-command + /js REPL story instead of just the model picker dump.
+async function buildReplMockupBuf() {
+  const W = 880, H = 680;
+  const fg = '#22c55e', dim = '#7da78a', ink = '#d8e3d8', bg = '#0a1f12', bar = '#0f2a18';
+  const fam = "'Consolas', 'Courier New', monospace";
+  const fs1 = 18; // header + lines
+  const lh  = 28; // line height
+  const padX = 24;
+  let y = 60;
+  const lines = [
+    { t: 'Browy CLI · claude-haiku-4.5 · github.com/browyhq/browy', c: dim },
+    { t: '',                                                     c: dim },
+    { t: '> /help',                                              c: fg  },
+    { t: '/help  /model  /clear  /login  /js  /tools',           c: ink },
+    { t: '',                                                     c: dim },
+    { t: '> /js document.title',                                 c: fg  },
+    { t: '"GitHub - browyhq/browy"',                             c: ink },
+    { t: '',                                                     c: dim },
+    { t: "> /js document.querySelectorAll('.Box-row').length",   c: fg  },
+    { t: '47',                                                   c: ink },
+    { t: '',                                                     c: dim },
+    { t: '> /model claude-sonnet-4.6',                           c: fg  },
+    { t: '✓ model → claude-sonnet-4.6',                          c: ink },
+    { t: '',                                                     c: dim },
+    { t: '> count open PRs by language',                         c: fg  },
+    { t: '· tools: list_tabs, evaluate_js, fetch',               c: dim },
+    { t: 'JS/TS 89 · Python 23 · Go 14 · Rust 12 · Other 7',     c: ink },
+    { t: '',                                                     c: dim },
+    { t: '> _',                                                  c: fg  },
+  ];
+  let body = '';
+  for (const ln of lines) {
+    if (ln.t) {
+      const safe = ln.t
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+      body += `<text x="${padX}" y="${y}" fill="${ln.c}" font-family="${fam}" font-size="${fs1}">${safe}</text>`;
+    }
+    y += lh;
+  }
+  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+  <rect width="${W}" height="${H}" fill="${bg}"/>
+  <rect x="0" y="0" width="${W}" height="34" fill="${bar}"/>
+  <rect x="0" y="33" width="${W}" height="1" fill="${C.brandDeep}"/>
+  <text x="${padX}" y="23" fill="${dim}" font-family="${fam}" font-size="14">browy ▸ devtools repl</text>
+  <text x="${W - 110}" y="23" fill="${dim}" font-family="${fam}" font-size="14">Clear  Reset</text>
+  ${body}
+</svg>`;
+  return await sharp(Buffer.from(svg)).png().toBuffer();
+}
+
+const REPL_MOCKUP = await buildReplMockupBuf();
+
 const SHOTS = [
   { src: 'panel-empty.png',     caption: 'SIDE PANEL',         blurb: ['DRAG IT OPEN ON ANY TAB',     'TYPE  WATCH IT WORK'] },
   { src: 'panel-summarize.png', caption: 'SUMMARIZE A PAGE',   blurb: ['ASK IN PLAIN ENGLISH',        'NO COPY  NO PASTE'] },
-  { src: 'devtools-panel.png',  caption: 'DEVTOOLS PANEL',     blurb: ['REPL NEXT TO INSPECTOR',      'SLASH COMMANDS  JS REPL'] },
+  { buf: REPL_MOCKUP,           caption: 'DEVTOOLS PANEL',     blurb: ['REPL NEXT TO INSPECTOR',      'SLASH COMMANDS  JS REPL'] },
   { src: 'panel-fillform.png',  caption: 'FILL THIS FORM',     blurb: ['MULTI STEP AUTOMATION',       'WORKS WITH YOUR LOGINS'] },
   { src: 'panel-network.png',   caption: 'INSPECT NETWORK',    blurb: ['LIVE NETWORK  CONSOLE TAPS',  'NO DEVTOOLS GYMNASTICS'] },
 ];
 
 async function composeShotEntry(s, idx) {
-  return composeShot(s.src, s.caption, s.blurb, idx);
+  return composeShot(s, idx);
 }
 
-async function composeShot(srcRel, caption, blurb, idx) {
+async function composeShot(s, idx) {
   const W = 1280, H = 800;
-  const srcPath = path.join(SCREENSHOT_SRC, srcRel);
-  if (!fs.existsSync(srcPath)) {
-    console.warn(`  skip ${srcRel} (not found)`);
-    return;
+  let inputBuf;
+  let meta;
+  if (s.buf) {
+    inputBuf = s.buf;
+    meta = await sharp(inputBuf).metadata();
+  } else {
+    const srcPath = path.join(SCREENSHOT_SRC, s.src);
+    if (!fs.existsSync(srcPath)) {
+      console.warn(`  skip ${s.src} (not found)`);
+      return;
+    }
+    inputBuf = await sharp(srcPath).png().toBuffer();
+    meta = await sharp(inputBuf).metadata();
   }
-  const img = sharp(srcPath);
-  const meta = await img.metadata();
+  const caption = s.caption;
+  const blurb = s.blurb;
   // Right column hosts the screenshot; left column hosts the marketing copy.
-  // Right column width = 760 (x: 480..1240). Fit screenshot inside 720-tall slot.
+  // Right column starts at x=560 (was 480) so the left text column has ~70px
+  // breathing room before the screenshot border. Slot is 660 wide × 720 tall.
   const slotH = 720;
-  const slotW = 720;
+  const slotW = 660;
+  const slotX = 560;
   const scale = Math.min(slotW / meta.width, slotH / meta.height);
   const drawW = Math.round(meta.width * scale);
   const drawH = Math.round(meta.height * scale);
-  const innerBuf = await sharp(srcPath).resize(drawW, drawH).png().toBuffer();
-  const imgX = 480 + Math.round((slotW - drawW) / 2);
+  const innerBuf = await sharp(inputBuf).resize(drawW, drawH).png().toBuffer();
+  const imgX = slotX + Math.round((slotW - drawW) / 2);
   const imgY = 40 + Math.round((slotH - drawH) / 2);
 
   // Left-column copy.
@@ -399,7 +466,7 @@ async function composeShot(srcRel, caption, blurb, idx) {
     .png({ compressionLevel: 9 })
     .toFile(out);
   const { size } = fs.statSync(out);
-  console.log(`✓ screenshot-${idx + 1}.png  ${W}x${H}  ${(size / 1024).toFixed(1)} KB  (${srcRel})`);
+  console.log(`✓ screenshot-${idx + 1}.png  ${W}x${H}  ${(size / 1024).toFixed(1)} KB  (${s.src || 'mockup'})`);
 }
 
 console.log('\nCWS gallery screenshots:');
