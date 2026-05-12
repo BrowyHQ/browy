@@ -838,8 +838,20 @@ export class Agent {
 
       const completion = new Promise<string>((resolve, reject) => {
         let unsub: (() => void) | null = null;
-        const teardown = () => { try { unsub?.(); } catch {} };
+        // Idle-based safety net: reset on every event. Times out only if the
+        // SDK goes silent for 5 minutes (network drop, hung tool, etc.).
+        // An actively-working agent — even one running a 30-min multi-step
+        // automation — stays alive as long as deltas keep arriving.
+        const IDLE_MS = 5 * 60 * 1000;
+        let idleTimer: NodeJS.Timeout;
+        const teardown = () => { try { unsub?.(); } catch {}; clearTimeout(idleTimer); };
+        const armIdle = () => {
+          clearTimeout(idleTimer);
+          idleTimer = setTimeout(() => { teardown(); reject(new Error('Agent went idle for 5 min with no SDK activity; giving up.')); }, IDLE_MS);
+        };
+        armIdle();
         unsub = session.on((ev: { type: string; data?: any }) => {
+          armIdle();
           try {
             if (ev.type === 'assistant.message_delta') {
               const chunk: string = ev.data?.deltaContent || '';
@@ -871,14 +883,6 @@ export class Agent {
             }
           } catch (e) { teardown(); reject(e as Error); }
         });
-        // Safety net: if SDK never emits idle (network drop, etc.), give up
-        // after 10 minutes. Way longer than any reasonable agent turn but
-        // still bounded so UI doesn't hang forever.
-        const safetyTimer = setTimeout(() => { teardown(); reject(new Error('Agent timed out after 10 min')); }, 10 * 60 * 1000);
-        // Wrap resolve/reject so we always clear the timer
-        const _resolve = resolve, _reject = reject;
-        resolve = (v) => { clearTimeout(safetyTimer); _resolve(v); };
-        reject  = (e) => { clearTimeout(safetyTimer); _reject(e); };
       });
 
       await session.send({ prompt });
