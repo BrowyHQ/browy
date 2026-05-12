@@ -148,24 +148,34 @@ const easeInOut = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2)
 const easeOut   = (t) => 1 - Math.pow(1 - t, 3);
 const clamp     = (v, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, v));
 
-// ── Pre-render each gallery screenshot to a buffer at canvas-friendly
-// dimensions so we can composite + transform without re-decoding each frame.
-async function loadShot(file, targetH = 640) {
+// ── Pre-render each gallery screenshot to a buffer that CONTAIN-FITS inside
+// the mid-scene slot, with headroom for the Ken Burns zoom. Earlier this
+// resized to a fixed height which produced images wider than the slot for
+// landscape sources — they then spilled left into the caption text during
+// the drift. By pre-fitting we guarantee image_w * maxZoom <= slotW and
+// image_h * maxZoom <= slotH, so the image can never overlap the side text.
+async function loadShot(file, maxW, maxH) {
   const p = path.join(SHOT_DIR, file);
   if (!fs.existsSync(p)) return null;
   const meta = await sharp(p).metadata();
-  const scale = targetH / meta.height;
-  const w = Math.round(meta.width * scale);
-  const buf = await sharp(p).resize(w, targetH).png().toBuffer();
-  return { buf, w, h: targetH };
+  const scale = Math.min(maxW / meta.width, maxH / meta.height);
+  const w = Math.max(1, Math.round(meta.width * scale));
+  const h = Math.max(1, Math.round(meta.height * scale));
+  const buf = await sharp(p).resize(w, h).png().toBuffer();
+  return { buf, w, h };
 }
 
+// Mid-scene slot is 700×640. Reserve 12 px safety on each side and 4 %
+// Ken Burns zoom headroom so the image never reaches the slot edges.
+const SHOT_MAX_W = Math.floor((700 - 24) / 1.04); // 650
+const SHOT_MAX_H = Math.floor((640 - 24) / 1.04); // 592
+
 const shots = {
-  panel:    await loadShot('panel-empty.png'),
-  summary:  await loadShot('panel-summarize.png'),
-  devtools: await loadShot('devtools-panel.png'),
-  form:     await loadShot('panel-fillform.png'),
-  network:  await loadShot('panel-network.png'),
+  panel:    await loadShot('panel-empty.png',     SHOT_MAX_W, SHOT_MAX_H),
+  summary:  await loadShot('panel-summarize.png', SHOT_MAX_W, SHOT_MAX_H),
+  devtools: await loadShot('devtools-panel.png',  SHOT_MAX_W, SHOT_MAX_H),
+  form:     await loadShot('panel-fillform.png',  SHOT_MAX_W, SHOT_MAX_H),
+  network:  await loadShot('panel-network.png',   SHOT_MAX_W, SHOT_MAX_H),
 };
 
 // Crisp framing rectangle behind each screenshot.
@@ -183,10 +193,12 @@ const SCENES = [];
 SCENES.push({
   dur: 4,
   render(t) {
-    // Mascot fades in 0..0.4, scales from 0.7 to 1.
+    // Mascot fades in 0..0.4, scales from 0.7 to 1. Sized so its bottom
+    // edge sits 30 px above the wordmark — earlier the 380 px mascot was
+    // bleeding the speaker grille over the top of the wordmark glyphs.
     const mAlpha = clamp(t / 0.35);
     const mScale = 0.7 + 0.3 * easeOut(mAlpha);
-    const baseSize = 380;
+    const baseSize = 340;
     const size = baseSize * mScale;
     const mx = (W - size) / 2;
     const my = 60 + (1 - easeOut(mAlpha)) * 30;
@@ -199,7 +211,7 @@ SCENES.push({
     const wm = drawWord(shown, 12, C.brandLite, 1);
     const wmFullW = (5 * 5 + 4) * 12;
     const wmX = (W - wmFullW) / 2;
-    const wmY = 420;
+    const wmY = 430;
 
     // Tagline fades in t=1.6..2.2.
     const tagAlpha = clamp((t - 1.6) / 0.6);
@@ -239,9 +251,11 @@ function shotScene({ shot, caption, blurb, dur }) {
     dur,
     render(t) {
       const t01 = t / dur;
-      // Ken Burns: zoom from 1.0 to 1.08, drift 30px right.
-      const zoom = 1 + 0.08 * easeInOut(t01);
-      const drift = -15 + 30 * easeInOut(t01);
+      // Ken Burns: gentle zoom + small horizontal drift. Bounds chosen so
+      // that even at max zoom + drift the image stays inside the slot
+      // (loadShot pre-fits to (slotW-24)/1.04, (slotH-24)/1.04).
+      const zoom = 1 + 0.04 * easeInOut(t01);
+      const drift = -8 + 16 * easeInOut(t01);
       const drawW = Math.round(shot.w * zoom);
       const drawH = Math.round(shot.h * zoom);
       const slotX = 540, slotY = 40, slotW = 700, slotH = 640;

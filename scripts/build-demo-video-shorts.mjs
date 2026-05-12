@@ -145,22 +145,35 @@ const easeInOut = (t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2)
 const easeOut   = (t) => 1 - Math.pow(1 - t, 3);
 const clamp     = (v, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, v));
 
-async function loadShot(file, targetW = 880) {
+// Contain-fit each shot inside the mid-scene slot with headroom for Ken
+// Burns zoom. Earlier this resized purely by width, which produced images
+// far taller than the slot for tall portrait screenshots (panel-summarize
+// 800×1320 became 880×1452, taller than the 1120 slot). The centering
+// math then made imgY negative and the image spilled over the caption at
+// the top AND the CTA at the bottom. Pre-fitting eliminates both.
+async function loadShot(file, maxW, maxH) {
   const p = path.join(SHOT_DIR, file);
   if (!fs.existsSync(p)) return null;
   const meta = await sharp(p).metadata();
-  const scale = targetW / meta.width;
-  const h = Math.round(meta.height * scale);
-  const buf = await sharp(p).resize(targetW, h).png().toBuffer();
-  return { buf, w: targetW, h };
+  const scale = Math.min(maxW / meta.width, maxH / meta.height);
+  const w = Math.max(1, Math.round(meta.width * scale));
+  const h = Math.max(1, Math.round(meta.height * scale));
+  const buf = await sharp(p).resize(w, h).png().toBuffer();
+  return { buf, w, h };
 }
 
+// Mid-scene slot is 880×1060. Reserve 16 px safety on each side and 4 %
+// Ken Burns zoom headroom so the image can never reach the caption above
+// or the CTA below.
+const SHOT_MAX_W = Math.floor((880 - 32) / 1.04); // 815
+const SHOT_MAX_H = Math.floor((1060 - 32) / 1.04); // 988
+
 const shots = {
-  panel:    await loadShot('panel-empty.png'),
-  summary:  await loadShot('panel-summarize.png'),
-  devtools: await loadShot('devtools-panel.png'),
-  form:     await loadShot('panel-fillform.png'),
-  network:  await loadShot('panel-network.png'),
+  panel:    await loadShot('panel-empty.png',     SHOT_MAX_W, SHOT_MAX_H),
+  summary:  await loadShot('panel-summarize.png', SHOT_MAX_W, SHOT_MAX_H),
+  devtools: await loadShot('devtools-panel.png',  SHOT_MAX_W, SHOT_MAX_H),
+  form:     await loadShot('panel-fillform.png',  SHOT_MAX_W, SHOT_MAX_H),
+  network:  await loadShot('panel-network.png',   SHOT_MAX_W, SHOT_MAX_H),
 };
 
 function frameRect(x, y, w, h) {
@@ -233,14 +246,17 @@ function shotScene({ shot, caption, blurb, dur }) {
     dur,
     render(t) {
       const t01 = t / dur;
-      // Slow ken-burns vertical drift.
-      const zoom = 1 + 0.06 * easeInOut(t01);
-      const drift = -10 + 20 * easeInOut(t01);
+      // Gentle ken-burns: small zoom + small vertical drift. Bounds chosen
+      // so that even at max zoom + drift the image stays inside the slot
+      // (loadShot pre-fits to (slotW-32)/1.04, (slotH-32)/1.04).
+      const zoom = 1 + 0.04 * easeInOut(t01);
+      const drift = -8 + 16 * easeInOut(t01);
       const drawW = Math.round(shot.w * zoom);
       const drawH = Math.round(shot.h * zoom);
-      // Slot kept inside safe area: y from 380 to 1500, centered horizontally
-      // but biased away from the right action-button column.
-      const slotX = 70, slotY = 380, slotW = 880, slotH = 1120;
+      // Slot pulled in from the original 380-1500 range so the top clears
+      // the blurb (ends at y≈399) and the bottom clears the CTA divider
+      // (at y=1500), even at max zoom + max drift.
+      const slotX = 70, slotY = 420, slotW = 880, slotH = 1060;
       const imgX = slotX + Math.round((slotW - drawW) / 2);
       const imgY = slotY + Math.round((slotH - drawH) / 2) + Math.round(drift);
 
