@@ -155,8 +155,13 @@ const clamp     = (v, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, v));
 // the drift. By pre-fitting we guarantee image_w * maxZoom <= slotW and
 // image_h * maxZoom <= slotH, so the image can never overlap the side text.
 async function loadShot(file, maxW, maxH) {
-  const p = path.join(SHOT_DIR, file);
-  if (!fs.existsSync(p)) return null;
+  // Allow files to live either next to the docs screenshots (default
+  // capture dir) or in marketing/cws (synthesized mockups like the REPL).
+  let p = path.join(SHOT_DIR, file);
+  if (!fs.existsSync(p)) {
+    const alt = path.join(REPO, 'marketing/cws', file);
+    if (fs.existsSync(alt)) p = alt; else return null;
+  }
   const meta = await sharp(p).metadata();
   const scale = Math.min(maxW / meta.width, maxH / meta.height);
   const w = Math.max(1, Math.round(meta.width * scale));
@@ -171,11 +176,12 @@ const SHOT_MAX_W = Math.floor((700 - 24) / 1.04); // 650
 const SHOT_MAX_H = Math.floor((640 - 24) / 1.04); // 592
 
 const shots = {
-  panel:    await loadShot('panel-empty.png',     SHOT_MAX_W, SHOT_MAX_H),
-  summary:  await loadShot('panel-summarize.png', SHOT_MAX_W, SHOT_MAX_H),
-  devtools: await loadShot('devtools-panel.png',  SHOT_MAX_W, SHOT_MAX_H),
-  form:     await loadShot('panel-fillform.png',  SHOT_MAX_W, SHOT_MAX_H),
-  network:  await loadShot('panel-network.png',   SHOT_MAX_W, SHOT_MAX_H),
+  panel:    await loadShot('panel-empty.png',           SHOT_MAX_W, SHOT_MAX_H),
+  summary:  await loadShot('panel-summarize.png',       SHOT_MAX_W, SHOT_MAX_H),
+  devtools: await loadShot('devtools-repl-mockup.png',  SHOT_MAX_W, SHOT_MAX_H)
+            || await loadShot('devtools-panel.png',     SHOT_MAX_W, SHOT_MAX_H),
+  form:     await loadShot('panel-fillform.png',        SHOT_MAX_W, SHOT_MAX_H),
+  network:  await loadShot('panel-network.png',         SHOT_MAX_W, SHOT_MAX_H),
 };
 
 // Crisp framing rectangle behind each screenshot.
@@ -334,10 +340,10 @@ const sSummary  = pick('summary', 'panel', 'form', 'network', 'devtools');
 const sDevtools = pick('devtools', 'panel', 'summary', 'form', 'network');
 const sNetwork  = pick('network', 'form', 'summary', 'panel', 'devtools');
 
-if (sPanel)    SCENES.push(shotScene({ shot: sPanel,    caption: 'SIDE PANEL',     blurb: ['ASK IN PLAIN ENGLISH', 'ON ANY OPEN TAB'],    dur: 4 }));
-if (sSummary)  SCENES.push(shotScene({ shot: sSummary,  caption: 'WATCH IT WORK',  blurb: ['TOOL STEPS STREAM LIVE', 'NO COPY  NO PASTE'], dur: 4 }));
-if (sDevtools) SCENES.push(shotScene({ shot: sDevtools, caption: 'DEVTOOLS NATIVE',blurb: ['SLASH COMMANDS', 'LIVE JS REPL'],            dur: 4 }));
-if (sNetwork)  SCENES.push(shotScene({ shot: sNetwork,  caption: 'INSPECT THE PAGE', blurb: ['NETWORK  CONSOLE  DOM', 'AT YOUR REQUEST'], dur: 4 }));
+if (sPanel)    SCENES.push(shotScene({ shot: sPanel,    caption: 'SIDE PANEL',      blurb: ['CHAT WITH ANY TAB',     'DRAG MASCOT TO MOVE'], dur: 4 }));
+if (sSummary)  SCENES.push(shotScene({ shot: sSummary,  caption: 'SUMMARIZE PAGES', blurb: ['JUST ASK A QUESTION',   'NO COPY  NO PASTE'],   dur: 4 }));
+if (sDevtools) SCENES.push(shotScene({ shot: sDevtools, caption: 'DEVTOOLS REPL',   blurb: ['SLASH COMMANDS',        'PLUS LIVE JS'],        dur: 4 }));
+if (sNetwork)  SCENES.push(shotScene({ shot: sNetwork,  caption: 'READ NETWORK',    blurb: ['REQUESTS  CONSOLE LIVE','NO DEVTOOLS PANEL'],   dur: 4 }));
 
 // ── Scene N: Outro (4s) ─────────────────────────────────────────────────
 SCENES.push({

@@ -396,6 +396,11 @@ async function buildReplMockupBuf() {
 }
 
 const REPL_MOCKUP = await buildReplMockupBuf();
+// Persist the mockup so the video build scripts can consume it as a normal
+// screenshot input. Lives next to the gallery PNGs.
+const REPL_MOCKUP_PATH = path.join(OUT, 'devtools-repl-mockup.png');
+fs.writeFileSync(REPL_MOCKUP_PATH, REPL_MOCKUP);
+console.log(`✓ devtools-repl-mockup.png  (${(REPL_MOCKUP.length / 1024).toFixed(1)} KB)`);
 
 const SHOTS = [
   { src: 'panel-empty.png',     caption: 'SIDE PANEL',         blurb: ['DRAG IT OPEN ON ANY TAB',     'TYPE  WATCH IT WORK'] },

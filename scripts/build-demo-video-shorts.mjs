@@ -152,8 +152,13 @@ const clamp     = (v, lo = 0, hi = 1) => Math.max(lo, Math.min(hi, v));
 // math then made imgY negative and the image spilled over the caption at
 // the top AND the CTA at the bottom. Pre-fitting eliminates both.
 async function loadShot(file, maxW, maxH) {
-  const p = path.join(SHOT_DIR, file);
-  if (!fs.existsSync(p)) return null;
+  // Allow files to live either next to the docs screenshots (default
+  // capture dir) or in marketing/cws (synthesized mockups like the REPL).
+  let p = path.join(SHOT_DIR, file);
+  if (!fs.existsSync(p)) {
+    const alt = path.join(REPO, 'marketing/cws', file);
+    if (fs.existsSync(alt)) p = alt; else return null;
+  }
   const meta = await sharp(p).metadata();
   const scale = Math.min(maxW / meta.width, maxH / meta.height);
   const w = Math.max(1, Math.round(meta.width * scale));
@@ -169,11 +174,12 @@ const SHOT_MAX_W = Math.floor((880 - 32) / 1.04); // 815
 const SHOT_MAX_H = Math.floor((1060 - 32) / 1.04); // 988
 
 const shots = {
-  panel:    await loadShot('panel-empty.png',     SHOT_MAX_W, SHOT_MAX_H),
-  summary:  await loadShot('panel-summarize.png', SHOT_MAX_W, SHOT_MAX_H),
-  devtools: await loadShot('devtools-panel.png',  SHOT_MAX_W, SHOT_MAX_H),
-  form:     await loadShot('panel-fillform.png',  SHOT_MAX_W, SHOT_MAX_H),
-  network:  await loadShot('panel-network.png',   SHOT_MAX_W, SHOT_MAX_H),
+  panel:    await loadShot('panel-empty.png',           SHOT_MAX_W, SHOT_MAX_H),
+  summary:  await loadShot('panel-summarize.png',       SHOT_MAX_W, SHOT_MAX_H),
+  devtools: await loadShot('devtools-repl-mockup.png',  SHOT_MAX_W, SHOT_MAX_H)
+            || await loadShot('devtools-panel.png',     SHOT_MAX_W, SHOT_MAX_H),
+  form:     await loadShot('panel-fillform.png',        SHOT_MAX_W, SHOT_MAX_H),
+  network:  await loadShot('panel-network.png',         SHOT_MAX_W, SHOT_MAX_H),
 };
 
 function frameRect(x, y, w, h) {
@@ -333,10 +339,10 @@ const sDevtools = pick('devtools', 'panel', 'summary', 'form', 'network');
 const sForm     = pick('form', 'panel', 'summary', 'network', 'devtools');
 const sNetwork  = pick('network', 'form', 'summary', 'panel', 'devtools');
 
-if (sPanel)    SCENES.push(shotScene({ shot: sPanel,    caption: 'SIDE PANEL',     blurb: ['ASK IN PLAIN ENGLISH', 'ON ANY OPEN TAB'], dur: 4 }));
-if (sDevtools) SCENES.push(shotScene({ shot: sDevtools, caption: 'DEVTOOLS REPL',  blurb: ['SLASH COMMANDS', 'LIVE JS REPL'],         dur: 4 }));
-if (sForm)     SCENES.push(shotScene({ shot: sForm,     caption: 'FILLS FORMS',    blurb: ['BY ACCESSIBILITY INDEX', 'STOPS BEFORE SUBMIT'], dur: 4 }));
-if (sNetwork)  SCENES.push(shotScene({ shot: sNetwork,  caption: 'READS NETWORK',  blurb: ['SKIPS DEVTOOLS', 'WORKS ANY TAB'],        dur: 4 }));
+if (sPanel)    SCENES.push(shotScene({ shot: sPanel,    caption: 'SIDE PANEL',    blurb: ['CHAT WITH ANY TAB',     'DRAG MASCOT TO MOVE'], dur: 4 }));
+if (sDevtools) SCENES.push(shotScene({ shot: sDevtools, caption: 'DEVTOOLS REPL', blurb: ['SLASH COMMANDS',        'PLUS LIVE JS'],        dur: 4 }));
+if (sForm)     SCENES.push(shotScene({ shot: sForm,     caption: 'FILL FORMS',    blurb: ['BY ACCESSIBILITY INDEX','STOPS BEFORE SUBMIT'], dur: 4 }));
+if (sNetwork)  SCENES.push(shotScene({ shot: sNetwork,  caption: 'READ NETWORK',  blurb: ['REQUESTS  CONSOLE LIVE','NO DEVTOOLS PANEL'],   dur: 4 }));
 
 // ── Scene N: Outro (4s) ─────────────────────────────────────────────────
 SCENES.push({
