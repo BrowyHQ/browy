@@ -947,12 +947,24 @@ export class Agent {
     return this.config.model;
   }
 
-  /** Switch the Copilot model. Tears down the current session so the next
-   *  chat() will create a fresh one with the new model. */
+  /** Switch the Copilot model in-place when possible (preserving the session
+   *  history), otherwise fall back to recreating the session.
+   *  The Copilot SDK exposes `session.setModel(id)` since copilot-sdk 0.x; we
+   *  call it on the live session so a /model change keeps every prior turn. */
   async setModel(id: string): Promise<void> {
     if (!id || id === this.config.model) return;
     this.config.model = id;
-    // Drop the current session so ensureSession() rebuilds with the new model.
+    if (this.copilotSession && typeof this.copilotSession.setModel === 'function') {
+      try {
+        await this.copilotSession.setModel(id);
+        return;
+      } catch (e) {
+        // Some models reject mid-session (e.g. provider mismatch). Fall through
+        // to a full rebuild so the user still gets the model they asked for.
+        console.warn(`  ⚠ session.setModel("${id}") failed; rebuilding session:`, (e as Error)?.message || e);
+      }
+    }
+    // No live session, no setModel support, or setModel threw → rebuild.
     await this.clearHistory();
   }
 
