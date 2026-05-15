@@ -129,6 +129,15 @@ jobs:
         run: |
           set -euxo pipefail
           TAG="v${VERSION}"
+          # Create the release if it doesn't already exist (first run after a
+          # fresh tag push). Idempotent: --notes-from-tag uses the annotated
+          # tag's message; subsequent reruns hit the upload path.
+          if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --repo "${{ github.repository }}" \
+              --title "$TAG" \
+              --notes-from-tag
+          fi
           # Always also include the install scripts from the source tree
           # so the GH release has everything a user needs in one place.
           gh release upload "$TAG" \
