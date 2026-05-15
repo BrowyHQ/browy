@@ -20,8 +20,6 @@ There are two surfaces you can talk to Browy from:
 **Step 1: install the extension**
 [Add Browy from the Chrome Web Store](https://chromewebstore.google.com/detail/iondecjdokngnlkfpipgolgkfegpmjca) (one click).
 
-> Web Store listing in review; the link is live the moment Google approves it. Until then, the install scripts below also stage an unpacked copy you can `Load unpacked` from `chrome://extensions`.
-
 **Step 2: install the native host**
 
 Windows (bundles Node):

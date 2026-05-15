@@ -15,8 +15,6 @@ Both share session state, model selection, and chat history.
 
 Add Browy from the [Chrome Web Store](https://chromewebstore.google.com/detail/iondecjdokngnlkfpipgolgkfegpmjca) (one click). This works on Chrome, Edge, and Brave.
 
-> Web Store listing currently in review. Until it's live, the platform installers below also drop an unpacked copy of the extension you can load from `chrome://extensions` (Developer Mode → **Load unpacked** → pick the folder the installer printed). The native host pre-approves both extension IDs, so once CWS is live you can switch to the one-click install without re-running anything.
-
 ### Step 2: install the native host
 
 #### Windows
