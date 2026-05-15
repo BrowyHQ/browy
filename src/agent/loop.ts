@@ -954,6 +954,12 @@ export class Agent {
   async setModel(id: string): Promise<void> {
     if (!id || id === this.config.model) return;
     this.config.model = id;
+    // Persist the user's choice so it survives a host restart. Best-effort:
+    // savePrefs swallows its own errors and never throws.
+    try {
+      const { savePrefs } = await import('./prefs.js');
+      savePrefs({ model: id });
+    } catch {}
     if (this.copilotSession && typeof this.copilotSession.setModel === 'function') {
       try {
         await this.copilotSession.setModel(id);

@@ -1,6 +1,6 @@
 {
   "name": "browy",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "The AI agent that lives in your browser. Drives real tabs through chat. Side panel + DevTools REPL.",
   "type": "module",
   "bin": {

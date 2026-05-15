@@ -1,4 +1,5 @@
 import type { Config, CdpEndpoint } from './types.js';
+import { loadPrefs } from './agent/prefs.js';
 
 function parseEndpoints(env: string | undefined, fallback: CdpEndpoint[]): CdpEndpoint[] {
   if (!env) return fallback;
@@ -30,6 +31,7 @@ export function loadConfig(): Config {
     uiPort: 7890,
   };
 
+  const prefs = loadPrefs();
   const cdpUrl = process.env.BA_CDP_URL || defaults.cdpUrl;
   const endpoints = parseEndpoints(process.env.BA_CDP_ENDPOINTS, defaults.cdpEndpoints);
   // Make sure the legacy single-url is in the endpoint list so behaviour is
@@ -42,7 +44,8 @@ export function loadConfig(): Config {
     provider: (process.env.BA_PROVIDER as Config['provider']) || defaults.provider,
     endpoint: process.env.BA_ENDPOINT || defaults.endpoint,
     apiKey: process.env.BA_API_KEY || process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || defaults.apiKey,
-    model: process.env.BA_MODEL || defaults.model,
+    // Precedence: env > saved pref (last user choice) > bundled default.
+    model: process.env.BA_MODEL || prefs.model || defaults.model,
     apiVersion: process.env.BA_API_VERSION || defaults.apiVersion,
     maxOutputTokens: parseInt(process.env.BA_MAX_TOKENS || '', 10) || defaults.maxOutputTokens,
     reasoningEffort: (process.env.BA_REASONING as Config['reasoningEffort']) || defaults.reasoningEffort,
