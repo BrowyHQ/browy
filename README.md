@@ -40,7 +40,7 @@ Detailed install + troubleshooting: [extension/README.md](extension/README.md#in
 
 ## Sections
 
-- 🟢 **[Chat: Side Panel](extension/README.md#chat--side-panel)**: full-featured chat UI, retro-pixel mascot, tab-aware
+- 🟢 **[Chat: Side Panel](extension/README.md#chat--side-panel)**: persistent chat UI, tab-aware, history per profile
   - [Send a message → drive the active tab](extension/README.md#1-basic-flow-talk-to-your-tabs)
   - [Multi-tab workflows](extension/README.md#2-multi-tab-tasks-it-follows-your-focus)
   - [Forms: extract → fill → submit](extension/README.md#3-form-filling-the-three-step-pattern)

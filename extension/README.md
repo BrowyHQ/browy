@@ -2,7 +2,7 @@
 
 The Chromium extension surface: what loads inside your browser. There are **two UIs** that talk to the same Node native-messaging host:
 
-1. **Chat (side panel)**: pixel-mascot, day-to-day automation
+1. **Chat (side panel)**: persistent chat for day-to-day automation
 2. **DevTools panel: console-style CLI**: power-user REPL
 
 Both share session state, model selection, and chat history.
@@ -33,7 +33,7 @@ Browy uses your Copilot subscription. On first message it prompts a device-flow 
 
 ## Chat: side panel
 
-The pixel-art mascot is your daily driver. Type → it acts.
+The side panel is your daily driver. Type a message, the agent acts on the focused tab and streams its progress back into the chat.
 
 > ![Sidepanel hero: sidepanel-hero.png](../docs/screenshots/sidepanel-hero.png)
 
@@ -41,7 +41,7 @@ The pixel-art mascot is your daily driver. Type → it acts.
 
 | Region | What it is |
 |---|---|
-| **BROWY badge + status hint** | Top-left mascot, current sub-mode (`// idle`, `// thinking`, `// offline`), connection status |
+| **Browy badge + status hint** | Top-left identity, current sub-mode (`// idle`, `// thinking`, `// offline`), connection status |
 | **Tab strip** | The browser/profile we're attached to, count of open tabs, the focused tab's title + URL |
 | **Message area** | Chat scrollback. User bubbles right, assistant bubbles left, tool steps collapse into a click-to-expand summary |
 | **Composer** | Multiline input. Enter to send, Shift+Enter for newline. ⏵ to send, ⏹ to abort an in-flight turn |
