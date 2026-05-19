@@ -221,7 +221,7 @@ SCENES.push({
 
     // Subtitle.
     const subAlpha = clamp((t - 2.2) / 0.6);
-    const sub = drawWord('OPEN SOURCE BROWSER AGENT', 5, C.inkDim, 1);
+    const sub = drawWord('FREE AND OPEN SOURCE', 5, C.inkDim, 1);
     const subX = (W - sub.w) / 2;
     const subY = tag2Y + 8 * 7 + 60;
 
@@ -339,10 +339,10 @@ const sDevtools = pick('devtools', 'panel', 'summary', 'form', 'network');
 const sForm     = pick('form', 'panel', 'summary', 'network', 'devtools');
 const sNetwork  = pick('network', 'form', 'summary', 'panel', 'devtools');
 
-if (sPanel)    SCENES.push(shotScene({ shot: sPanel,    caption: 'SIDE PANEL',    blurb: ['CHAT WITH ANY TAB',     'DRAG MASCOT TO MOVE'], dur: 4 }));
-if (sDevtools) SCENES.push(shotScene({ shot: sDevtools, caption: 'DEVTOOLS REPL', blurb: ['SLASH COMMANDS',        'PLUS LIVE JS'],        dur: 4 }));
-if (sForm)     SCENES.push(shotScene({ shot: sForm,     caption: 'FILL FORMS',    blurb: ['BY ACCESSIBILITY INDEX','STOPS BEFORE SUBMIT'], dur: 4 }));
-if (sNetwork)  SCENES.push(shotScene({ shot: sNetwork,  caption: 'READ NETWORK',  blurb: ['REQUESTS  CONSOLE LIVE','NO DEVTOOLS PANEL'],   dur: 4 }));
+if (sPanel)    SCENES.push(shotScene({ shot: sPanel,    caption: 'SIDE PANEL',    blurb: ['TALK TO YOUR TABS',     'GET ANSWERS BACK'],    dur: 4 }));
+if (sDevtools) SCENES.push(shotScene({ shot: sDevtools, caption: 'DEVTOOLS CLI', blurb: ['TERMINAL REPL',         'NEXT TO INSPECTOR'],   dur: 4 }));
+if (sForm)     SCENES.push(shotScene({ shot: sForm,     caption: 'FILL FORMS',    blurb: ['IN ONE PROMPT',         'STOPS BEFORE SUBMIT'], dur: 4 }));
+if (sNetwork)  SCENES.push(shotScene({ shot: sNetwork,  caption: 'READ NETWORK',  blurb: ['REQUESTS AND CONSOLE',  'STRAIGHT FROM CHAT'],  dur: 4 }));
 
 // ── Scene N: Outro (4s) ─────────────────────────────────────────────────
 SCENES.push({

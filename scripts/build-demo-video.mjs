@@ -227,7 +227,7 @@ SCENES.push({
 
     // Sub fades in t=2.2..2.8.
     const subAlpha = clamp((t - 2.2) / 0.6);
-    const sub = drawWord('OPEN SOURCE BROWSER AGENT', 3, C.inkDim, 1);
+    const sub = drawWord('FREE AND OPEN SOURCE', 3, C.inkDim, 1);
     const subX = (W - sub.w) / 2;
     const subY = tagY + 4 * 7 + 30;
 
@@ -340,10 +340,10 @@ const sSummary  = pick('summary', 'panel', 'form', 'network', 'devtools');
 const sDevtools = pick('devtools', 'panel', 'summary', 'form', 'network');
 const sNetwork  = pick('network', 'form', 'summary', 'panel', 'devtools');
 
-if (sPanel)    SCENES.push(shotScene({ shot: sPanel,    caption: 'SIDE PANEL',      blurb: ['CHAT WITH ANY TAB',     'DRAG MASCOT TO MOVE'], dur: 4 }));
-if (sSummary)  SCENES.push(shotScene({ shot: sSummary,  caption: 'SUMMARIZE PAGES', blurb: ['JUST ASK A QUESTION',   'NO COPY  NO PASTE'],   dur: 4 }));
-if (sDevtools) SCENES.push(shotScene({ shot: sDevtools, caption: 'DEVTOOLS REPL',   blurb: ['SLASH COMMANDS',        'PLUS LIVE JS'],        dur: 4 }));
-if (sNetwork)  SCENES.push(shotScene({ shot: sNetwork,  caption: 'READ NETWORK',    blurb: ['REQUESTS  CONSOLE LIVE','NO DEVTOOLS PANEL'],   dur: 4 }));
+if (sPanel)    SCENES.push(shotScene({ shot: sPanel,    caption: 'SIDE PANEL',      blurb: ['TALK TO YOUR TABS',     'GET ANSWERS BACK'],    dur: 4 }));
+if (sSummary)  SCENES.push(shotScene({ shot: sSummary,  caption: 'SUMMARIZE PAGES', blurb: ['ASK ABOUT A PAGE',      'GET THE GIST'],        dur: 4 }));
+if (sDevtools) SCENES.push(shotScene({ shot: sDevtools, caption: 'DEVTOOLS CLI',    blurb: ['TERMINAL REPL',         'NEXT TO INSPECTOR'],   dur: 4 }));
+if (sNetwork)  SCENES.push(shotScene({ shot: sNetwork,  caption: 'READ NETWORK',    blurb: ['REQUESTS AND CONSOLE',  'STRAIGHT FROM CHAT'],  dur: 4 }));
 
 // ── Scene N: Outro (4s) ─────────────────────────────────────────────────
 SCENES.push({
