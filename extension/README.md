@@ -27,7 +27,6 @@ Add Browy from the [Chrome Web Store](https://chromewebstore.google.com/detail/i
 ### First run: sign in
 Browy uses your Copilot subscription. On first message it prompts a device-flow sign-in (one click, copy code, paste in browser, done). After that it just works.
 
-> ![Sign-in screenshot: sidepanel-signin.png](../docs/screenshots/sidepanel-signin.png)
 
 ---
 
@@ -35,7 +34,6 @@ Browy uses your Copilot subscription. On first message it prompts a device-flow 
 
 The side panel is your daily driver. Type a message, the agent acts on the focused tab and streams its progress back into the chat.
 
-> ![Sidepanel hero: sidepanel-hero.png](../docs/screenshots/sidepanel-hero.png)
 
 ### What's on screen
 
@@ -49,7 +47,6 @@ The side panel is your daily driver. Type a message, the agent acts on the focus
 
 ### 1. Basic flow: talk to your tabs
 
-> ![Basic flow: sidepanel-basic.png](../docs/screenshots/sidepanel-basic.png)
 
 ```
 You: what is the headline of this page
@@ -62,7 +59,6 @@ Browy uses your **focused tab** by default. Switch tabs and the next message pic
 
 ### 2. Multi-tab tasks: it follows your focus
 
-> ![Multi-tab: sidepanel-multitab.png](../docs/screenshots/sidepanel-multitab.png)
 
 ```
 You: open hacker news and tell me the top 3 stories with comment counts
@@ -89,13 +85,11 @@ Browy:
 [submit_form]  url changed → /thanks. Subscribed.
 ```
 
-> ![Form filling: sidepanel-forms.png](../docs/screenshots/sidepanel-forms.png)
 
 ### 4. Resuming old chats
 
 Click ☰ to open the chat list. Each entry shows the first-message summary + when you last touched it. Click → resumes from the SDK transcript (full history reloaded, indices fresh).
 
-> ![Chat list: sidepanel-chats.png](../docs/screenshots/sidepanel-chats.png)
 
 ### 5. Login walls and `await_user`
 
@@ -107,11 +101,9 @@ Browy: I hit a Google sign-in. Please log in in the tab I just opened, then say 
 
 You sign in (your password manager helps), reply `go`, Browy resumes. **It never sees your credentials.** Once cookies are set, the next 100 turns just work.
 
-> ![await_user prompt: sidepanel-awaituser.png](../docs/screenshots/sidepanel-awaituser.png)
 
 ### Settings (`options.html`)
 
-> ![Settings page: options-page.png](../docs/screenshots/options-page.png)
 
 - **Model**: pick any model your Copilot subscription exposes
 - **Sign in / sign out**: re-trigger device-flow auth
@@ -124,7 +116,6 @@ You sign in (your password manager helps), reply `go`, Browy resumes. **It never
 
 Open DevTools (F12 or Cmd-Opt-I) → click the **Browy** tab. You get a console-styled REPL right next to the inspector.
 
-> ![DevTools panel: devtools-hero.png](../docs/screenshots/devtools-hero.png)
 
 ### Why use the DevTools panel over the sidepanel?
 
@@ -146,7 +137,6 @@ Type `/` in the prompt to see available commands.
 | `/signin` | Re-run Copilot device-flow auth |
 | `/help` | Show all commands |
 
-> ![Slash menu: devtools-slash.png](../docs/screenshots/devtools-slash.png)
 
 ### Inline `evaluate_js`
 
@@ -179,7 +169,6 @@ Browy: [scroll down] → [get_network_requests filter=/graphql]
   POST /graphql  user.preloadProfiles(ids:[...])  →  200  92ms
 ```
 
-> ![Network tap: devtools-network.png](../docs/screenshots/devtools-network.png)
 
 ### Switching models
 
@@ -216,7 +205,6 @@ Browy:
 | ...       | ...            | ...                                          |
 ```
 
-> ![YC scrape: example-yc.png](../docs/screenshots/example-yc.png)
 
 ### Example: GitHub PR review
 
