@@ -2,6 +2,10 @@
 
 > Open-source Chrome extension. Drive your real tabs through chat. Side panel for day-to-day work, DevTools REPL for the power users.
 
+<p align="center">
+  <img src="docs/screenshots/panel-summarize.png" alt="Browy side panel summarizing a Wikipedia article" width="420" />
+</p>
+
 📖 **Documentation:** [browyhq.github.io](https://browyhq.github.io/): install, first chat, tools reference, DevTools panel, architecture, FAQ.
 
 **Think Claude Code or Aider, but in your browser.** Browy is the AI agent that lives in your browser, a Chromium extension (Chrome / Edge / Brave) backed by a small Node native-messaging host that drives the page through the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) via `chrome.debugger`. It works against your **real** profile: your cookies, your sessions, your logins. Most "log in to do X" tasks just work. An open-source alternative to Browser-Use and Skyvern.

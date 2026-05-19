@@ -27,6 +27,9 @@ Add Browy from the [Chrome Web Store](https://chromewebstore.google.com/detail/i
 ### First run: sign in
 Browy uses your Copilot subscription. On first message it prompts a device-flow sign-in (one click, copy code, paste in browser, done). After that it just works.
 
+<p align="center">
+  <img src="../docs/screenshots/panel-signin.png" alt="Sign-in prompt in the side panel" width="380" />
+</p>
 
 ---
 
@@ -34,6 +37,9 @@ Browy uses your Copilot subscription. On first message it prompts a device-flow 
 
 The side panel is your daily driver. Type a message, the agent acts on the focused tab and streams its progress back into the chat.
 
+<p align="center">
+  <img src="../docs/screenshots/panel-empty.png" alt="The Browy side panel on first run, prompt input focused" width="380" />
+</p>
 
 ### What's on screen
 
@@ -47,6 +53,9 @@ The side panel is your daily driver. Type a message, the agent acts on the focus
 
 ### 1. Basic flow: talk to your tabs
 
+<p align="center">
+  <img src="../docs/screenshots/panel-summarize.png" alt="Browy summarizing a Wikipedia article in the side panel" width="380" />
+</p>
 
 ```
 You: what is the headline of this page
@@ -75,6 +84,10 @@ Browy decides between **using the active tab** vs **opening a new one** based on
 ### 3. Form filling: the three-step pattern
 
 The fastest, most reliable form pattern is `extract_form` → `fill_form` (one bulk call) → `submit_form`. Browy knows this.
+
+<p align="center">
+  <img src="../docs/screenshots/panel-fillform.png" alt="Browy filling a sign-up form field by field" width="380" />
+</p>
 
 ```
 You: sign me up for the newsletter on this page using my email me@example.com
@@ -116,6 +129,9 @@ You sign in (your password manager helps), reply `go`, Browy resumes. **It never
 
 Open DevTools (F12 or Cmd-Opt-I) → click the **Browy** tab. You get a console-styled REPL right next to the inspector.
 
+<p align="center">
+  <img src="../docs/screenshots/devtools-panel.png" alt="The Browy DevTools CLI: terminal-style REPL inside Chrome DevTools" width="640" />
+</p>
 
 ### Why use the DevTools panel over the sidepanel?
 
@@ -142,6 +158,10 @@ Type `/` in the prompt to see available commands.
 
 Prefix any line with `> ` to evaluate JS directly in the inspected page (top-level `await` works).
 
+<p align="center">
+  <img src="../docs/screenshots/panel-evaluate.png" alt="Browy evaluating JavaScript in the page from the side panel" width="380" />
+</p>
+
 ```
 > document.querySelectorAll('a').length
 142
@@ -153,6 +173,10 @@ Prefix any line with `> ` to evaluate JS directly in the inspected page (top-lev
 This is just a tool call wrapper. Browy still wraps with safety checks and prints the result inline.
 
 ### Network + console taps
+
+<p align="center">
+  <img src="../docs/screenshots/panel-network.png" alt="Browy reading the network log via the Chrome DevTools Protocol" width="380" />
+</p>
 
 ```
 You: show me the last 10 console errors on this page
