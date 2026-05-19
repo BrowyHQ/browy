@@ -1,95 +1,153 @@
-# Browy: the AI agent that lives in your browser
+# Browy
 
-> Open-source Chrome extension. Drive your real tabs through chat. Side panel for day-to-day work, DevTools REPL for the power users.
+[English](README.md) | [简体中文](README.zh-CN.md)
+
+**The AI agent that lives in your browser.** A Chromium extension for Chrome, Edge, and Brave that drives your real, logged-in tabs through chat. Side panel for day-to-day work, DevTools panel CLI for power users. Powered by your existing GitHub Copilot subscription.
+
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/status-early%20access-blueviolet)](#status)
+[![Chrome Web Store](https://img.shields.io/badge/Chrome%20Web%20Store-live-brightgreen)](https://chromewebstore.google.com/detail/iondecjdokngnlkfpipgolgkfegpmjca)
+[![Docs](https://img.shields.io/badge/docs-browyhq.github.io-blue)](https://browyhq.github.io/)
 
 <p align="center">
   <img src="docs/screenshots/browy-demo.gif" alt="Browy in action: side panel, DevTools CLI, form filling, network inspection" width="640" />
 </p>
 
-📖 **Documentation:** [browyhq.github.io](https://browyhq.github.io/): install, first chat, tools reference, DevTools panel, architecture, FAQ.
+> ⚠️ **Early access (v0.1.x).** Browy is in preview. APIs, tools, and on-disk schemas may change between minor releases. Breaking changes are documented in [CHANGELOG.md](CHANGELOG.md).
 
-**Think Claude Code or Aider, but in your browser.** Browy is the AI agent that lives in your browser, a Chromium extension (Chrome / Edge / Brave) backed by a small Node native-messaging host that drives the page through the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) via `chrome.debugger`. It works against your **real** profile: your cookies, your sessions, your logins. Most "log in to do X" tasks just work. An open-source alternative to Browser-Use and Skyvern.
+---
 
-There are two surfaces you can talk to Browy from:
+## Table of contents
 
-| Surface | When to use it |
-|---|---|
-| **[Side Panel: Chat](extension/README.md#chat--side-panel)** | Day-to-day tab automation, scraping, form filling, multi-tab tasks. Open with the toolbar icon or the keyboard shortcut. |
-| **[DevTools Panel: Console-style CLI](extension/README.md#devtools-panel--console-cli)** | Power-user REPL that lives next to the inspector. Slash commands, network/console taps, evaluate-in-page snippets. |
+- [What Browy is](#what-browy-is)
+- [Quick install](#quick-install)
+- [What gets installed](#what-gets-installed)
+- [Two ways to talk to Browy](#two-ways-to-talk-to-browy)
+- [Worked examples](#worked-examples)
+- [How Browy is different](#how-browy-is-different)
+- [Browy vs alternatives](#browy-vs-alternatives)
+- [Project layout](#project-layout)
+- [Status](#status)
+- [Responsible AI](#responsible-ai)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
+
+---
+
+## What Browy is
+
+Browy is a browser AI agent. You install it as a Chromium extension; it adds two UI surfaces (a side panel chat and a DevTools panel CLI) that talk to a small Node native-messaging host running on your machine. The host wraps the [GitHub Copilot SDK](https://www.npmjs.com/package/@github/copilot-sdk), so every model call uses your existing Copilot subscription, no extra API keys.
+
+The agent drives the active tab through the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) via `chrome.debugger`. It reads pages off the accessibility tree (the same tree screen readers use), clicks and types by index, captures network and console activity, and runs JavaScript when the structured tools are not enough.
+
+**Browy is a productivity tool for a single human operator, not a way to run unattended automation against other people's services.** You point it at a tab; it reads and acts on that tab; you see every action stream back into the chat. There is no Browy server in the loop and no inbox that other people can flood by talking to it.
+
+Think Claude Code or Aider, but in your browser. An open-source alternative to Browser-Use and Skyvern.
 
 ---
 
 ## Quick install
 
-**Step 1: install the extension**
-[Add Browy from the Chrome Web Store](https://chromewebstore.google.com/detail/iondecjdokngnlkfpipgolgkfegpmjca) (one click).
+### Step 1: install the extension
 
-**Step 2: install the native host**
+[**Add Browy from the Chrome Web Store**](https://chromewebstore.google.com/detail/iondecjdokngnlkfpipgolgkfegpmjca) (one click). The same listing covers Chrome, Edge, and Brave.
 
-Windows (bundles Node):
+**✓ Validate:** Pin the toolbar icon. Click it. The side panel should open and show a "host disconnected" banner. That is expected until Step 2.
+
+### Step 2: install the native host
+
+**Windows** (bundles Node, ~130 MB):
+
 ```powershell
 irm https://github.com/BrowyHQ/browy/releases/latest/download/install.ps1 | iex
 ```
 
-macOS / Linux:
+**macOS / Linux**:
+
 ```bash
 curl -fsSL https://github.com/BrowyHQ/browy/releases/latest/download/install.sh | bash
 ```
 
-Pin the Browy toolbar icon, click it to open the side panel, sign in to Copilot on first run.
+**✓ Validate:** Re-open the side panel. The host banner should be gone. If not, run `browy --version` (Windows: `& "$env:LOCALAPPDATA\Browy\app\browy.exe" --version`) to confirm the binary is on disk.
 
-Detailed install + troubleshooting: [extension/README.md](extension/README.md#installation)
+### Step 3: sign in to Copilot
 
----
+Click **Sign in to GitHub Copilot** in the side panel. A terminal window opens with a device-flow link. Paste the code in your browser, authorise, the terminal closes itself.
 
-## Sections
+**✓ Validate:** Send "what is the headline of this page" against any tab. You should see a `snapshot` tool call followed by a streamed reply.
 
-- 🟢 **[Chat: Side Panel](extension/README.md#chat--side-panel)**: persistent chat, tab-aware, history kept per profile
-  - [Send a message → drive the active tab](extension/README.md#1-basic-flow-talk-to-your-tabs)
-  - [Multi-tab workflows](extension/README.md#2-multi-tab-tasks-it-follows-your-focus)
-  - [Forms: extract → fill → submit](extension/README.md#3-form-filling-the-three-step-pattern)
-  - [Resume a previous chat](extension/README.md#4-resuming-old-chats)
-  - [Login walls + `await_user`](extension/README.md#5-login-walls-and-await_user)
+That's it. Try [your first chat](https://browyhq.github.io/first-chat/) for five concrete examples.
 
-- 🖥️ **[DevTools Panel: CLI](extension/README.md#devtools-panel--console-cli)**: console-styled REPL for power users
-  - [Slash commands](extension/README.md#slash-commands)
-  - [Tap into network + console](extension/README.md#network--console-taps)
-  - [`evaluate_js` from the prompt](extension/README.md#inline-evaluate_js)
-  - [Switching models](extension/README.md#switching-models)
-
-- 🔧 **[Architecture & developing locally](src/README.md)**: extension ↔ port ↔ native host ↔ Copilot SDK + CDP
-- 📖 **[Documentation site](https://browyhq.github.io/)**: install, first chat, tools reference, DevTools CLI, privacy
+> **From mainland China?** GitHub Releases and `api.githubcopilot.com` are both reachable but slow. See the [China setup guide](https://browyhq.github.io/china-setup/) for the `BROWY_RELEASE_URL` mirror pattern and a latency note.
 
 ---
 
-## Worked examples (real tasks Browy handles well)
+## What gets installed
 
-- **Scrape the YC startup directory by batch**: *"List all Fall 2026 YC companies with their location and one-line pitch"* → see [extension/README.md#example-yc-directory-scrape](extension/README.md#example-yc-directory-scrape)
-- **Review a GitHub PR for me**: *"Summarize the changes in this PR and flag anything that looks risky"* → [extension/README.md#example-github-pr-review](extension/README.md#example-github-pr-review)
-- **Set up a Gmail filter**: *"Auto-archive everything from no-reply@\*.atlassian.net"* → [extension/README.md#example-gmail-filter](extension/README.md#example-gmail-filter)
-- **Fill a sign-up form across multiple tabs**: [extension/README.md#example-multi-tab-signup](extension/README.md#example-multi-tab-signup)
+The installer is conservative; everything below survives reboots and updates in place.
+
+| Path | Contents |
+|---|---|
+| `%LOCALAPPDATA%\Browy\app\` (Windows) | Native messaging host binary, bundled Node, helpers |
+| `~/.browy/app/` (macOS / Linux) | Same |
+| `~/.browy/data/files/` | Sandboxed scratch disk for the `save_file` / `read_file` agent tools |
+| `~/.browy/data/notes.json` | Persistent key-value memory across chats |
+| `~/.browy/host/host.log` | Single rotating 5 MB diagnostic log (overwritten on rotation) |
+| Native messaging manifest | Registered with Chrome, Edge, and Brave so the extension can talk to the host |
+| Chrome extension storage | Chat history, model selection, theme; never leaves the local profile |
+
+Nothing in this list leaves your machine. Page content the agent reads goes to GitHub Copilot, exactly as if you ran `gh copilot` from a terminal. Full data-handling summary at [browyhq.github.io/privacy/](https://browyhq.github.io/privacy/).
+
+---
+
+## Two ways to talk to Browy
+
+| Surface | When to use it |
+|---|---|
+| **[Side Panel chat](extension/README.md#chat-side-panel)** | Day-to-day tab automation, scraping, form filling, multi-tab tasks. Open with the toolbar icon or the keyboard shortcut. Persistent history per browser profile. |
+| **[DevTools panel CLI](extension/README.md#devtools-panel-console-cli)** | Power-user REPL next to the inspector. Slash commands (`/help`, `/model`, `/clear`, `/login`, `/js`), keyboard shortcuts, per-tab agent sessions. |
+
+Both surfaces share session state, model selection, and chat history. The DevTools CLI exists for keyboard-driven workflows; the side panel exists for everything else.
+
+---
+
+## Worked examples
+
+Real tasks Browy handles well. Each links to the full transcript and a screenshot.
+
+- **[Scrape the YC startup directory by batch](extension/README.md#example-yc-directory-scrape)**: *"List all Fall 2026 YC companies with their location and one-line pitch."*
+- **[Review a GitHub PR](extension/README.md#example-github-pr-review)**: *"Summarise the changes in this PR and flag anything that looks risky."*
+- **[Set up a Gmail filter](extension/README.md#example-gmail-filter)**: *"Auto-archive everything from no-reply@\*.atlassian.net."*
+- **[Fill a sign-up form across multiple tabs](extension/README.md#example-multi-tab-signup)**: multi-step, multi-tab, stops before submit.
+
+For a guided walkthrough with screenshots, see [Your first chat](https://browyhq.github.io/first-chat/).
 
 ---
 
 ## How Browy is different
 
-- **Lives in your real browser.** Not a headless puppet. Your cookies, extensions, history, and password manager are all available to Browy. Most "first, log in" steps go away.
-- **Indexed page snapshot.** Every turn, Browy gets a numbered list of every visible interactive element (`[12]<button>Submit</button>`). It clicks by index. No flaky CSS selectors, no "find the right XPath" guesswork.
-- **DevTools-aware.** Network requests, console logs, cookies, and storage are all available as tools. Great for debugging your own apps.
-- **Bring your own model.** Pick from any frontier model the agent has access to (Claude, GPT, Gemini, Llama, ...). Switch via `/model` in the DevTools CLI or in Settings.
-- **Open source, Apache-2.0.** Audit the host. Audit the extension. Pin a known-good build.
+- **Runs against your real browser profile.** Not a headless puppet. Your cookies, your extensions, your password manager, your existing logins. Most "first, log in to X" steps disappear.
+- **Indexed accessibility-tree snapshot.** Every turn, Browy gives the model a numbered list of every visible interactive element (`[12]<button>Submit</button>`). The agent clicks by index. No brittle CSS selectors, no XPath guesswork.
+- **DevTools-aware.** Network requests, console logs, cookies, storage, and `evaluate_js` are first-class tools. Great for debugging the app you are building, not just operating apps that are already running.
+- **Bring your own model.** Pick from any frontier model your Copilot subscription exposes (Claude, GPT, Gemini, Llama, Codex). Switch with `/model` in the DevTools CLI or in Settings.
+- **One subscription, no surprise bills.** Browy is built on the GitHub Copilot SDK. There is no Browy meter. Whatever Copilot costs you, that is what Browy costs you.
+- **Open source, Apache-2.0.** Audit the host. Audit the extension. Pin a known-good build. The agent loop is in one file ([`src/agent/loop.ts`](src/agent/loop.ts)) and the tool registry is in another ([`src/agent/tools/browser.ts`](src/agent/tools/browser.ts)).
+
+---
 
 ## Browy vs alternatives
 
-| | **Browy** | Browser-Use | Skyvern | Aider |
+| | **Browy** | [Browser-Use](https://github.com/browser-use/browser-use) | [Skyvern](https://github.com/Skyvern-AI/skyvern) | [Aider](https://github.com/Aider-AI/aider) |
 |---|---|---|---|---|
-| Open source | ✅ Apache-2.0 | ✅ | ✅ | ✅ |
+| Open source | ✅ Apache-2.0 | ✅ MIT | ✅ AGPL | ✅ Apache-2.0 |
 | Runs locally | ✅ | ✅ (Python) | ❌ Cloud | ✅ |
 | Uses your real browser profile | ✅ | ❌ Fresh sandbox | ❌ Cloud | n/a (terminal) |
-| Browser extension UI | ✅ | ❌ | ❌ | ❌ |
+| Browser extension UI | ✅ Side panel + DevTools | ❌ | ❌ | ❌ |
 | Native DevTools panel | ✅ | ❌ | ❌ | ❌ |
-| BYO frontier models | ✅ Claude, GPT, Gemini, Llama | ❌ Per-token API | ❌ Per-task | ❌ Per-token API |
+| Frontier-model choice | ✅ Claude, GPT, Gemini, Llama (via Copilot) | Per-token API | Per-task | Per-token API |
 | Headless CLI mode | ✅ `browy run` | ✅ | ✅ | ✅ |
+| Billing model | Your existing Copilot subscription | Per-token API | Per-task | Per-token API |
 
 ---
 
@@ -97,34 +155,70 @@ Detailed install + troubleshooting: [extension/README.md](extension/README.md#in
 
 ```
 browy/
-├── extension/           ← Chromium extension (sidepanel + devtools panel + options)
-│   └── README.md        ← Chat & DevTools CLI feature docs
-├── src/                 ← Node native-messaging host (TypeScript)
-│   ├── agent/           ← Copilot SDK driver, tools, page snapshot
-│   ├── cli/             ← Standalone CLI entrypoint
-│   ├── transports/      ← native-messaging + websocket
-│   └── README.md        ← Architecture, tools, developing locally
-├── scripts/             ← Build, stage, pack helpers
-├── installer/           ← NSIS installer + install.ps1 / install.sh
-├── packaging/           ← Per-OS native-host manifests
-└── docs/screenshots/    ← Images used in READMEs
+├── extension/             ← Chromium extension (side panel + DevTools panel + options)
+│   └── README.md          ← Side panel and DevTools CLI feature docs
+├── src/                   ← Node native-messaging host (TypeScript)
+│   ├── agent/             ← Copilot SDK driver, tool registry, page snapshot
+│   ├── cli/               ← Standalone CLI entry point (`browy run`)
+│   ├── transports/        ← Native messaging and WebSocket framing
+│   └── README.md          ← Architecture and developing locally
+├── scripts/               ← Build, stage, pack helpers
+├── installer/             ← NSIS installer plus install.ps1 / install.sh
+├── packaging/             ← Per-OS native-messaging-host manifests
+├── tests/                 ← Vitest suite (page-snapshot, redaction, agent-loop smoke)
+└── docs/                  ← Screenshots used in READMEs; site lives at browyhq.github.io
 ```
 
 ---
 
 ## Status
 
-Browy is **v0.1.2**, first public release. Windows, macOS, and Linux all have native-host installers and packaged builds (see [Releases](https://github.com/BrowyHQ/browy/releases)). Expect rough edges around long-running multi-step automations on hostile SPAs (LinkedIn, Notion, Discord). File issues. They help.
+Browy is **v0.1.x**, early access. The Chrome Web Store listing is live for Chrome, Edge, and Brave on Windows, macOS, and Linux. Native-host installers ship from [GitHub Releases](https://github.com/BrowyHQ/browy/releases).
+
+Known rough edges:
+
+- Long-running multi-step automations on hostile single-page apps (LinkedIn, Notion, Discord, Figma) need better wait and retry strategies. File issues with reproductions.
+- Translations beyond Simplified Chinese have not started.
+- The DevTools CLI is keyboard-only; mouse selection in the REPL is still rough.
+
+The roadmap and current open work live on the [GitHub project board](https://github.com/orgs/BrowyHQ/projects) and in the [docs roadmap page](https://browyhq.github.io/roadmap/).
+
+---
+
+## Responsible AI
+
+Browy amplifies a human operator. It does not replace the operator.
+
+- **You see every action.** Tool calls render inline in the side panel as they happen. Browy never executes a tool you cannot watch.
+- **Host-touching tools are off by default.** Shell, filesystem, and `web_fetch` require an explicit Settings toggle, one tool at a time.
+- **No background activity.** The agent only acts when you send a message. No polling, no scheduled runs, no off-screen automation.
+- **Page content goes to GitHub Copilot.** Same path as `gh copilot` in a terminal. Governed by your Copilot subscription terms.
+- **No Browy server.** The maintainer cannot read your chats or your page content. Telemetry is not collected.
+- **Chrome shows its standard debugger banner whenever the agent is driving.** You always know when Browy is attached.
+
+Detailed security and threat-model notes at [browyhq.github.io/security/](https://browyhq.github.io/security/).
+
+---
 
 ## Contributing
 
-PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev loop (`npm run build` → hot-patch → `Stop-Process` the host).
+PRs welcome. The dev loop is small and the codebase is intentionally readable.
+
+- [CONTRIBUTING.md](CONTRIBUTING.md): setup, dev loop, style, PR process
+- [Architecture](src/README.md): extension ↔ port ↔ native host ↔ Copilot SDK
+- [Good first issues](https://github.com/BrowyHQ/browy/labels/good%20first%20issue)
+- [Discussions](https://github.com/BrowyHQ/browy/discussions): bigger questions and design proposals
+
+Contributors are listed in [CONTRIBUTORS.md](CONTRIBUTORS.md).
+
+---
 
 ## Security
 
-Found a vulnerability? See [SECURITY.md](SECURITY.md). Please **don't** open a public issue.
+Found a vulnerability? Use GitHub's private vulnerability reporting at <https://github.com/BrowyHQ/browy/security/advisories/new>. **Please do not open a public issue.** Full policy in [SECURITY.md](SECURITY.md).
+
+---
 
 ## License
 
-Apache-2.0: see [LICENSE](LICENSE) and [NOTICE](NOTICE).
-
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
