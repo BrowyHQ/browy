@@ -3,7 +3,7 @@
 > Open-source Chrome extension. Drive your real tabs through chat. Side panel for day-to-day work, DevTools REPL for the power users.
 
 <p align="center">
-  <img src="docs/screenshots/panel-summarize.png" alt="Browy side panel summarizing a Wikipedia article" width="420" />
+  <img src="docs/screenshots/browy-demo.gif" alt="Browy in action: side panel, DevTools CLI, form filling, network inspection" width="640" />
 </p>
 
 📖 **Documentation:** [browyhq.github.io](https://browyhq.github.io/): install, first chat, tools reference, DevTools panel, architecture, FAQ.
