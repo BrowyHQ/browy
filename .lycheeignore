@@ -1,0 +1,19 @@
+# lychee link checker ignore patterns.
+# Run with: lychee --config lychee.toml '**/*.md'
+# (lychee.toml is implicit; this file is consulted automatically.)
+
+# CWS extension URL: lychee can't follow it without a browser, the redirect is fine.
+^https://chromewebstore\.google\.com/
+
+# GitHub anchor links inside the same repo: GitHub renders these client-side.
+^https://github\.com/BrowyHQ/browy(?:/blob/[^#]+)?#
+
+# Localhost and 127.* refs in dev docs.
+^https?://(?:localhost|127\.0\.0\.1)(?::\d+)?
+
+# Mailto links: lychee can't validate these.
+^mailto:
+
+# Placeholder example URLs.
+^https?://example\.com
+^https?://your-mirror\.example\.com

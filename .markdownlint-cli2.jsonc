@@ -1,0 +1,28 @@
+{
+  "config": {
+    "extends": "markdownlint/style/relaxed",
+    "default": true,
+    "MD013": false,
+    "MD024": { "siblings_only": true },
+    "MD033": false,
+    "MD041": false,
+    "MD036": false
+  },
+  "globs": [
+    "README.md",
+    "README.zh-CN.md",
+    "CONTRIBUTING.md",
+    "CONTRIBUTORS.md",
+    "CHANGELOG.md",
+    "SECURITY.md",
+    "extension/README.md",
+    "src/README.md",
+    "docs/**/*.md"
+  ],
+  "ignores": [
+    "node_modules/**",
+    "dist/**",
+    "release/**",
+    "stage/**"
+  ]
+}
