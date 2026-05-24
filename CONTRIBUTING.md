@@ -199,6 +199,8 @@ If your PR ends up larger than ~500 lines net, consider splitting it. We will us
 
 This is the most common contribution path. The tool registry is in [`src/agent/tools/browser.ts`](src/agent/tools/browser.ts).
 
+For AI-assisted contributors, there is a project-level agent skill at [`.github/skills/browy-add-tool/`](.github/skills/browy-add-tool/) that walks Copilot (or any Agent-Skills-compatible client) through this same workflow with worked examples.
+
 1. **Pick a slot.** Group your tool with similar ones (see the inline section comments).
 2. **Copy the shape of a neighbour.** Each tool is a `register({...})` block with `name`, `description`, `parameters` (a JSON schema the model sees), and `handler`.
 3. **Make the handler thin.** It should validate input, dispatch over the port, and return the tool result. Heavy lifting belongs in a helper module.
