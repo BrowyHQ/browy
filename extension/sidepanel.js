@@ -507,8 +507,8 @@ const wsShim = {
 // the side panel page itself so we get a fresh context.
 let reconnectAttempts = 0;
 const RELOAD_AFTER_FAILURES = 5;
-const INSTALL_PS1_URL = 'https://github.com/BrowyHQ/browy/releases/latest/download/install.ps1';
-const INSTALL_SH_URL = 'https://github.com/BrowyHQ/browy/releases/latest/download/install.sh';
+const INSTALL_PS1_URL = 'https://browyhq.github.io/install/';
+const INSTALL_SH_URL = 'https://browyhq.github.io/install/';
 
 // Reconnect / host-loss banner shown above the chat panel.
 function showConnBanner(text, opts = {}) {
@@ -604,18 +604,22 @@ function connect() {
       brand.textContent = 'starting…';
       return;
     }
-    if (raw.type === '__host_error' || raw.type === '__host_disconnected' || raw.type === '__host_missing') {
+    if (raw.type === '__host_error' || raw.type === '__host_disconnected' || raw.type === '__host_missing' || raw.type === '__host_stale') {
       sessionReady = false;
       setLive(false); setBusy(false); brand.textContent = 'offline';
       tabTitleText = '—'; currentAction = null; setTtl();
       try {
         const hint = document.querySelector('#empty .hint');
-        if (hint) hint.textContent = '// offline — check that the browy backend is installed and running';
+        if (hint) hint.textContent = '// offline. check that the browy backend is installed and running';
         setOnlineControls(false);
         if (typeof closeChatsOverlay === 'function') closeChatsOverlay();
         if (raw.type === '__host_missing') {
-          showConnBanner('Browy host not installed.', {
+          showConnBanner('Browy backend not installed.', {
             action: { label: 'Install →', href: INSTALL_PS1_URL },
+          });
+        } else if (raw.type === '__host_stale') {
+          showConnBanner('Backend installed but does not trust this extension. Upgrade the backend.', {
+            action: { label: 'Upgrade →', href: INSTALL_PS1_URL },
           });
         } else {
           showConnBanner('Host disconnected. Retrying…', {

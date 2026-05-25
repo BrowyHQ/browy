@@ -4,6 +4,16 @@ All notable changes to Browy will be documented in this file. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Side-panel "Install →" link now opens the install guide page instead of triggering a `.ps1` download. Double-clicked downloaded `.ps1` files silently exit on most Windows machines because of Mark-of-the-Web and execution policy. The guide page has the `irm ... | iex` one-liner that actually works.
+- The side panel now distinguishes "backend not installed" (`__host_missing`) from "backend installed but does not trust this extension" (`__host_stale`). The second case happens when an older backend (pre-0.1.3) was installed before the user switched to the Chrome Web Store extension. The CTA now says "Upgrade →" instead of "Install →" in that case, which routes to the same one-liner that overwrites the manifest with the right `allowed_origins`.
+- DevTools CLI surfaces the same two error types instead of a generic "host disconnected."
+
+### Upgrading from 0.1.2 or earlier
+
+If you installed the backend with a version before 0.1.3 and then later installed the extension from the Chrome Web Store, your side panel will say "Backend installed but does not trust this extension." Re-run the installer (`irm https://github.com/BrowyHQ/browy/releases/latest/download/install.ps1 | iex` on Windows, `curl -fsSL https://github.com/BrowyHQ/browy/releases/latest/download/install.sh | bash` on macOS/Linux). The 0.1.3 installer writes both the dev and Chrome Web Store extension IDs into `allowed_origins`, so the same machine can run either install path.
+
 ## [0.1.2]: devtools REPL + tool toggles + headless CLI
 *Released 2026-05-10*
 

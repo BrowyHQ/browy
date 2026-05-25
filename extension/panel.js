@@ -517,6 +517,18 @@ port.onMessage.addListener((msg) => {
       sessionStarted = false;
       setBusy(false);
       break;
+    case '__host_missing':
+      appendRow('err', '✗', 'browy backend not installed. install: https://browyhq.github.io/install/');
+      hostReady = false;
+      sessionStarted = false;
+      setBusy(false);
+      break;
+    case '__host_stale':
+      appendRow('err', '✗', 'browy backend installed but does not trust this extension. upgrade: https://browyhq.github.io/install/');
+      hostReady = false;
+      sessionStarted = false;
+      setBusy(false);
+      break;
 
     case 'session.ready':
       sessionModel = msg.model || '';

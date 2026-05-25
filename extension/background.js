@@ -37,8 +37,18 @@ function ensureNativeHost() {
   } catch (e) {
     const m = String(e?.message || e);
     console.error('[browy] connectNative threw:', m);
-    const notInstalled = /not found|forbidden by policy|not allowed/i.test(m);
-    broadcastToClients({ type: notInstalled ? '__host_missing' : '__host_error', message: m });
+    // Chrome returns three distinct errors here:
+    //   "Specified native messaging host not found." → manifest absent
+    //   "Access to the specified native messaging host is forbidden."
+    //     OR "...not allowed..."                      → manifest exists but
+    //                                                    allowed_origins doesn't include
+    //                                                    THIS extension id. Almost
+    //                                                    always means the user has an
+    //                                                    older host than this extension.
+    const forbidden  = /forbidden|not allowed/i.test(m);
+    const notFound   = /not found|specified native messaging host/i.test(m) && !forbidden;
+    const type = forbidden ? '__host_stale' : (notFound ? '__host_missing' : '__host_error');
+    broadcastToClients({ type, message: m });
     return null;
   }
 
@@ -77,17 +87,22 @@ function ensureNativeHost() {
     nativePort = null;
     nativeReady = false;
     sessionToClient.clear();
-    // Distinguish "host not installed" from a transient crash so the UI can
-    // show an install CTA instead of an infinite reconnect spinner.
-    const notInstalled = /not found|forbidden by policy|not allowed|specified native messaging host/i.test(msg);
-    broadcastToClients({
-      type: notInstalled ? '__host_missing' : '__host_disconnected',
-      message: msg,
-    });
-    if (notInstalled) {
+    // Distinguish three cases so the UI can show the right CTA:
+    //   __host_missing — manifest absent, user needs to run the installer
+    //   __host_stale   — manifest exists but allowed_origins doesn't include
+    //                    this extension id (typically pre-0.1.3 host + CWS install)
+    //   __host_disconnected — transient crash, will reconnect
+    const forbidden = /forbidden|not allowed/i.test(msg);
+    const notFound  = /not found|specified native messaging host/i.test(msg) && !forbidden;
+    const stop = forbidden || notFound;
+    const type  = forbidden ? '__host_stale'
+                : notFound  ? '__host_missing'
+                :             '__host_disconnected';
+    broadcastToClients({ type, message: msg });
+    if (stop) {
       // Stop hammering chrome.runtime.connectNative — it'll never succeed
-      // until the user installs the host. Reconnect on next user action
-      // (a fresh client connect kicks ensureNativeHost again).
+      // until the user installs/upgrades the host. Reconnect on next user
+      // action (a fresh client connect kicks ensureNativeHost again).
       return;
     }
     // Auto-reconnect if any clients are still attached. Backoff so a hard
