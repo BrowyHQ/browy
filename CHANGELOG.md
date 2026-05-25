@@ -2,17 +2,21 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.4]: launch-readiness fixes
+*Released 2026-05-25*
 
 ### Fixed
 
-- Side-panel "Install →" link now opens the install guide page instead of triggering a `.ps1` download. Double-clicked downloaded `.ps1` files silently exit on most Windows machines because of Mark-of-the-Web and execution policy. The guide page has the `irm ... | iex` one-liner that actually works.
-- The side panel now distinguishes "backend not installed" (`__host_missing`) from "backend installed but does not trust this extension" (`__host_stale`). The second case happens when an older backend (pre-0.1.3) was installed before the user switched to the Chrome Web Store extension. The CTA now says "Upgrade →" instead of "Install →" in that case, which routes to the same one-liner that overwrites the manifest with the right `allowed_origins`.
-- DevTools CLI surfaces the same two error types instead of a generic "host disconnected."
+- **install.ps1 no longer fails silently on PowerShell 7.** The file shipped with a UTF-8 BOM, which PS7's `iex` parses as an unrecognised command name. The error fired before `$ErrorActionPreference='Stop'` was set in the script body, so it was non-fatal and silent (depending on the host), and the user saw a blank cursor. PS5.1 silently swallows the BOM so this never reproduced on legacy hosts. The BOM is now stripped, and a `.gitattributes` rule prevents editors from re-adding it.
+- **Side-panel "Install →" link** now opens the install guide page instead of triggering a `.ps1` download. Double-clicked downloaded `.ps1` files silently exit on most Windows machines because of Mark-of-the-Web and execution policy. The guide page has the `irm ... | iex` one-liner that actually works.
+- **Stale-host detection.** The side panel now distinguishes "backend not installed" (`__host_missing`) from "backend installed but does not trust this extension" (`__host_stale`). The second case happens when an older backend (pre-0.1.3) was installed before the user switched to the Chrome Web Store extension. The CTA now says "Upgrade →" instead of "Install →" in that case, which routes to the same one-liner that overwrites the manifest with the right `allowed_origins`.
+- **DevTools CLI** surfaces the same two error types instead of a generic "host disconnected."
+- **Chats overlay now shows the user's full Browy history**, including older sessions whose ID does not start with `sp-` / `dt-`. The filter now treats a session as Browy if its ID matches the new scheme, OR its working directory is `~/.browseragent/sessions`, OR its summary contains a `<browser_context>` block. Older installs that pre-date the `sp-` / `dt-` ID scheme silently disappeared from the chats picker even though they were still on disk; they are now visible again.
+- **Chats overlay loading state.** When the backend is still starting up, the chats overlay now shows "connecting..." instead of "no past chats yet". On `session.ready` the overlay re-renders so the SDK-backed history pops in without the user reopening.
 
 ### Upgrading from 0.1.2 or earlier
 
-If you installed the backend with a version before 0.1.3 and then later installed the extension from the Chrome Web Store, your side panel will say "Backend installed but does not trust this extension." Re-run the installer (`irm https://github.com/BrowyHQ/browy/releases/latest/download/install.ps1 | iex` on Windows, `curl -fsSL https://github.com/BrowyHQ/browy/releases/latest/download/install.sh | bash` on macOS/Linux). The 0.1.3 installer writes both the dev and Chrome Web Store extension IDs into `allowed_origins`, so the same machine can run either install path.
+If you installed the backend with a version before 0.1.3 and then later installed the extension from the Chrome Web Store, your side panel will say "Backend installed but does not trust this extension." Re-run the installer (`irm https://github.com/BrowyHQ/browy/releases/latest/download/install.ps1 | iex` on Windows, `curl -fsSL https://github.com/BrowyHQ/browy/releases/latest/download/install.sh | bash` on macOS/Linux). The 0.1.3+ installer writes both the dev and Chrome Web Store extension IDs into `allowed_origins`, so the same machine can run either install path.
 
 ## [0.1.2]: devtools REPL + tool toggles + headless CLI
 *Released 2026-05-10*
