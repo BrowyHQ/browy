@@ -136,7 +136,7 @@ jobs:
             gh release create "$TAG" \
               --repo "${{ github.repository }}" \
               --title "$TAG" \
-              --notes-from-tag
+              --notes "Release $TAG. See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details."
           fi
           # Always also include the install scripts from the source tree
           # so the GH release has everything a user needs in one place.
