@@ -22,10 +22,36 @@ const BROWSERAGENT_CLIENT_NAME = 'browseragent';
 const BROWSERAGENT_WORKDIR = path.join(os.homedir(), '.browseragent', 'sessions');
 
 /** Recognises sessionIds we mint (`sp-*` from the side panel, `dt-*` from
- *  the DevTools panel). Used to identify our sessions in listSessions(),
- *  whose `context.cwd` is unreliable for filtering (only populated from git). */
+ *  the DevTools panel). Used as a fast positive identifier for our sessions
+ *  in listSessions(). */
 function isBrowySessionId(id: string): boolean {
   return /^(sp|dt)-/.test(id);
+}
+
+/** Decide whether an SDK session belongs to Browy.
+ *
+ * We use three signals in order of confidence:
+ *   1. ID prefix (sp-* or dt-*) — current scheme, perfectly reliable.
+ *   2. context.cwd matches our BROWSERAGENT_WORKDIR — set on every session
+ *      we create, including older UUID-prefixed sessions from before we
+ *      switched to the sp-* / dt-* scheme.
+ *   3. Summary contains <browser_context> — the SDK records the first
+ *      user message as the session summary, and Browy prepends a
+ *      <browser_context> block to every user message. Catches ancient
+ *      sessions that predate even the cwd convention.
+ *
+ * Without (2) and (3), all sessions older than the sp- / dt- prefix
+ * introduction silently disappear from the chats overlay even though
+ * they're still on disk. Treating any of these signals as sufficient
+ * gets users their full history back. */
+function isBrowySession(s: any): boolean {
+  const id = s?.sessionId || '';
+  if (isBrowySessionId(id)) return true;
+  const cwd = s?.context?.cwd;
+  if (cwd && cwd === BROWSERAGENT_WORKDIR) return true;
+  const summary = s?.summary || '';
+  if (typeof summary === 'string' && summary.includes('<browser_context>')) return true;
+  return false;
 }
 
 /** Strip the agent-side context blocks (<browser_context>, <page_snapshot>,
@@ -1005,8 +1031,7 @@ export class Agent {
       const out: Array<{ id: string; summary?: string; startTime: number; modifiedTime: number }> = [];
       for (const s of sessions || []) {
         const id = s?.sessionId || '';
-        if (!isBrowySessionId(id)) continue;
-        if (s?.context?.cwd && s.context.cwd !== BROWSERAGENT_WORKDIR) continue;
+        if (!isBrowySession(s)) continue;
         matched++;
         out.push({
           id,

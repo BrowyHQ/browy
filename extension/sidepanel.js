@@ -638,6 +638,15 @@ function connect() {
       try { setOnlineControls(true); hideConnBanner(); } catch {}
       refreshActiveTab();
       flushPendingHostMsgs();
+      // If the chats overlay was opened while the host was still booting,
+      // it'll be stuck on the "connecting…" placeholder. Re-render now
+      // so the SDK-backed history pops in without the user having to
+      // close and reopen.
+      try {
+        if (chatsOverlay && chatsOverlay.classList.contains('open')) {
+          renderChatsList(chatsSearch?.value || '');
+        }
+      } catch {}
       return;
     }
     const legacy = browyTranslate(raw);
@@ -1129,6 +1138,17 @@ function fmtRelTime(ts) {
 }
 async function renderChatsList(filter = '') {
   // Source of truth: Copilot SDK sessions tagged with our workdir.
+  // If the host isn't online yet, show a connecting state so we don't
+  // flash "no past chats yet" while waiting for the handshake.
+  if (!sessionReady) {
+    chatsHint.textContent = 'connecting…';
+    chatsList.innerHTML = '';
+    const emp = document.createElement('div');
+    emp.className = 'chats-empty';
+    emp.textContent = '// waiting for the browy backend to come online';
+    chatsList.appendChild(emp);
+    return;
+  }
   const sdkChats = await requestChats();
   const rows = sdkChats.map(c => ({
     id: c.id,
