@@ -1,0 +1,6 @@
+# Keep install scripts BOM-free on commit and checkout. PowerShell 7's iex
+# interprets a leading U+FEFF as an attempted command name and errors out
+# silently (the error fires before $ErrorActionPreference='Stop' lands),
+# breaking the irm | iex install pattern. Force no BOM, LF line endings.
+install.ps1 text eol=lf working-tree-encoding=UTF-8
+install.sh  text eol=lf working-tree-encoding=UTF-8

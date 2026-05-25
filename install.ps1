@@ -1,4 +1,4 @@
-﻿# Browy installer for Windows (PowerShell).
+# Browy installer for Windows (PowerShell).
 #
 # Usage:
 #   irm https://github.com/BrowyHQ/browy/releases/latest/download/install.ps1 | iex
