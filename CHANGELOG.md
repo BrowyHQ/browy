@@ -2,7 +2,27 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
-## [0.1.4]: launch-readiness fixes
+## [0.1.5]: cold-start UX
+*Released 2026-08-10*
+
+Browy's native host takes a while to cold start — measured 10.8s to first response on a warm machine and 47s under load, because Chrome spawns a fresh host process and the Copilot SDK subprocess has to boot behind it. The UI handled that window badly. This release is entirely about the first 45 seconds.
+
+### Fixed
+
+- **Browy no longer tells working installs to install the backend.** The side panel had only two states, online and offline, so the whole cold-start window rendered the offline copy: a disabled input reading *"offline — install the browy backend to chat"*. Users with a perfectly good install were told it was missing, every single cold start. There is now a distinct `booting` state with its own copy ("starting browy backend — you can start typing…") and no install CTA.
+- **You can now type while the backend starts.** The queue that holds a chat send until `session.ready` (`wsShim` → `pendingHostMsgs` → `flushPendingHostMsgs`) was unreachable dead code: the input was disabled until `__host_ready`, and `session.ready` lands ~16ms later, so the queue never fired. The input and send button are now live during boot, sends are queued, and a banner explains the message will go automatically. This reclaims the entire cold-start window.
+- **"No past chats yet" no longer lies about your history.** The chats overlay used a 4s timeout on `chat.list` that resolved to an empty array — visually identical to genuinely having no chats. The host actually needs 7.7s–40s after `session.ready` before it can answer. This was the root cause of the "all my chats are gone" reports. The overlay now distinguishes four states — connecting, loading, timed out (with retry), and genuinely empty — and never claims emptiness it hasn't confirmed.
+
+### Added
+
+- **`sdk.ready` protocol message.** `session.ready` only means the host process is answering; the Copilot SDK behind it is still booting, and until it lands `chat.list` and `models.list` both legitimately return nothing. The host now broadcasts `sdk.ready` when the SDK is actually usable, and latches it so a panel attaching later still learns about it via `pushInitialState`. The chats overlay re-renders on it.
+- **`npm run test:unit`** — a dependency-free regression test (`tests/sidepanel-boot-state.mjs`) that extracts `setControlsState` from the panel source and asserts the boot-state contract, so the "install the backend" copy can never reappear during boot.
+
+### Changed
+
+- `chat.list` requests are de-duplicated while one is in flight, and the result is cached so typing in the chats search box filters locally instead of re-scanning every session on disk per keystroke.
+
+
 *Released 2026-05-25*
 
 ### Fixed

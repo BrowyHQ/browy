@@ -368,6 +368,11 @@ function persistChatSoon() {
 
 let bgPort = null;
 let sessionReady = false;
+// Copilot SDK readiness is a SEPARATE, much later milestone than
+// session.ready — measured ~7.7s apart on a cold host. chat.list returns
+// nothing until it lands, so the overlay must not treat that as "no chats".
+let sdkReady = false;
+let sdkFailedDetail = null;
 let pendingChat = '';
 
 function browyPost(msg) {
@@ -450,16 +455,35 @@ function browyTranslate(msg) {
 
 // One-shot RPCs for chat list/history. The host answers each request with a
 // single result message; we resolve all in-flight callers when it arrives.
+//
+// Timeout matters: on a cold host the Copilot SDK needs several seconds
+// AFTER session.ready before chat.list can answer — measured anywhere from
+// 7.7s to 40s depending on machine load. The old 4s timeout resolved with an
+// empty array, which rendered identically to "you have no chats" — this is
+// what made users think their history had been wiped. The host answers as
+// soon as it can (listChats awaits whenCopilotReady internally), so we use a
+// generous ceiling and let the honest "loading…" UI carry the wait.
 const pendingChatListResolvers = [];
 const pendingChatHistoryResolvers = new Map();
-function requestChats(timeoutMs = 4000) {
-  return new Promise((resolve) => {
+/** Dedupe concurrent chat.list requests — sdk.ready and an already-open
+ *  overlay both trigger a render, and listSessions() is expensive. */
+let chatListInFlight = null;
+function requestChats(timeoutMs = 120000) {
+  if (chatListInFlight) return chatListInFlight;
+  const p = new Promise((resolve) => {
     let done = false;
-    const fin = (v) => { if (!done) { done = true; resolve(v); } };
-    pendingChatListResolvers.push(fin);
+    const fin = (v) => {
+      if (done) return;
+      done = true;
+      chatListInFlight = null;
+      resolve(v);
+    };
+    pendingChatListResolvers.push((chats) => fin({ chats, timedOut: false }));
     browyPost({ type: 'chat.list' });
-    setTimeout(() => fin([]), timeoutMs);
+    setTimeout(() => fin({ chats: [], timedOut: true }), timeoutMs);
   });
+  chatListInFlight = p;
+  return p;
 }
 function requestChatMessages(id, timeoutMs = 5000) {
   return new Promise((resolve) => {
@@ -544,22 +568,58 @@ function isExtensionContextInvalidated() {
 }
 
 // Disable/enable every interactive control that requires the backend.
-// Called on __host_ready (true) and any offline event (false).
-function setOnlineControls(online) {
-  // newChatBtn is intentionally NOT gated on the backend — it's a pure
-  // local reset and should always work, even offline.
-  const ids = ['inp', 'goBtn', 'stopBtn', 'chatsBtn'];
-  for (const id of ids) {
-    const el = document.getElementById(id);
-    if (!el) continue;
-    el.disabled = !online;
-    el.style.opacity = online ? '' : '0.4';
-    el.style.cursor = online ? '' : 'not-allowed';
-    if (id === 'inp') {
-      el.placeholder = online ? '' : 'offline — install the browy backend to chat';
-    }
+//
+// THREE states, not two — conflating "backend still booting" with "backend
+// not installed" told correctly-installed users to go install a backend for
+// the ~10s the host takes to cold start, which is the single most damaging
+// first-impression bug we had.
+//
+//   'online'  — host + SDK up, everything live.
+//   'booting' — host process is starting. Input stays ENABLED so the user
+//               can type (and even send) while we warm up; sends are queued
+//               by wsShim and flushed on session.ready.
+//   'offline' — host missing / stale / crashed. Real install CTA.
+//
+// newChatBtn is intentionally never gated — it's a pure local reset.
+let hostState = 'offline';
+function setControlsState(state) {
+  hostState = state;
+  const typingAllowed = state === 'online' || state === 'booting';
+  const inp_ = document.getElementById('inp');
+  if (inp_) {
+    inp_.disabled = !typingAllowed;
+    inp_.style.opacity = typingAllowed ? '' : '0.4';
+    inp_.style.cursor = typingAllowed ? '' : 'not-allowed';
+    inp_.placeholder = state === 'online' ? ''
+      : state === 'booting' ? 'starting browy backend — you can start typing…'
+      : 'offline — install the browy backend to chat';
+  }
+  // Send is allowed while booting (queued), but only with actual text.
+  const go = document.getElementById('goBtn');
+  if (go) {
+    const hasText = !!(inp_ && inp_.value.trim());
+    go.disabled = !typingAllowed || busy || !hasText;
+    go.style.opacity = typingAllowed ? '' : '0.4';
+    go.style.cursor = typingAllowed ? '' : 'not-allowed';
+  }
+  // Stop only makes sense on a live turn.
+  const stop_ = document.getElementById('stopBtn');
+  if (stop_) {
+    stop_.disabled = state !== 'online';
+    stop_.style.opacity = state === 'online' ? '' : '0.4';
+    stop_.style.cursor = state === 'online' ? '' : 'not-allowed';
+  }
+  // The chats overlay reads from the host, so it needs a live host. During
+  // boot we still allow opening it — it shows a "loading history" state.
+  const chats_ = document.getElementById('chatsBtn');
+  if (chats_) {
+    chats_.disabled = !typingAllowed;
+    chats_.style.opacity = typingAllowed ? '' : '0.4';
+    chats_.style.cursor = typingAllowed ? '' : 'not-allowed';
   }
 }
+
+// Back-compat shim removed — all callers use setControlsState directly.
 
 function connect() {
   // Hard-fail fast if our context is dead — full page reload picks up the
@@ -589,7 +649,7 @@ function connect() {
       try {
         const hint = document.querySelector('#empty .hint');
         if (hint) hint.textContent = '// type below';
-        setOnlineControls(true);
+        setControlsState('online');
       } catch {}
       browyPost({
         type: 'session.start',
@@ -602,16 +662,26 @@ function connect() {
     if (raw.type === '__host_pending') {
       reconnectAttempts = 0; // SW is alive even if host isn't
       brand.textContent = 'starting…';
+      // Booting is NOT offline. Let the user type (and queue a send) while
+      // the host cold-starts, and never tell them to install a backend they
+      // already have.
+      try {
+        setControlsState('booting');
+        hideConnBanner();
+        const hint = document.querySelector('#empty .hint');
+        if (hint) hint.textContent = '// starting the browy backend — first run takes a few seconds';
+      } catch {}
       return;
     }
     if (raw.type === '__host_error' || raw.type === '__host_disconnected' || raw.type === '__host_missing' || raw.type === '__host_stale') {
       sessionReady = false;
+      sdkReady = false;
       setLive(false); setBusy(false); brand.textContent = 'offline';
       tabTitleText = '—'; currentAction = null; setTtl();
       try {
         const hint = document.querySelector('#empty .hint');
         if (hint) hint.textContent = '// offline. check that the browy backend is installed and running';
-        setOnlineControls(false);
+        setControlsState('offline');
         if (typeof closeChatsOverlay === 'function') closeChatsOverlay();
         if (raw.type === '__host_missing') {
           showConnBanner('Browy backend not installed.', {
@@ -635,7 +705,7 @@ function connect() {
       // Safety net: any real message from the host proves it's alive, so
       // make sure the online controls reflect that even if __host_ready
       // was somehow missed during a fast SW restart.
-      try { setOnlineControls(true); hideConnBanner(); } catch {}
+      try { setControlsState('online'); hideConnBanner(); } catch {}
       refreshActiveTab();
       flushPendingHostMsgs();
       // If the chats overlay was opened while the host was still booting,
@@ -649,14 +719,29 @@ function connect() {
       } catch {}
       return;
     }
+    if (raw.type === 'sdk.ready') {
+      // The Copilot SDK subprocess has finished booting. Before this point
+      // chat.list legitimately returns nothing, so any overlay currently
+      // showing a "loading history" state must re-request now.
+      sdkReady = !!raw.ok;
+      sdkFailedDetail = raw.ok ? null : (raw.detail || 'backend failed to start');
+      try {
+        if (chatsOverlay && chatsOverlay.classList.contains('open')) {
+          renderChatsList(chatsSearch?.value || '');
+        }
+      } catch {}
+      return;
+    }
     const legacy = browyTranslate(raw);
     if (legacy) handle(legacy);
   });
   bgPort.onDisconnect.addListener(() => {
     sessionReady = false;
+    sdkReady = false;
     bgPort = null;
     setLive(false); setBusy(false); brand.textContent = 'offline';
     tabTitleText = '—'; currentAction = null; setTtl();
+    try { setControlsState('offline'); } catch {}
     // If the disconnect happened because the extension was just reloaded,
     // chrome.runtime.id will already be undefined → reload immediately.
     if (isExtensionContextInvalidated()) {
@@ -1034,6 +1119,13 @@ function send() {
   setBusy(true);
   react('nod'); sndSend();
   persistChatSoon();
+  // Queued while the host cold-starts — make the wait explicit rather than
+  // leaving an indefinite "thinking" state with nothing happening.
+  if (!sessionReady) {
+    try {
+      showConnBanner('Backend still starting — your message will send automatically.', { warn: true });
+    } catch {}
+  }
 }
 function stop() { if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'stop' })); }
 
@@ -1115,8 +1207,12 @@ async function switchToChat(id) {
   closeChatsOverlay();
 }
 
+/** Last successful chat.list payload, so typing in the search box filters
+ *  locally instead of re-scanning every session on disk per keystroke. */
+let chatsCache = null;
 // ── Chats overlay rendering ───────────────────────────────────────────────
 async function openChatsOverlay() {
+  chatsCache = null; // always fetch fresh when the overlay is opened
   await renderChatsList();
   chatsOverlay.classList.add('open');
   chatsOverlay.setAttribute('aria-hidden', 'false');
@@ -1136,20 +1232,53 @@ function fmtRelTime(ts) {
   if (diff < 7 * 86_400_000) return Math.floor(diff / 86_400_000) + 'd ago';
   return new Date(ts).toLocaleDateString();
 }
-async function renderChatsList(filter = '') {
+async function renderChatsList(filter = '', opts = {}) {
   // Source of truth: Copilot SDK sessions tagged with our workdir.
-  // If the host isn't online yet, show a connecting state so we don't
-  // flash "no past chats yet" while waiting for the handshake.
-  if (!sessionReady) {
-    chatsHint.textContent = 'connecting…';
+  //
+  // There are THREE non-success states here and they used to all render as
+  // "no past chats yet", which is indistinguishable from real data loss:
+  //   1. host not connected yet          → connecting
+  //   2. host up but SDK still booting   → loading history (the common one)
+  //   3. request timed out / SDK failed  → error + retry
+  const renderNotice = (hint, text, withRetry) => {
+    chatsHint.textContent = hint;
     chatsList.innerHTML = '';
     const emp = document.createElement('div');
     emp.className = 'chats-empty';
-    emp.textContent = '// waiting for the browy backend to come online';
+    emp.textContent = text;
     chatsList.appendChild(emp);
+    if (withRetry) {
+      const btn = document.createElement('button');
+      btn.className = 'chats-retry';
+      btn.textContent = 'retry';
+      btn.addEventListener('click', () => renderChatsList(chatsSearch?.value || ''));
+      chatsList.appendChild(btn);
+    }
+  };
+
+  if (!sessionReady) {
+    renderNotice('connecting…', '// waiting for the browy backend to come online', false);
     return;
   }
-  const sdkChats = await requestChats();
+  if (sdkFailedDetail) {
+    renderNotice('error', '// backend failed to start: ' + sdkFailedDetail, true);
+    return;
+  }
+  if (!sdkReady) {
+    // Don't lie about emptiness while the SDK subprocess is still warming.
+    renderNotice('loading…', '// loading your chat history — the backend is still starting', false);
+    // Fall through to the request anyway: it resolves as soon as the SDK is
+    // up, and sdk.ready will re-render us too.
+  }
+
+  const { chats: sdkChats, timedOut } = chatsCache && opts.useCache
+    ? { chats: chatsCache, timedOut: false }
+    : await requestChats();
+  if (timedOut) {
+    renderNotice('timed out', '// could not load chat history — your chats are safe on disk', true);
+    return;
+  }
+  chatsCache = sdkChats;
   const rows = sdkChats.map(c => ({
     id: c.id,
     title: (c.summary || '').trim() || 'Untitled chat',
@@ -1235,7 +1364,7 @@ chatsBtn?.addEventListener('click', () => { openChatsOverlay(); });
 exportBtn?.addEventListener('click', () => { exportChat(); });
 chatsCloseBtn?.addEventListener('click', () => { closeChatsOverlay(); });
 chatsNewBtn?.addEventListener('click', () => { closeChatsOverlay(); startNewChat(); });
-chatsSearch?.addEventListener('input', () => { renderChatsList(chatsSearch.value); });
+chatsSearch?.addEventListener('input', () => { renderChatsList(chatsSearch.value, { useCache: true }); });
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && chatsOverlay.classList.contains('open')) {
     e.preventDefault(); closeChatsOverlay();
@@ -1350,8 +1479,10 @@ connect = (function (orig) { return orig; })(connect);
   // Populate the active-tab title immediately so the titlebar doesn't sit
   // on "connecting…" while the native host warms up.
   refreshActiveTab();
-  // Start disabled — flips to enabled on __host_ready.
-  try { setOnlineControls(false); } catch {}
+  // Start in the BOOTING state, not offline — connect() runs immediately and
+  // the host is almost always either up or coming up. Starting in 'offline'
+  // flashed "install the browy backend" at users who already have it.
+  try { setControlsState('booting'); } catch {}
   connect();
 })();
 startIdleLoop();

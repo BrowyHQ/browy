@@ -58,6 +58,9 @@ export class Runner {
    *  events back to the originator. */
   private activeSessionId: string | null = null;
 
+  /** Latched Copilot SDK readiness, replayed to clients that attach late. */
+  private sdkReady: { ok: boolean; detail?: string } | null = null;
+
   constructor(agent: Agent, opts: RunnerOptions) {
     this.agent = agent;
     this.opts = opts;
@@ -258,6 +261,11 @@ export class Runner {
     if (this.opts.authProbe) {
       transport.send({ type: 'auth.status', state: this.opts.authProbe() });
     }
+    // Replay latched SDK readiness so a panel attaching after boot doesn't
+    // sit waiting for an event that already fired.
+    if (this.sdkReady) {
+      transport.send({ type: 'sdk.ready', ok: this.sdkReady.ok, detail: this.sdkReady.detail });
+    }
     transport.send({ type: 'models.current', id: this.agent.getModel() });
     this.agent.listModels().then((models) => {
       try { transport.send({ type: 'models.list', models }); } catch {}
@@ -345,6 +353,14 @@ export class Runner {
   /** Notify all sessions of an auth state change (used by external probes). */
   notifyAuth(state: 'ready' | 'unauth' | 'unknown', detail?: string): void {
     this.broadcast({ type: 'auth.status', state, detail });
+  }
+
+  /** Record + broadcast Copilot SDK readiness. Kept as state (not just an
+   *  event) so a panel that attaches AFTER the SDK finished booting still
+   *  learns about it via pushInitialState instead of waiting forever. */
+  markSdkReady(ok: boolean, detail?: string): void {
+    this.sdkReady = { ok, detail };
+    this.broadcast({ type: 'sdk.ready', ok, detail });
   }
 }
 

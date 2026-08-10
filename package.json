@@ -1,6 +1,6 @@
 {
   "name": "browy",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "The AI agent that lives in your browser. Drives real tabs through chat. Side panel + DevTools REPL.",
   "type": "module",
   "bin": {
@@ -20,6 +20,7 @@
     "build:prod": "cross-env BA_PROD=1 node build.mjs",
     "start": "node dist/cli-bin.js",
     "test": "node tests/run.mjs",
+    "test:unit": "node tests/sidepanel-boot-state.mjs",
     "repl": "node tests/repl.mjs",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build:prod",

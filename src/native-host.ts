@@ -175,6 +175,10 @@ async function main() {
     .then(() => {
       log('copilot SDK initialised');
       runner.notifyAuth('ready');
+      // Tell every attached panel the SDK is actually usable now. Until this
+      // lands, chat.list and models.list both come back empty, which the UI
+      // would otherwise render as "no past chats yet".
+      try { runner.markSdkReady(true); } catch {}
       // Broadcast models to any panel that attached before init finished.
       // Their initial pushInitialState already returned [] because they
       // beat the init; this gives them a real list without a refresh.
@@ -186,6 +190,7 @@ async function main() {
     .catch((e) => {
       const m = e instanceof Error ? e.message : String(e);
       log('copilot init failed:', m);
+      try { runner.markSdkReady(false, m); } catch {}
       runner.notifyAuth('unauth', m);
     });
 

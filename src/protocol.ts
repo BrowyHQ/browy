@@ -278,6 +278,17 @@ export interface AuthStatus {
   detail?: string;
 }
 
+/** Broadcast once the Copilot SDK has finished booting. `session.ready` only
+ *  means the host process is answering — the SDK subprocess takes several
+ *  seconds more, and until it lands `chat.list` / `models.list` return empty.
+ *  Clients use this to re-issue those requests instead of rendering an
+ *  empty-looking result as though the user genuinely had no history. */
+export interface SdkReady {
+  type: 'sdk.ready';
+  ok: boolean;
+  detail?: string;
+}
+
 export interface ModelsList {
   type: 'models.list';
   models: ModelOption[];
@@ -347,6 +358,7 @@ export type ServerMessage =
   | TabGetActiveRequest
   | ActivityEvent
   | AuthStatus
+  | SdkReady
   | ModelsList
   | CurrentModel
   | BrowsersStatusEvt
