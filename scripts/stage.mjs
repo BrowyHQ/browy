@@ -42,6 +42,20 @@ function log(...m) { console.log('[stage:' + target + ']', ...m); }
 function rm(p) { try { fs.rmSync(p, { recursive: true, force: true }); } catch {} }
 function exists(p) { try { fs.accessSync(p); return true; } catch { return false; } }
 function copyDir(src, dst, filter) { fs.cpSync(src, dst, { recursive: true, filter: filter || (() => true) }); }
+function dirSizeMB(p) {
+  let total = 0;
+  const walk = (d) => {
+    let entries;
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) walk(full);
+      else { try { total += fs.statSync(full).size; } catch {} }
+    }
+  };
+  walk(p);
+  return total / (1024 * 1024);
+}
 
 // 1. Reset stage dir
 rm(stage);
@@ -97,6 +111,34 @@ if (exists(copilotPrebuilds) && prebuildName) {
   for (const dir of fs.readdirSync(copilotPrebuilds)) {
     if (dir !== prebuildName) {
       rm(path.join(copilotPrebuilds, dir));
+    }
+  }
+}
+
+// 7.1 Drop the @github/copilot-<platform>-<arch> packages entirely (~106MB).
+//
+// These are standalone prebuilt CLI binaries selected by @github/copilot's
+// `bin` shim (npm-loader.js) when a HUMAN runs `copilot` from a shell. Browy
+// never takes that path: the Copilot SDK resolves the CLI via
+// getBundledCliPath() -> "@github/copilot/index.js" and spawns it with
+// `node index.js` (see @github/copilot-sdk/dist/client.js), which loads the
+// native addons from prebuilds/ that we trim above.
+//
+// Worse, npm resolves these by the arch of the machine running `npm ci`, and
+// release.yml stages darwin-x64 on an arm64 runner and linux-arm64 on an x64
+// runner. So the Intel-Mac tarball was shipping a 106MB *arm64* binary that
+// nothing would ever execute. Verified against the released v0.1.5 artifact:
+// Browy-0.1.5-darwin-x64.tar.gz contained @github/copilot-darwin-arm64/.
+//
+// Removing them cuts each platform download by roughly 75%.
+const githubScope = path.join(stage, 'node_modules', '@github');
+if (exists(githubScope)) {
+  for (const dir of fs.readdirSync(githubScope)) {
+    if (/^copilot-(win32|darwin|linux)-(x64|arm64)$/.test(dir)) {
+      const full = path.join(githubScope, dir);
+      const mb = dirSizeMB(full);
+      rm(full);
+      log(`trimmed node_modules/@github/${dir} (${mb.toFixed(1)}MB — never executed; SDK spawns copilot/index.js)`);
     }
   }
 }

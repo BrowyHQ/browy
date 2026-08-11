@@ -223,6 +223,14 @@ export class Agent {
    *  used as the Copilot SDK sessionId so that reloading the panel resumes
    *  the same conversation instead of starting fresh. */
   private browyProtocolSessionId: string | null = null;
+  /** id → modifiedTime as it was BEFORE we resumed that session purely to read
+   *  its transcript. Reading forces a resumeSession, which rewrites the
+   *  session's modifiedTime on disk (verified: a 2026-05-14 session jumped to
+   *  "now" just from being previewed). Since the chats overlay sorts by
+   *  modifiedTime, browsing your history silently reordered it. Pinning the
+   *  pre-read value keeps the order stable; a real chat turn clears the pin so
+   *  genuine activity still floats the chat to the top. */
+  private previewTimePins = new Map<string, number>();
   /** Names of tools the user has disabled from the built-in browser-tool
    *  registry. ensureSession() removes these from the SDK's allowlist before
    *  creating/resuming a session. Empty set = no overrides (all built-ins). */
@@ -489,9 +497,13 @@ export class Agent {
     try {
       const sessions = await this.copilotClient.listSessions();
       if (!Array.isArray(sessions) || sessions.length === 0) return;
+      // Use the SAME predicate as listChats. Pruning previously matched only
+      // the sp-/dt- prefix while listing matched three signals, so legacy
+      // sessions were listed forever and never cleaned up. Every signal is
+      // Browy-specific (our id prefix, our workdir, or our own
+      // <browser_context> marker), so `copilot` CLI sessions can never match.
       const ours = sessions
-        .filter((s: any) => isBrowySessionId(s?.sessionId || ''))
-        .filter((s: any) => !s?.context?.cwd || s.context.cwd === BROWSERAGENT_WORKDIR)
+        .filter((s: any) => isBrowySession(s))
         .map((s: any) => ({
           id: s.sessionId,
           mod: s.modifiedTime instanceof Date ? s.modifiedTime.getTime() : Number(s.modifiedTime) || 0,
@@ -808,6 +820,9 @@ export class Agent {
 
     try {
       await this.ensureSession();
+      // Genuine activity — drop any preview pin so this chat legitimately
+      // floats back to the top of the list.
+      if (this.browyProtocolSessionId) this.previewTimePins.delete(this.browyProtocolSessionId);
 
       this.emit({ type: 'activity', event: 'llm_call_start' });
       const t0 = Date.now();
@@ -1027,25 +1042,61 @@ export class Agent {
     try {
       const sessions = await this.copilotClient.listSessions();
       const total = Array.isArray(sessions) ? sessions.length : 0;
-      let matched = 0;
       const out: Array<{ id: string; summary?: string; startTime: number; modifiedTime: number }> = [];
       for (const s of sessions || []) {
         const id = s?.sessionId || '';
         if (!isBrowySession(s)) continue;
-        matched++;
+        const rawModified = s.modifiedTime instanceof Date ? s.modifiedTime.getTime() : Number(s.modifiedTime) || 0;
+        // Reading a transcript forces a resumeSession, which rewrites the
+        // session's modifiedTime. Without this pin, merely clicking a chat
+        // teleported it to the top of the list.
+        const pinned = this.previewTimePins.get(id);
         out.push({
           id,
           summary: cleanChatSummary(s.summary),
           startTime: s.startTime instanceof Date ? s.startTime.getTime() : Number(s.startTime) || 0,
-          modifiedTime: s.modifiedTime instanceof Date ? s.modifiedTime.getTime() : Number(s.modifiedTime) || 0,
+          modifiedTime: pinned !== undefined ? pinned : rawModified,
         });
       }
       out.sort((a, b) => b.modifiedTime - a.modifiedTime);
-      console.log(`  📜 listChats: SDK returned ${total} sessions; ${matched} match Browy prefix → ${out.length} returned`);
+      console.log(`  📜 listChats: SDK returned ${total} sessions → ${out.length} Browy chats`);
       return out;
     } catch (e: any) {
       console.error('  ❌ listChats failed:', e?.message || e);
       return [];
+    }
+  }
+
+  /** Delete a chat by SDK session id, whether or not it is the one currently
+   *  loaded.
+   *
+   *  The old path went through `history.clear` → `setBrowyProtocolSessionId(id)`
+   *  → `clearHistory()`. But setBrowyProtocolSessionId ALWAYS detaches
+   *  `this.copilotSession` when the id changes, and clearHistory only deletes
+   *  `this.copilotSession?.sessionId` — so by the time it ran there was nothing
+   *  to delete and `deleteSession` was never called. Deleting any chat from the
+   *  overlay was a silent no-op that reappeared on the next refresh, behind a
+   *  "this cannot be undone" confirm. */
+  async deleteChat(id: string): Promise<boolean> {
+    await this.whenCopilotReady();
+    if (!this.copilotClient || !id) return false;
+    // If it's the live session, tear the handle down first so the SDK isn't
+    // holding the file open when we delete it.
+    if (this.copilotSession && this.browyProtocolSessionId === id) {
+      const old = this.copilotSession;
+      this.copilotSession = null;
+      this.recentActions = [];
+      try { await old.abort(); } catch {}
+      try { await old.disconnect(); } catch {}
+    }
+    this.previewTimePins.delete(id);
+    try {
+      await this.copilotClient.deleteSession(id);
+      console.log(`  🗑 deleted chat ${id}`);
+      return true;
+    } catch (e: any) {
+      console.error(`  ❌ deleteChat(${id}) failed:`, e?.message || e);
+      return false;
     }
   }
 
@@ -1064,6 +1115,15 @@ export class Agent {
       try { events = (await this.copilotSession.getMessages()) || []; } catch { return []; }
     } else {
       let handle: any = null;
+      // Capture the on-disk timestamp before resuming so listChats can report
+      // the real last-activity time instead of "just now".
+      let before: number | undefined;
+      try {
+        const meta = await this.copilotClient.getSessionMetadata(id);
+        const mt = meta?.modifiedTime;
+        const n = mt instanceof Date ? mt.getTime() : Number(mt);
+        if (Number.isFinite(n) && n > 0) before = n;
+      } catch { /* metadata is optional — pin is best-effort */ }
       try {
         handle = await this.copilotClient.resumeSession(id, {
           clientName: BROWSERAGENT_CLIENT_NAME,
@@ -1076,6 +1136,7 @@ export class Agent {
         return [];
       } finally {
         if (handle) { try { await handle.disconnect(); } catch {} }
+        if (before !== undefined) this.previewTimePins.set(id, before);
       }
     }
     return mapEventsToMessages(events);
@@ -1186,12 +1247,18 @@ export class Agent {
     // Detach reference SYNCHRONOUSLY so any chat() that arrives during
     // cleanup will spin up a fresh session via ensureSession().
     const old = this.copilotSession;
+    // Fall back to the bound protocol id: the handle may legitimately be null
+    // (host just booted, or setBrowyProtocolSessionId already detached it) and
+    // we still need to delete the right session from disk.
+    const id = old?.sessionId || this.browyProtocolSessionId;
     this.copilotSession = null;
     this.recentActions = [];
     if (old) {
-      const id = old.sessionId;
       try { await old.abort(); } catch {}
       try { await old.disconnect(); } catch {}
+    }
+    if (id) {
+      this.previewTimePins.delete(id);
       try { await this.copilotClient.deleteSession(id); } catch {}
     }
     this.emit({ type: 'status', status: 'idle' });

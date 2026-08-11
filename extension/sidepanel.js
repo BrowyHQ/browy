@@ -448,6 +448,14 @@ function browyTranslate(msg) {
       }
       return null;
     }
+    case 'chat.delete.result': {
+      const list = pendingChatDeleteResolvers.get(msg.id);
+      if (list) {
+        pendingChatDeleteResolvers.delete(msg.id);
+        list.forEach(fn => fn(!!msg.ok));
+      }
+      return null;
+    }
     default:
       return null;
   }
@@ -485,7 +493,7 @@ function requestChats(timeoutMs = 120000) {
   chatListInFlight = p;
   return p;
 }
-function requestChatMessages(id, timeoutMs = 5000) {
+function requestChatMessages(id, timeoutMs = 20000) {
   return new Promise((resolve) => {
     let done = false;
     const fin = (v) => { if (!done) { done = true; resolve(v); } };
@@ -493,6 +501,19 @@ function requestChatMessages(id, timeoutMs = 5000) {
     pendingChatHistoryResolvers.get(id).push(fin);
     browyPost({ type: 'chat.history', id });
     setTimeout(() => fin([]), timeoutMs);
+  });
+}
+
+/** Delete a chat on disk. Resolves true only when the host confirms. */
+const pendingChatDeleteResolvers = new Map();
+function requestChatDelete(id, timeoutMs = 20000) {
+  return new Promise((resolve) => {
+    let done = false;
+    const fin = (v) => { if (!done) { done = true; resolve(v); } };
+    if (!pendingChatDeleteResolvers.has(id)) pendingChatDeleteResolvers.set(id, []);
+    pendingChatDeleteResolvers.get(id).push(fin);
+    browyPost({ type: 'chat.delete', id });
+    setTimeout(() => fin(false), timeoutMs);
   });
 }
 
@@ -1065,6 +1086,38 @@ function addReasoning(text) {
 }
 
 // ── Bubbles ─────────────────────────────────────────────────────
+/** Rebuild the collapsed tool-call block for a chat restored from the SDK
+ *  transcript. Mirrors the markup finalizeLive() produces so restored chats
+ *  look like the live ones. Transcript rows carry no args/duration, so those
+ *  slots stay empty rather than being faked. */
+function renderRestoredToolSteps(bub, steps) {
+  if (!bub || !steps || !steps.length) return;
+  const wrap = document.createElement('div');
+  wrap.className = 'tool-steps collapsed';
+  for (const s of steps) {
+    const node = document.createElement('div');
+    node.className = 'tool-step ' + (s.ok ? 'done' : 'error');
+    node.innerHTML =
+      `<span class="glyph"></span>` +
+      `<span class="head"><span class="name"></span><span class="paren">(</span><span class="args"></span><span class="paren">)</span></span>` +
+      `<span class="ms"></span>` +
+      `<div class="out"><span class="arc"></span><span class="preview"></span></div>`;
+    node.querySelector('.name').textContent = s.name || 'tool';
+    node.querySelector('.preview').textContent = summarizeResult(s.summary, s.ok ? 'done' : 'error');
+    node.addEventListener('click', () => node.classList.toggle('expanded'));
+    wrap.appendChild(node);
+  }
+  const summary = document.createElement('div');
+  summary.className = 'tools-summary';
+  const n = steps.length;
+  summary.innerHTML =
+    `<span class="glyph"></span><span class="arrow"></span>` +
+    `<span class="lbl">used ${n} tool${n === 1 ? '' : 's'}</span>`;
+  summary.addEventListener('click', () => wrap.classList.toggle('expanded-back'));
+  wrap.appendChild(summary);
+  bub.insertBefore(wrap, bub.firstChild);
+}
+
 function addBub(role, text) {
   empty?.remove();
   const d = document.createElement('div');
@@ -1187,11 +1240,27 @@ async function switchToChat(id) {
   // Render from the SDK transcript.
   const transcript = await requestChatMessages(id);
   if (transcript && transcript.length) {
+    // Replay tool activity too. mapEventsToMessages already returns role:'tool'
+    // rows; dropping them made a restored chat look materially different from
+    // the live one (no evidence the agent had done anything).
+    let pendingTools = [];
+    const flushTools = () => {
+      if (!pendingTools.length) return;
+      const steps = pendingTools.slice();
+      pendingTools = [];
+      return steps;
+    };
     for (const m of transcript) {
-      if (m.role === 'user') addBub('u', m.text);
-      else if (m.role === 'assistant') addBub('a', m.text);
-      // Tool entries are skipped in the bubble view for now — they're noisy
-      // and the assistant.message text already summarizes outcomes.
+      if (m.role === 'user') {
+        pendingTools = [];
+        addBub('u', m.text);
+      } else if (m.role === 'tool') {
+        pendingTools.push(m);
+      } else if (m.role === 'assistant') {
+        const bub = addBub('a', m.text);
+        const steps = flushTools();
+        if (steps && steps.length && bub) renderRestoredToolSteps(bub, steps);
+      }
     }
     if (modeTag) {
       const firstUser = transcript.find(x => x.role === 'user');
@@ -1222,6 +1291,19 @@ function closeChatsOverlay() {
   chatsOverlay.classList.remove('open');
   chatsOverlay.setAttribute('aria-hidden', 'true');
   if (chatsSearch) chatsSearch.value = '';
+}
+/** Label for a chat the SDK never recorded a summary for. A date beats
+ *  eight identical rows all reading "Untitled chat". */
+function describeUndatedChat(ts) {
+  if (!ts) return 'Untitled chat';
+  try {
+    const d = new Date(ts);
+    const today = new Date();
+    const sameDay = d.toDateString() === today.toDateString();
+    return sameDay
+      ? 'Chat at ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+      : 'Chat from ' + d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  } catch { return 'Untitled chat'; }
 }
 function fmtRelTime(ts) {
   if (!ts) return '';
@@ -1281,7 +1363,9 @@ async function renderChatsList(filter = '', opts = {}) {
   chatsCache = sdkChats;
   const rows = sdkChats.map(c => ({
     id: c.id,
-    title: (c.summary || '').trim() || 'Untitled chat',
+    // "Untitled chat" ×N is useless for picking a chat out of a list. When the
+    // SDK has no usable summary, fall back to when the chat happened.
+    title: (c.summary || '').trim() || describeUndatedChat(c.startTime || c.modifiedTime),
     updated: c.modifiedTime || c.startTime || 0,
     preview: '', // SDK doesn't surface a snippet; the title (summary) is enough
   }));
@@ -1325,14 +1409,21 @@ async function renderChatsList(filter = '', opts = {}) {
     del.addEventListener('click', async (e) => {
       e.stopPropagation();
       if (!confirm('Delete this chat? This cannot be undone.')) return;
-      // Deletes the SDK session on disk via history.clear (which we bind
-      // to that id first on the host). Keep any legacy local cache too.
+      // Delete on disk FIRST and only drop the row once the host confirms.
+      // The old path posted history.clear, which the host applied to whatever
+      // session happened to be loaded — so deleting a past chat deleted
+      // nothing at all and the row reappeared on the next refresh.
+      del.disabled = true;
+      const ok = await requestChatDelete(id);
+      if (!ok) {
+        del.disabled = false;
+        flash('could not delete that chat');
+        return;
+      }
       await deleteChatStorage(id);
+      chatsCache = null;
       if (id === BROWY_SESSION_ID) {
         await startNewChat();
-      } else {
-        // Clear that specific session on the host.
-        browyPost({ type: 'history.clear', sessionId: id });
       }
       await renderChatsList(chatsSearch?.value || '');
     });

@@ -319,7 +319,7 @@ Detailed deep-dive in [../src/README.md](../src/README.md).
 | Side panel says **`offline`** | Native host not installed or not running | Open Settings → install commands shown there |
 | `Specified native messaging host not found` in `chrome://extensions` errors | Extension ID mismatch with `allowed_origins` in the host manifest | Re-run installer; it auto-detects your extension ID |
 | First message hangs forever | Sign-in not completed | Open Settings → click sign-in, complete device flow |
-| `permission denied` after install on macOS | Quarantine bit on the host binary | `xattr -d com.apple.quarantine ~/.browy/app/native-host` |
+| `permission denied` / backend never connects on macOS | Gatekeeper quarantine on the downloaded install | `xattr -dr com.apple.quarantine ~/.browy/app` (the installer does this automatically since 0.1.6) |
 | Toolbar icon stays grey, never green | `chrome.debugger` permission not granted | Reload extension from `chrome://extensions` |
 
 More: [../src/README.md#debugging](../src/README.md#debugging)

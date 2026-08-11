@@ -68,6 +68,7 @@ import { NativeMessagingTransport } from './transports/native-messaging.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { fileURLToPath } from 'url';
 import { execSync, exec } from 'child_process';
 
 const SERVER_VERSION = '0.3.0';
@@ -88,7 +89,13 @@ function log(...args: unknown[]) {
 }
 
 // ── Auth helpers (mirror cli.ts) ───────────────────────────────────────────
-function probeCopilotAuth(): 'ready' | 'unauth' | 'unknown' {
+// Cached: the probe shells out (cmdkey / security), and pushInitialState runs
+// it on EVERY session.start. execSync there blocks the whole event loop, which
+// on a cold start is exactly when we can least afford it.
+let authProbeCache: { value: 'ready' | 'unauth' | 'unknown'; at: number } | null = null;
+const AUTH_PROBE_TTL_MS = 30_000;
+
+function probeCopilotAuthUncached(): 'ready' | 'unauth' | 'unknown' {
   try {
     if (process.platform === 'win32') {
       const out = execSync('cmdkey /list', { encoding: 'utf8', stdio: ['ignore','pipe','ignore'] });
@@ -108,14 +115,58 @@ function probeCopilotAuth(): 'ready' | 'unauth' | 'unknown' {
   return 'unknown';
 }
 
+function probeCopilotAuth(): 'ready' | 'unauth' | 'unknown' {
+  const now = Date.now();
+  if (authProbeCache && now - authProbeCache.at < AUTH_PROBE_TTL_MS) {
+    return authProbeCache.value;
+  }
+  const value = probeCopilotAuthUncached();
+  authProbeCache = { value, at: now };
+  return value;
+}
+
+/** Invalidate the cache after an explicit sign-in attempt so the next probe
+ *  reflects reality rather than a stale pre-sign-in reading. */
+function invalidateAuthProbeCache(): void {
+  authProbeCache = null;
+}
+
+/** Locate the Copilot CLI entry point that actually ships with Browy.
+ *
+ *  COPILOT_CLI_PATH / BROWY_NODE_PATH are read here but NOTHING in the repo
+ *  ever set them, so every platform silently fell through to bare `copilot`
+ *  on PATH. On a clean machine that binary does not exist — the bundled one
+ *  lives under our own node_modules and is never linked into the user's
+ *  shell — so clicking "Sign in to GitHub Copilot" opened a terminal that
+ *  printed `command not found: copilot`. We now resolve the bundled entry
+ *  point relative to this file and only fall back to PATH as a last resort.
+ */
+function resolveCopilotCli(): string | undefined {
+  const explicit = process.env.COPILOT_CLI_PATH;
+  if (explicit && fs.existsSync(explicit)) return explicit;
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    // Staged layout: ~/.browy/app/dist/native-host.js → ~/.browy/app/node_modules
+    path.join(here, '..', 'node_modules', '@github', 'copilot', 'index.js'),
+    // Dev layout: <repo>/dist/native-host.js → <repo>/node_modules
+    path.join(here, '..', '..', 'node_modules', '@github', 'copilot', 'index.js'),
+  ];
+  for (const c of candidates) {
+    try { if (fs.existsSync(c)) return c; } catch { /* keep trying */ }
+  }
+  return undefined;
+}
+
 function openCopilotSignInTerminal(): boolean {
-  const copilotCli = process.env.COPILOT_CLI_PATH;
+  const copilotCli = resolveCopilotCli();
   const nodeBin = process.env.BROWY_NODE_PATH || process.execPath;
+  invalidateAuthProbeCache();
+  log('sign-in: copilotCli=', copilotCli || '(not found — falling back to PATH)', 'node=', nodeBin);
   try {
     if (process.platform === 'win32') {
       // If we know an exact CLI path use it; otherwise just invoke `copilot`
       // from PATH (works when the user has @github/copilot installed globally).
-      const cmd = (copilotCli && fs.existsSync(copilotCli))
+      const cmd = copilotCli
         ? `start "Browy — Copilot Sign-In" cmd /k ""${nodeBin}" "${copilotCli}""`
         : `start "Browy — Copilot Sign-In" cmd /k "copilot"`;
       log('opening sign-in terminal:', cmd);
@@ -125,22 +176,36 @@ function openCopilotSignInTerminal(): boolean {
       return true;
     }
     if (process.platform === 'darwin') {
-      const target = (copilotCli && fs.existsSync(copilotCli))
-        ? `'${nodeBin}' '${copilotCli}'`
-        : `copilot`;
-      const apple = `tell application "Terminal" to do script "${target}"`;
-      exec(`osascript -e '${apple.replace(/'/g, "'\\''")}'`, () => {});
+      // Terminal's `do script` takes a shell command as an AppleScript string,
+      // so inner double quotes must be escaped for AppleScript and the whole
+      // -e argument single-quoted for the shell.
+      const target = copilotCli ? `${shQuote(nodeBin)} ${shQuote(copilotCli)}` : 'copilot';
+      const apple = `tell application "Terminal"
+        activate
+        do script ${jsonForAppleScript(target)}
+      end tell`;
+      exec(`osascript -e '${apple.replace(/'/g, "'\\''")}'`, (err: unknown) => {
+        if (err) log('sign-in terminal osascript error:', String(err));
+      });
       return true;
     }
-    const target = (copilotCli && fs.existsSync(copilotCli))
-      ? `'${nodeBin}' '${copilotCli}'`
-      : `copilot`;
-    exec(`x-terminal-emulator -e ${target} || gnome-terminal -- ${target}`, () => {});
+    const target = copilotCli ? `${shQuote(nodeBin)} ${shQuote(copilotCli)}` : 'copilot';
+    exec(`x-terminal-emulator -e ${target} || gnome-terminal -- ${target} || xterm -e ${target}`, () => {});
     return true;
   } catch (e) {
     log('openCopilotSignInTerminal threw:', String(e));
     return false;
   }
+}
+
+/** POSIX single-quote escaping — safe for paths containing spaces or quotes. */
+function shQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+/** AppleScript string literal (double-quoted, backslash-escaped). */
+function jsonForAppleScript(s: string): string {
+  return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
 }
 
 // ── Bootstrap ──────────────────────────────────────────────────────────────
@@ -200,16 +265,17 @@ async function main() {
     agent.disconnect().finally(() => process.exit(0));
   });
 
-  // Best-effort browser connect — extension owns chrome.debugger in v0.3,
-  // but until Phase E lands, the agent still needs SOMETHING to drive. So
-  // we attempt a playwright-CDP connect like the legacy WS server does. If
-  // no debug-port browser is running we just keep the host alive for chat.
-  try {
-    await agent.connect();
-    log('agent connected to CDP browser(s)');
-  } catch (e) {
-    log('no CDP browser available yet; chat-only mode until Phase E');
-  }
+  // NOTE: we deliberately do NOT call agent.connect() here.
+  //
+  // Phase E landed: the extension owns the browser via chrome.debugger and
+  // routes CDP through ExtensionContext, so the host never needs a playwright
+  // connection of its own. Calling connect() anyway meant every host start
+  // fired three parallel chromium.connectOverCDP attempts (1.5s timeout each)
+  // plus a fallback — all guaranteed to fail in the normal extension flow —
+  // and, on the rare occasion one succeeded, started a 2s setInterval
+  // rediscovery loop that kept the host's event loop hot for its whole life.
+  // Agent.connect() remains available for any future playwright-driven
+  // frontend; no current entry point calls it.
 
   // Wait for init to settle so the "ready" log line is meaningful, but we
   // already triggered it above so the runner can serve clients in parallel.

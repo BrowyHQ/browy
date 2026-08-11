@@ -10,8 +10,39 @@
 //   chat.error         – error
 //   session.ready      – { model }
 
-const SESSION_ID = 'dt-' + Math.random().toString(36).slice(2, 10);
+// Session id is PERSISTED per inspected tab. It used to be minted fresh at
+// module scope on every panel load — and a DevTools panel reloads every time
+// the user closes and reopens DevTools — so each open started an unresumable
+// conversation and left an orphan session on disk. Keying by inspected tab
+// means reopening DevTools on the same page picks up where you left off.
+let SESSION_ID = 'dt-' + Math.random().toString(36).slice(2, 10);
 const inspectedTabId = chrome.devtools.inspectedWindow.tabId;
+const DT_SID_KEY = 'browy.dt.sessionId.' + inspectedTabId;
+
+const sessionIdReady = (async () => {
+  try {
+    const r = await chrome.storage.local.get([DT_SID_KEY]);
+    const v = r && r[DT_SID_KEY];
+    if (typeof v === 'string' && v) { SESSION_ID = v; return SESSION_ID; }
+  } catch {}
+  try { await chrome.storage.local.set({ [DT_SID_KEY]: SESSION_ID }); } catch {}
+  return SESSION_ID;
+})();
+
+/** Start a brand-new DevTools conversation: delete the current one on disk,
+ *  then mint and persist a fresh id so we don't silently reuse the old one. */
+async function resetDevtoolsSession() {
+  const old = SESSION_ID;
+  SESSION_ID = 'dt-' + Math.random().toString(36).slice(2, 10);
+  try { await chrome.storage.local.set({ [DT_SID_KEY]: SESSION_ID }); } catch {}
+  sendToHost({ type: 'chat.delete', id: old });
+  sendToHost({
+    type: 'session.start',
+    sessionId: SESSION_ID,
+    inspectedTabId: inspectedTabId,
+    capabilities: ['cdp.activeTab'],
+  });
+}
 
 // ── DOM refs ─────────────────────────────────────────────────────────────
 
@@ -241,7 +272,7 @@ function cmdHelp() {
 }
 
 function cmdReset() {
-  sendToHost({ type: 'history.clear', sessionId: SESSION_ID });
+  resetDevtoolsSession();
   appendRow('ok', '✓', 'conversation reset');
 }
 
@@ -502,11 +533,15 @@ port.onMessage.addListener((msg) => {
       if (!sessionStarted) {
         sessionStarted = true;
         appendRow('dim', '·', 'host ready' + (msg.serverVersion ? ' v' + msg.serverVersion : ''));
-        sendToHost({
-          type: 'session.start',
-          sessionId: SESSION_ID,
-          inspectedTabId: inspectedTabId,
-          capabilities: ['cdp.activeTab'],
+        // Wait for the persisted id so we resume the previous DevTools chat
+        // instead of starting a throwaway one.
+        sessionIdReady.then(() => {
+          sendToHost({
+            type: 'session.start',
+            sessionId: SESSION_ID,
+            inspectedTabId: inspectedTabId,
+            capabilities: ['cdp.activeTab'],
+          });
         });
       }
       break;
@@ -846,7 +881,7 @@ $log.addEventListener('click', (e) => {
 
 $btnClear.addEventListener('click', () => { clearLog(); $cmd.focus(); });
 $btnReset.addEventListener('click', () => {
-  sendToHost({ type: 'history.clear', sessionId: SESSION_ID });
+  resetDevtoolsSession();
   appendRow('ok', '✓', 'conversation reset');
   $cmd.focus();
 });

@@ -93,7 +93,7 @@ The installer is conservative; everything below survives reboots and updates in 
 | `~/.browy/app/` (macOS / Linux) | Same |
 | `~/.browy/data/files/` | Sandboxed scratch disk for the `save_file` / `read_file` agent tools |
 | `~/.browy/data/notes.json` | Persistent key-value memory across chats |
-| `~/.browy/host/host.log` | Single rotating 5 MB diagnostic log (overwritten on rotation) |
+| `~/.browseragent/native-host.log` | Single rotating 5 MB diagnostic log (one rotated copy kept as `.1`) |
 | Native messaging manifest | Registered with Chrome, Edge, and Brave so the extension can talk to the host |
 | Chrome extension storage | Chat history, model selection, theme; never leaves the local profile |
 

@@ -235,8 +235,8 @@ The side panel collapses tool steps by default. Click the *N tools* summary to e
 
 Native-messaging hosts have stdout reserved for the framed protocol — anything written to stderr ends up in:
 
-- **Windows**: `%LOCALAPPDATA%\Browy\logs\native-host.log` (when run via installer) or your terminal (dev)
-- **mac/linux**: `~/.browy/logs/native-host.log`
+- **Windows**: `%USERPROFILE%\.browseragent\native-host.log`
+- **mac/linux**: `~/.browseragent/native-host.log`
 
 ### Inspect the SDK session events
 

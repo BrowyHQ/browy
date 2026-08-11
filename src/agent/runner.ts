@@ -162,8 +162,7 @@ export class Runner {
 
       case 'auth.signin': {
         if (this.opts.authSignin) {
-          const opened = this.opts.authSignin();
-          // Re-probe AFTER opening the terminal. If the user was already
+          const opened = this.opts.authSignin();          // Re-probe AFTER opening the terminal. If the user was already
           // signed in (common — the button is reachable even when banner is
           // momentarily wrong) we must NOT flip state to unauth, otherwise
           // we'd plant a permanent false banner with no poller to clear it.
@@ -203,6 +202,18 @@ export class Runner {
       case 'chat.history': {
         const messages = await this.agent.getChatMessages(msg.id);
         transport.send({ type: 'chat.history.result', id: msg.id, messages });
+        return;
+      }
+
+      case 'chat.delete': {
+        // Refuse only while the agent is mid-turn on the chat being deleted —
+        // deleting a different, idle chat is always safe.
+        if (this.activeSessionId && this.activeSessionId === msg.id) {
+          transport.send({ type: 'chat.delete.result', id: msg.id, ok: false });
+          return;
+        }
+        const ok = await this.agent.deleteChat(msg.id);
+        transport.send({ type: 'chat.delete.result', id: msg.id, ok });
         return;
       }
 
@@ -267,6 +278,11 @@ export class Runner {
       transport.send({ type: 'sdk.ready', ok: this.sdkReady.ok, detail: this.sdkReady.detail });
     }
     transport.send({ type: 'models.current', id: this.agent.getModel() });
+    // Only fetch models once the SDK is actually up. Before that listModels()
+    // either returns [] or resolves at the same moment as the post-init
+    // broadcast, which produced two identical models.list payloads on every
+    // cold start.
+    if (!this.sdkReady) return;
     this.agent.listModels().then((models) => {
       try { transport.send({ type: 'models.list', models }); } catch {}
     }).catch(() => {});

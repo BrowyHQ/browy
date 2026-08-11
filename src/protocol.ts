@@ -141,6 +141,14 @@ export interface ChatHistory {
   id: string;
 }
 
+/** Delete one chat by SDK session id, regardless of whether it is the chat
+ *  currently loaded. Distinct from `history.clear`, which only ever acts on
+ *  the caller's own active session. */
+export interface ChatDelete {
+  type: 'chat.delete';
+  id: string;
+}
+
 export type ClientMessage =
   | ClientHello
   | SessionStart
@@ -154,7 +162,8 @@ export type ClientMessage =
   | ListModels
   | SetModel
   | ChatList
-  | ChatHistory;
+  | ChatHistory
+  | ChatDelete;
 
 // ── Server → Client ────────────────────────────────────────────────────────
 
@@ -343,6 +352,14 @@ export interface ChatHistoryResult {
   >;
 }
 
+/** Ack for `chat.delete`, so the UI only removes the row once the session is
+ *  actually gone from disk instead of optimistically hiding it. */
+export interface ChatDeleteResult {
+  type: 'chat.delete.result';
+  id: string;
+  ok: boolean;
+}
+
 export type ServerMessage =
   | ServerHello
   | SessionReady
@@ -365,7 +382,8 @@ export type ServerMessage =
   | ActiveBrowsersEvt
   | FocusedTab
   | ChatListResult
-  | ChatHistoryResult;
+  | ChatHistoryResult
+  | ChatDeleteResult;
 
 // ── Transport interface ────────────────────────────────────────────────────
 //

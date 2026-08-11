@@ -84,6 +84,19 @@ rm -rf "$INSTALL_DIR/dist" "$INSTALL_DIR/node_modules" "$INSTALL_DIR/extension" 
 echo "Browy: extracting to $INSTALL_DIR"
 tar -xzf "$TARBALL" -C "$INSTALL_DIR" --strip-components=1
 
+# 5b. macOS Gatekeeper: strip the quarantine flag.
+#
+# Anything the user downloaded through a browser carries com.apple.quarantine,
+# and Archive Utility propagates it to every extracted file. Our bundled `node`
+# is unsigned and un-notarized, so Gatekeeper refuses to execute it with
+# "cannot be opened because the developer cannot be verified" — and because the
+# binary is launched by Chrome as a native-messaging host, the user never sees
+# that dialog. The extension just reports the backend as missing forever.
+# Clearing the attribute on our own install dir is the standard fix.
+if [ "$(uname -s)" = "Darwin" ] && command -v xattr >/dev/null 2>&1; then
+  xattr -dr com.apple.quarantine "$INSTALL_DIR" 2>/dev/null || true
+fi
+
 # 6. Register native host for installed browsers
 echo "Browy: registering native messaging host..."
 "$INSTALL_DIR/node" "$INSTALL_DIR/dist/cli-bin.js" install-host

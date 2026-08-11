@@ -2,7 +2,33 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
-## [0.1.5]: cold-start UX
+## [0.1.6]: chat history is real, and the download is 4× smaller
+*Released 2026-08-11*
+
+A deep audit of session handling, the runtime flow, and the macOS experience. Everything below was verified by driving the real native host over Chrome's native-messaging framing, or against the actual released artifacts — not by reading code alone.
+
+### Fixed
+
+- **Deleting a chat now actually deletes it.** The overlay's delete button was a complete no-op in both branches. `history.clear` routed through `setBrowyProtocolSessionId(id)`, which *always* detaches `this.copilotSession` when the id changes, and `clearHistory()` only ever deleted `this.copilotSession?.sessionId` — so by the time it ran there was nothing left to delete and `deleteSession` was never called. Deleting the *current* chat went through `startNewChat()`, which never sends `history.clear` at all. Either way the chat stayed on disk and reappeared on the next refresh, behind a "this cannot be undone" confirmation. There is now a dedicated `chat.delete` message that deletes by id whether or not that chat is loaded, and the UI only removes the row once the host confirms. Verified: 49 → 48 chats, row gone.
+- **Browsing your history no longer reorders it.** Opening a past chat forces a `resumeSession` to read its transcript, and that rewrites the session's `modifiedTime` on disk — a chat from 26 April jumped to "now" purely from being clicked. Since the overlay sorts by that field, every chat you previewed teleported to the top. The pre-read timestamp is now pinned, and a real chat turn clears the pin so genuine activity still floats a chat up. Verified: previewing a 63-message chat left it at position 46 of 48 with an unchanged timestamp.
+- **`clearHistory()` no longer silently does nothing** when the SDK handle isn't loaded — it falls back to the bound protocol session id.
+- **Old chats are actually pruned.** Pruning matched only the `sp-`/`dt-` id prefix while listing matched three signals, so legacy sessions were listed forever and never cleaned up. Both now use the same Browy-specific predicate.
+- **The DevTools panel no longer forgets every conversation.** `SESSION_ID` was minted at module scope from `Math.random()`, and the panel reloads every time DevTools is closed and reopened — so each open started an unresumable chat and left an orphan session on disk. The id is now persisted per inspected tab. `/reset` and the reset button mint a fresh id *and* delete the old session.
+- **Restored chats show their tool calls again.** The transcript already carried `role: 'tool'` rows; the side panel threw them away, so a reopened chat looked like the agent had never done anything.
+- **Chats with no recorded summary** now show when they happened ("Chat from 14 May") instead of a wall of identical "Untitled chat" rows.
+- **macOS: "Sign in to GitHub Copilot" no longer runs a command that doesn't exist.** `COPILOT_CLI_PATH` and `BROWY_NODE_PATH` were read but never set anywhere in the repo, so every platform fell through to bare `copilot` on `PATH` — which doesn't exist on a clean machine, since the bundled CLI is never linked into the user's shell. Clicking Sign in opened Terminal and printed `command not found: copilot`. The bundled entry point is now resolved relative to the host, with `PATH` only as a last resort. AppleScript and shell quoting were hardened for paths containing spaces or quotes.
+- **macOS: Gatekeeper quarantine is now cleared on install.** Anything downloaded through a browser carries `com.apple.quarantine`, and our bundled `node` is unsigned, so Gatekeeper silently refuses to run it — and because Chrome launches it as a native-messaging host, the user never sees the dialog, only a backend that never connects. `install.sh` now runs `xattr -dr` on the install dir. The troubleshooting entry that pointed at `~/.browy/app/native-host` (a path that never existed) has been corrected.
+- **Docs: the native-host log path** was documented three different ways, none matching the code. It is `~/.browseragent/native-host.log` on every platform.
+
+### Changed
+
+- **Platform tarballs are roughly 4× smaller.** Each build shipped a ~106 MB `@github/copilot-<platform>-<arch>` binary that Browy never executes: the Copilot SDK resolves the CLI via `getBundledCliPath()` → `@github/copilot/index.js` and spawns it with `node index.js`. That standalone binary is only used by the package's own `bin` shim when a human types `copilot` in a shell. Worse, npm selects it by the arch of the machine running `npm ci`, and CI stages `darwin-x64` on an arm64 runner — so the Intel-Mac download contained a 106 MB *arm64* binary that nothing would ever run (confirmed in the released v0.1.5 artifact). It is now trimmed during staging; the per-arch `prebuilds/` that `index.js` actually loads are kept. Verified end-to-end against a trimmed build: SDK initialises, 22 models list, chat history loads.
+- **Faster, quieter host startup.** The host no longer attempts a playwright CDP connect on boot — three parallel `connectOverCDP` calls (1.5 s timeout each) plus a fallback, all guaranteed to fail since the extension owns the browser via `chrome.debugger`. Success would also have started a 2 s `setInterval` rediscovery loop that kept the event loop hot for the host's whole life.
+- **The auth probe no longer blocks the event loop on every `session.start`.** `cmdkey` / `security` results are cached for 30 s and invalidated on an explicit sign-in.
+- **No more duplicate `models.list` broadcast** on cold start.
+- Removed the stale Homebrew formula: it was pinned to `0.1.0` with literal `REPLACE_WITH_SHA256_AFTER_BUILD` checksums, wasn't referenced by CI or the README, and would have failed for anyone who tried it.
+
+
 *Released 2026-08-10*
 
 Browy's native host takes a while to cold start — measured 10.8s to first response on a warm machine and 47s under load, because Chrome spawns a fresh host process and the Copilot SDK subprocess has to boot behind it. The UI handled that window badly. This release is entirely about the first 45 seconds.
