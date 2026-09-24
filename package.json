@@ -20,7 +20,7 @@
     "build:prod": "cross-env BA_PROD=1 node build.mjs",
     "start": "node dist/cli-bin.js",
     "test": "node tests/run.mjs",
-    "test:unit": "node tests/sidepanel-boot-state.mjs",
+    "test:unit": "node tests/sidepanel-boot-state.mjs && node tests/session-routing.mjs",
     "repl": "node tests/repl.mjs",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build:prod",

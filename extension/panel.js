@@ -516,7 +516,11 @@ async function refreshPageMeta() {
 
 // ── Port wiring (background.js) ──────────────────────────────────────────
 
-const port = chrome.runtime.connect({ name: 'devtools-panel' });
+// Unique per panel instance. A constant name meant two DevTools panels open on
+// two different tabs collided on the same key in the background's client map,
+// so replies reached only the most recently opened one.
+const PORT_NAME = 'devtools-panel-' + Math.random().toString(36).slice(2, 10);
+const port = chrome.runtime.connect({ name: PORT_NAME });
 
 function sendToHost(msg) {
   try { port.postMessage(msg); } catch (e) { appendRow('err', '✗', 'send failed: ' + (e?.message || e)); }

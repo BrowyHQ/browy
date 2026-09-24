@@ -366,6 +366,14 @@ function persistChatSoon() {
   }, 250);
 }
 
+// Each panel instance gets its own port name. This used to be the constant
+// string 'sidepanel', which meant two side panels in two windows both landed
+// on the same key in the background's `clients` map: the second overwrote the
+// first, every host reply routed to the newer window, and the older one went
+// silently dead. Worse, whichever closed first deleted the survivor's entry
+// and ended its session.
+const PORT_NAME = 'sidepanel-' + Math.random().toString(36).slice(2, 10);
+
 let bgPort = null;
 let sessionReady = false;
 // Copilot SDK readiness is a SEPARATE, much later milestone than
@@ -650,7 +658,7 @@ function connect() {
     return;
   }
   try {
-    bgPort = chrome.runtime.connect({ name: 'sidepanel' });
+    bgPort = chrome.runtime.connect({ name: PORT_NAME });
   } catch (e) {
     // "Extension context invalidated." — same root cause as above.
     bgPort = null;
@@ -719,6 +727,21 @@ function connect() {
           });
         }
       } catch {}
+      return;
+    }
+    if (raw.type === '__session_conflict') {
+      // Another window already owns this session id. Take a fresh one rather
+      // than fighting over the routing, and keep whatever is on screen: the
+      // conversation the user can see has not been sent anywhere yet.
+      (async () => {
+        BROWY_SESSION_ID = newSessionId();
+        try { await chrome.storage.local.set({ [SID_KEY]: BROWY_SESSION_ID }); } catch {}
+        browyPost({
+          type: 'session.start',
+          sessionId: BROWY_SESSION_ID,
+          capabilities: ['cdp.activeTab'],
+        });
+      })();
       return;
     }
     if (raw.type === 'session.ready') {
@@ -1205,8 +1228,16 @@ async function startNewChat() {
   // SDK session is created lazily on the next chat.send via
   // setBrowyProtocolSessionId → ensureSession on the host.
   if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'stop' }));
+  // End the outgoing session properly. Without this the runner keeps its
+  // SessionState and ExtensionContext alive for every chat ever opened in this
+  // panel, and the background's sessionToClient map grows one dead entry per
+  // new chat, all cleaned up only when the panel finally closes.
+  const previousId = BROWY_SESSION_ID;
   // Mint a new SID and rebind.
   BROWY_SESSION_ID = newSessionId();
+  if (previousId && previousId !== BROWY_SESSION_ID) {
+    browyPost({ type: 'session.end', sessionId: previousId });
+  }
   try { await chrome.storage.local.set({ [SID_KEY]: BROWY_SESSION_ID }); } catch {}
   msgs.innerHTML = '';
   msgs.appendChild(empty);
@@ -1233,7 +1264,11 @@ async function switchToChat(id) {
   }
   // End host-side session for the current id (host can resume the new one on demand).
   if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'stop' }));
+  const previousId = BROWY_SESSION_ID;
   BROWY_SESSION_ID = id;
+  if (previousId && previousId !== id) {
+    browyPost({ type: 'session.end', sessionId: previousId });
+  }
   try { await chrome.storage.local.set({ [SID_KEY]: id }); } catch {}
   msgs.innerHTML = '';
   liveBub = null; liveBody = null; liveSteps = null; liveText = ''; stepNodes.clear();

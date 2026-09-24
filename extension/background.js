@@ -154,6 +154,30 @@ function broadcastToClients(msg) {
   }
 }
 
+/** Should a `session.start` be refused because another live client already owns
+ *  this session id?
+ *
+ *  The side panel persists one session id under a single chrome.storage key, so
+ *  every window reads the same one. Unique port names stop panels overwriting
+ *  each other in `clients`, but `sessionToClient` is keyed by session id, so a
+ *  second panel would still silently steal the routing from the first.
+ *
+ *  Only refuse when the incumbent port is still connected. A stale mapping left
+ *  by a closed panel must be claimable, otherwise a session id becomes
+ *  permanently unusable after a crash.
+ *
+ *  Exported as a pure function so the rule can be tested without a browser. */
+function isSessionOwnedByAnotherClient(sessionToClientMap, clientsMap, sessionId, portName) {
+  const existing = sessionToClientMap.get(sessionId);
+  if (!existing) return false;
+  if (existing === portName) return false;
+  return clientsMap.has(existing);
+}
+
+if (typeof globalThis !== 'undefined') {
+  globalThis.__browyTestables = { isSessionOwnedByAnotherClient };
+}
+
 // ── chrome.downloads: silent auto-save (Phase E.1) ──────────────────────────
 //
 // Many sites (Overleaf, etc.) trigger a Save-As dialog that the agent can't
@@ -186,6 +210,16 @@ chrome.runtime.onConnect.addListener((port) => {
 
     // Track session ↔ client routing on session.start
     if (msg.type === 'session.start' && msg.sessionId) {
+      // Two panels can arrive holding the same session id, because the side
+      // panel persists one id under a single chrome.storage key and every
+      // window reads it. Unique port names stop them overwriting each other in
+      // `clients`, but `sessionToClient` is keyed by session id, so the second
+      // panel would still steal the routing for the first. Detect that and ask
+      // the newcomer to mint a fresh id rather than silently taking over.
+      if (isSessionOwnedByAnotherClient(sessionToClient, clients, msg.sessionId, port.name)) {
+        try { port.postMessage({ type: '__session_conflict', sessionId: msg.sessionId }); } catch {}
+        return;
+      }
       sessionToClient.set(msg.sessionId, port.name);
       // Bind the session to a specific tab so agent tools target THIS panel's
       // inspected tab rather than whichever tab happens to be foregrounded.
