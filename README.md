@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-**The browser agent that runs on the AI subscription you already pay for.** A Chromium extension for Chrome, Edge, and Brave that drives your real, logged-in tabs through chat. Side panel for day-to-day work, DevTools panel CLI for power users. No API key and no second bill: it runs on your existing GitHub Copilot subscription.
+**The browser agent that runs on the AI subscription you already pay for.** A Chromium extension for Chrome, Edge, and Brave that drives your real, logged-in tabs through chat. Side panel for day-to-day work, DevTools panel CLI for power users. No second bill: it runs on your existing GitHub Copilot subscription.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-early%20access-blueviolet)](#status)
