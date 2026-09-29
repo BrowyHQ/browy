@@ -2,6 +2,33 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [0.1.7]: first-run setup, and the extension knows when your backend is too old
+*Released 2026-09-29*
+
+Installing the backend is the one setup step that leaves the browser, and the side panel handled it with a red one-line banner. Separately, the Web Store updates the extension on its own but nothing updates the backend, so after every release people ran a new panel against an old host and features quietly failed. This release fixes both. It also ships the two-window session fix and the new store description, which were committed after 0.1.6 but never released.
+
+### Added
+
+- **A first-run setup screen** ([#10](https://github.com/BrowyHQ/browy/issues/10)). When the backend isn't installed, the side panel now shows what to run instead of a banner over a disabled input: the install command for your OS (detected automatically, with a copy button), where to paste it, and what happens next. It checks for the backend every few seconds, and right away when you come back to the window, then moves on by itself. No reopening the panel. A backend that's installed but too old to trust this extension's ID gets the same screen with update wording. Measured against a real browser: from the host being registered to a live chat in 3.6 s, with no flicker between probes.
+- **"Try one of these" prompts** on the first empty chat, until you send your first message. Right after installing from the Web Store the active tab is usually the store itself, which Chrome never lets an extension read. On that tab, or any browser page, the panel says so instead of sending a prompt that can only fail.
+- **A host-version check** ([#11](https://github.com/BrowyHQ/browy/issues/11)). When the backend is older than the extension needs, the side panel shows a yellow banner with a button that copies the update command, and a "later" that snoozes it for a day. The DevTools panel prints the same warning, and the settings page shows "backend outdated" instead of a meaningless version.
+
+### Fixed
+
+- **Two side panels in two windows no longer break each other.** Every panel connected with the same port name, so a second window overwrote the first in the background's client map. Every host reply went to the newer window, and the older one went dead with no error. Whichever closed first then ended the other's live session and detached its debugger mid-use. The DevTools panel had the same bug. Port names are now unique per panel, and a second panel that claims a session another live panel owns gets a fresh one. Switching chats and starting a new chat now end the outgoing session instead of leaking it until the panel closes.
+- **The backend reports its real version.** Every host up to 0.1.6 reported a hard-coded `0.3.0`, which matched no release, and `PROTOCOL_VERSION` stayed at `1` through three protocol additions. The version now comes from `package.json` at build time, and the protocol is `2`. Hosts from 0.1.6 and earlier can't say which of those additions they have, so they'll see the update banner once.
+- **The settings page no longer hangs on "starting…"** when the backend is too old to trust the extension.
+- **Docs.** The "check the host is on disk" command pointed at `browy.exe` / `~/.browy/app/browy`, which no release has shipped. Download sizes were about 50 MB too high. The log path was still wrong in the FAQ, architecture and privacy pages, despite 0.1.6's note. And the privacy page said chat history lives only in extension storage and is deleted on uninstall. In fact transcripts live in the Copilot SDK's store under `~/.copilot/`, and uninstalling doesn't remove them. Deleting a chat in the side panel removes both copies.
+
+### Changed
+
+- **Installers send you back to the browser.** They used to tell Web Store users to "install the Browy extension" they already had, and they opened the sideload folder in Explorer or Finder on every run, updates included. They now say the panel connects by itself. The folder only opens with `BROWY_OPEN=1`, so `BROWY_NO_OPEN` is no longer needed.
+- **New store description:** "The browser agent that runs on the AI subscription you already pay for. No second bill." The old line was another product's title tag word for word, and "No API key" was dropped because no user has asked for it.
+
+### Upgrading
+
+Run the install command again to update the backend. From now on the side panel tells you when you need to.
+
 ## [0.1.6]: chat history is real, and the download is 4× smaller
 *Released 2026-08-11*
 
@@ -29,6 +56,7 @@ A deep audit of session handling, the runtime flow, and the macOS experience. Ev
 - Removed the stale Homebrew formula: it was pinned to `0.1.0` with literal `REPLACE_WITH_SHA256_AFTER_BUILD` checksums, wasn't referenced by CI or the README, and would have failed for anyone who tried it.
 
 
+## [0.1.5]: cold-start UX
 *Released 2026-08-10*
 
 Browy's native host takes a while to cold start — measured 10.8s to first response on a warm machine and 47s under load, because Chrome spawns a fresh host process and the Copilot SDK subprocess has to boot behind it. The UI handled that window badly. This release is entirely about the first 45 seconds.
