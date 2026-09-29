@@ -10,12 +10,14 @@
 #   3. Extracts to ~/.browy/app/  (includes the browser extension)
 #   4. Runs the bundled install-host to register the native messaging manifest
 #      for Chrome, Edge, and Brave.
-#   5. Opens the extension folder + chrome://extensions so you can Load unpacked.
+#   5. Copies the extension to ~/Downloads/Browy-Extension for sideloading.
+#
+# Running it again updates an existing install in place.
 #
 # Override version: BROWY_VERSION=0.2.1 curl ... | bash
 # Override repo:    BROWY_REPO=youruser/yourfork curl ... | bash
 # Test/local mode:  BROWY_LOCAL_TARBALL=/path/to/Browy-x.tar.gz bash install.sh
-# Skip browser open: BROWY_NO_OPEN=1 curl ... | bash
+# Open sideload folder: BROWY_OPEN=1 curl ... | bash
 
 set -euo pipefail
 
@@ -119,25 +121,24 @@ cp -R "$INSTALL_DIR/extension/." "$EXT_DIR/"
 echo ""
 echo "✓ Browy $BROWY_VERSION installed to $INSTALL_DIR"
 echo ""
-echo "To finish setup, install the Browy extension:"
-echo "  Easiest: add it from the Chrome Web Store"
-echo "    https://chromewebstore.google.com/detail/iondecjdokngnlkfpipgolgkfegpmjca"
-echo "  Or sideload from disk:"
-echo "    1. Open chrome://extensions"
-echo "    2. Enable 'Developer mode' (top-right)"
-echo "    3. Click 'Load unpacked' and select:"
-echo "       $EXT_DIR"
-echo "  Then pin Browy and click it to open the side panel."
+# Most people arrive here from the side panel's first-run screen, which
+# notices the backend on its own. Send them straight back to it.
+echo "Now go back to your browser and open the Browy side panel."
+echo "Already open? It connects by itself within a few seconds. If it doesn't, close and reopen it."
+echo ""
+echo "No extension yet? Add it from the Chrome Web Store:"
+echo "  https://chromewebstore.google.com/detail/iondecjdokngnlkfpipgolgkfegpmjca"
+echo "Sideloading instead? In chrome://extensions turn on Developer mode, click Load unpacked, and pick:"
+echo "  $EXT_DIR"
 echo ""
 echo "To uninstall:  $INSTALL_DIR/uninstall.sh && rm -rf $INSTALL_DIR $EXT_DIR"
 
-# 9. Optionally open the folder + chrome://extensions for the user.
-if [ -z "${BROWY_NO_OPEN:-}" ] && [ -d "$EXT_DIR" ]; then
+# 9. Opt-in: popping the folder open on every run confused Web Store users
+#    (who don't need it) and fired again on every update.
+if [ -n "${BROWY_OPEN:-}" ] && [ -d "$EXT_DIR" ]; then
   if [ "$uname_s" = "Darwin" ]; then
     open "$EXT_DIR" 2>/dev/null || true
-    open "chrome://extensions" 2>/dev/null || true
   elif command -v xdg-open >/dev/null 2>&1; then
     xdg-open "$EXT_DIR" >/dev/null 2>&1 || true
-    xdg-open "chrome://extensions" >/dev/null 2>&1 || true
   fi
 fi

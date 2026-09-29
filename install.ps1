@@ -7,12 +7,14 @@
 #   1. Downloads the latest Browy-<version>-win-x64.zip from GitHub Releases
 #   2. Extracts to %LOCALAPPDATA%\Browy\app\  (includes the browser extension)
 #   3. Registers the native messaging manifest for Chrome, Edge, Brave
-#   4. Opens Explorer + chrome://extensions so you can Load unpacked
+#   4. Copies the extension to Downloads\Browy-Extension for sideloading
+#
+# Running it again updates an existing install in place.
 #
 # Override version:    $env:BROWY_VERSION = "0.2.1"; irm ... | iex
 # Override repo:       $env:BROWY_REPO = "youruser/yourfork"; irm ... | iex
 # Test local zip:      $env:BROWY_LOCAL_ZIP = "C:\path\Browy-x.zip"; irm ... | iex
-# Skip browser open:   $env:BROWY_NO_OPEN = "1"; irm ... | iex
+# Open sideload folder: $env:BROWY_OPEN = "1"; irm ... | iex
 
 #Requires -Version 5.1
 $ErrorActionPreference = 'Stop'
@@ -101,24 +103,25 @@ try {
     Write-Host ""
     Write-Host "✓ Browy $version installed to $installDir" -ForegroundColor Green
     Write-Host ""
-    Write-Host "To finish setup, install the Browy extension:" -ForegroundColor Cyan
-    Write-Host "  Easiest: add it from the Chrome Web Store"
-    Write-Host "    https://chromewebstore.google.com/detail/iondecjdokngnlkfpipgolgkfegpmjca" -ForegroundColor Yellow
-    Write-Host "  Or sideload from disk:"
-    Write-Host "    1. Open chrome://extensions"
-    Write-Host "    2. Enable 'Developer mode' (top-right)"
-    Write-Host "    3. Click 'Load unpacked' and select:"
-    Write-Host "       $extensionDir" -ForegroundColor Yellow
-    Write-Host "  Then pin Browy and click it to open the side panel."
+    # Most people arrive here from the side panel's first-run screen, which
+    # notices the backend on its own. Send them straight back to it.
+    Write-Host "Now go back to your browser and open the Browy side panel." -ForegroundColor Cyan
+    Write-Host "Already open? It connects by itself within a few seconds. If it doesn't, close and reopen it."
+    Write-Host ""
+    Write-Host "No extension yet? Add it from the Chrome Web Store:"
+    Write-Host "  https://chromewebstore.google.com/detail/iondecjdokngnlkfpipgolgkfegpmjca" -ForegroundColor Yellow
+    Write-Host "Sideloading instead? In chrome://extensions turn on Developer mode, click Load unpacked, and pick:"
+    Write-Host "  $extensionDir" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "To uninstall: & '$installDir\uninstall.bat'; Remove-Item '$installDir','$extensionDir' -Recurse"
 
-    if (-not $env:BROWY_NO_OPEN -and (Test-Path $extensionDir)) {
+    # Opt-in: popping Explorer on every run confused Web Store users (who
+    # don't need the folder) and fired again on every update.
+    if ($env:BROWY_OPEN -and (Test-Path $extensionDir)) {
         try {
             Start-Process explorer.exe $extensionDir
-            Start-Process 'chrome://extensions'
         } catch {
-            # Non-fatal — user can navigate manually using the path printed above.
+            # Non-fatal — the path is printed above.
         }
     }
 } finally {
