@@ -55,11 +55,11 @@ Browy 是一个浏览器 AI 智能体。你把它装成一个 Chromium 扩展；
 
 [**在 Chrome Web Store 添加 Browy**](https://chromewebstore.google.com/detail/iondecjdokngnlkfpipgolgkfegpmjca)（一键）。同一份商店页面覆盖 Chrome、Edge 和 Brave。
 
-**✓ 确认：** 把工具栏图标固定。点击它。侧边栏应该打开，并显示"主机未连接"提示。这是预期行为，第二步会修复。
+**✓ 确认：** 把工具栏图标固定。点击它。侧边栏会打开并提示你安装后端，同时给出适合你操作系统的安装命令和一个复制按钮。这就是第二步。
 
 ### 第二步：安装本地原生消息主机
 
-**Windows**（自带 Node，约 130 MB）：
+**Windows**（自带 Node，约 80 MB）：
 
 ```powershell
 irm https://github.com/BrowyHQ/browy/releases/latest/download/install.ps1 | iex
@@ -71,8 +71,9 @@ irm https://github.com/BrowyHQ/browy/releases/latest/download/install.ps1 | iex
 curl -fsSL https://github.com/BrowyHQ/browy/releases/latest/download/install.sh | bash
 ```
 
-**✓ 确认：** 重新打开侧边栏。"主机未连接"提示应该消失。如果还在，运行
-`browy --version`（Windows: `& "$env:LOCALAPPDATA\Browy\app\browy.exe" --version`）确认二进制已经装好。
+**✓ 确认：** 回到侧边栏。几秒钟内它会自己检测到后端并进入聊天界面（如果没有，关掉侧边栏再重新打开）。还是不行？确认主机已经装好：`~/.browy/app/node ~/.browy/app/dist/cli-bin.js --version`（Windows: `& "$env:LOCALAPPDATA\Browy\app\node.exe" "$env:LOCALAPPDATA\Browy\app\dist\cli-bin.js" --version`）。
+
+**更新：** 再运行一次同样的命令即可，会就地升级并保留聊天记录。当 Web Store 把扩展更新到比你的后端更新的版本时，侧边栏会显示一条黄色的 *browy backend is out of date* 提示，上面的按钮可以直接复制这条命令。
 
 ### 第三步：登录 Copilot
 
@@ -97,7 +98,7 @@ curl -fsSL https://github.com/BrowyHQ/browy/releases/latest/download/install.sh 
 | `~/.browy/app/`（macOS / Linux） | 同上 |
 | `~/.browy/data/files/` | 沙箱化的临时磁盘，`save_file` / `read_file` 工具操作的就是这里 |
 | `~/.browy/data/notes.json` | 跨对话的持久化键值记忆 |
-| `~/.browy/host/host.log` | 单文件循环 5 MB 诊断日志（轮转时被覆盖） |
+| `~/.browseragent/native-host.log` | 单个 5 MB 循环诊断日志（轮转时保留一份 `.1` 副本） |
 | 原生消息清单 | 注册到 Chrome、Edge、Brave，让扩展能和主机通信 |
 | Chrome 扩展存储 | 对话历史、模型选择、主题；永远不离开本地浏览器配置 |
 

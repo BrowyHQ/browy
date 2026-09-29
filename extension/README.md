@@ -316,7 +316,10 @@ Detailed deep-dive in [../src/README.md](../src/README.md).
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Side panel says **`offline`** | Native host not installed or not running | Open Settings → install commands shown there |
+| Side panel shows **install the backend** | Native host not installed | Run the command it shows (there's a copy button); the panel moves on by itself once the host answers |
+| Side panel shows **update the backend** | Host installed, but too old to trust this extension's ID | Same command; re-running the installer updates in place and keeps your chats |
+| Yellow **browy backend is out of date** banner | The Web Store updated the extension past your host, so newer features (like deleting chats) won't work | Click **copy update command**, run it, and the panel reconnects on its own |
+| Side panel says **`offline`** | Host crashed or can't start | Re-run the installer; see the log at `~/.browseragent/native-host.log` |
 | `Specified native messaging host not found` in `chrome://extensions` errors | Extension ID mismatch with `allowed_origins` in the host manifest | Re-run installer; it auto-detects your extension ID |
 | First message hangs forever | Sign-in not completed | Open Settings → click sign-in, complete device flow |
 | `permission denied` / backend never connects on macOS | Gatekeeper quarantine on the downloaded install | `xattr -dr com.apple.quarantine ~/.browy/app` (the installer does this automatically since 0.1.6) |

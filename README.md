@@ -53,11 +53,11 @@ Think Claude Code or Aider, but in your browser. An open-source alternative to B
 
 [**Add Browy from the Chrome Web Store**](https://chromewebstore.google.com/detail/iondecjdokngnlkfpipgolgkfegpmjca) (one click). The same listing covers Chrome, Edge, and Brave.
 
-**✓ Validate:** Pin the toolbar icon. Click it. The side panel should open and show a "host disconnected" banner. That is expected until Step 2.
+**✓ Validate:** Pin the toolbar icon. Click it. The side panel opens and asks you to install the backend, with the command for your OS and a copy button. That's Step 2.
 
 ### Step 2: install the native host
 
-**Windows** (bundles Node, ~130 MB):
+**Windows** (bundles Node, ~80 MB):
 
 ```powershell
 irm https://github.com/BrowyHQ/browy/releases/latest/download/install.ps1 | iex
@@ -69,7 +69,9 @@ irm https://github.com/BrowyHQ/browy/releases/latest/download/install.ps1 | iex
 curl -fsSL https://github.com/BrowyHQ/browy/releases/latest/download/install.sh | bash
 ```
 
-**✓ Validate:** Re-open the side panel. The host banner should be gone. If not, run `browy --version` (Windows: `& "$env:LOCALAPPDATA\Browy\app\browy.exe" --version`) to confirm the binary is on disk.
+**✓ Validate:** Go back to the side panel. It picks up the backend by itself within a few seconds and moves on to the chat (if it doesn't, close and reopen it). Still stuck? Check the host is on disk: `~/.browy/app/node ~/.browy/app/dist/cli-bin.js --version` (Windows: `& "$env:LOCALAPPDATA\Browy\app\node.exe" "$env:LOCALAPPDATA\Browy\app\dist\cli-bin.js" --version`).
+
+**Updating:** run the same command again. It updates in place and keeps your chats. When the Web Store updates the extension past your backend, the side panel shows a yellow *browy backend is out of date* banner with a button that copies the command for you.
 
 ### Step 3: sign in to Copilot
 

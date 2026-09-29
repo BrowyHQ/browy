@@ -40,9 +40,9 @@ This project follows the [Contributor Covenant](https://www.contributor-covenant
 
 Open a [GitHub issue](https://github.com/BrowyHQ/browy/issues/new). Include:
 
-1. **Browy version**: `browy --version` (or the version in `extension/manifest.json`).
+1. **Browy version**: the extension version from `chrome://extensions`, and the backend version shown at the top of Browy's settings page (or `node dist/cli-bin.js --version` in a source checkout).
 2. **OS and browser**: `Windows 11 / Chrome 124`, `macOS Sonoma / Brave`, etc.
-3. **Native-host log**: the last ~50 lines of `~/.browy/host/host.log` (or `%USERPROFILE%\.browy\host\host.log` on Windows). Redact anything sensitive before pasting.
+3. **Native-host log**: the last ~50 lines of `~/.browseragent/native-host.log` (`%USERPROFILE%\.browseragent\native-host.log` on Windows). Redact anything sensitive before pasting.
 4. **A clear reproduction**: the exact prompt, the tab you ran it against (or a public URL that produces the same behaviour), and the resulting transcript or screenshot.
 5. **What you expected vs what happened.**
 

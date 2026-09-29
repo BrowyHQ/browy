@@ -51,4 +51,4 @@ Web Store listing's permission justification.
 | Page snapshots, screenshots, DOM extracts, console/network logs | Sent to GitHub Copilot via the local CLI to inform the next agent step. |
 | Chat history | `chrome.storage.local` on your machine. |
 | Settings | `chrome.storage.local`. |
-| Native host log | `~/.browy/host/host.log`, rotated at 5 MB. |
+| Native host log | `~/.browseragent/native-host.log`, rotated at 5 MB. |
