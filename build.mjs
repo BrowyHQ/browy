@@ -1,5 +1,5 @@
 import * as esbuild from 'esbuild';
-import { cpSync, mkdirSync, rmSync } from 'fs';
+import { cpSync, mkdirSync, rmSync, readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 
@@ -10,6 +10,7 @@ try { rmSync(dist, { recursive: true, force: true }); } catch {}
 mkdirSync(dist, { recursive: true });
 
 const PROD = process.env.BA_PROD === '1';
+const pkg = JSON.parse(readFileSync(resolve(__dirname, 'package.json'), 'utf8'));
 
 async function build() {
   await esbuild.build({
@@ -23,6 +24,9 @@ async function build() {
     minify: PROD,
     legalComments: 'none',
     banner: { js: '' },
+    // The native host reports this in hello.ack so the extension can tell
+    // which host it is talking to.
+    define: { __BROWY_VERSION__: JSON.stringify(pkg.version) },
     external: ['playwright-core', 'ws', '@azure/identity', '@github/copilot-sdk'],
     logLevel: 'info',
   });

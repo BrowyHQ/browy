@@ -164,14 +164,19 @@ function onMsg(m) {
   }
   if (m.type === '__host_ready') {
     setHost('connected', 'live');
-    if (m.serverVersion) verLabel.textContent = 'v' + m.serverVersion;
+    if (m.serverVersion) {
+      // Hosts before protocol 2 all report a meaningless '0.3.0'.
+      const current = m.protocol >= 2; // MIN_HOST_PROTOCOL in sidepanel.js
+      verLabel.textContent = current ? 'v' + m.serverVersion : 'backend outdated';
+      verLabel.title = current ? '' : 'Your Browy backend is older than this extension. Re-run the installer to update it: https://browyhq.github.io/install/';
+    }
     // Open a session so pushInitialState fires.
     send({ type: 'session.start', sessionId: SESSION_ID, capabilities: [] });
     // And ask explicitly in case we missed the initial push.
     send({ type: 'models.list' });
     return;
   }
-  if (m.type === '__host_disconnected' || m.type === '__host_error' || m.type === '__host_missing') {
+  if (m.type === '__host_disconnected' || m.type === '__host_error' || m.type === '__host_missing' || m.type === '__host_stale') {
     setHost('offline — make sure the browy backend is installed and running', 'err');
     return;
   }

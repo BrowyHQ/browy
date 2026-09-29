@@ -61,6 +61,15 @@ const $btnReset = document.getElementById('btnReset');
 let busy = false;
 let hostReady = false;
 let sessionStarted = false;
+// Last missing/stale notice printed. The side panel's first-run screen probes
+// for the host every few seconds and each probe re-broadcasts the verdict;
+// print it once per change, not once per probe.
+let lastHostNotice = null;
+// Must match MIN_HOST_PROTOCOL in sidepanel.js.
+const MIN_HOST_PROTOCOL = 2;
+const INSTALL_CMD = /^win/i.test(navigator.userAgentData?.platform || navigator.platform || '')
+  ? 'irm https://github.com/BrowyHQ/browy/releases/latest/download/install.ps1 | iex'
+  : 'curl -fsSL https://github.com/BrowyHQ/browy/releases/latest/download/install.sh | bash';
 let sessionModel = '';
 let liveBodyEl = null;     // streaming target <span>
 let liveText = '';
@@ -530,13 +539,21 @@ port.onMessage.addListener((msg) => {
   if (!msg || typeof msg !== 'object') return;
   switch (msg.type) {
     case '__host_pending':
+      lastHostNotice = null;
       appendRow('dim', '·', 'starting host…');
       break;
     case '__host_ready':
       hostReady = true;
+      lastHostNotice = null;
       if (!sessionStarted) {
         sessionStarted = true;
-        appendRow('dim', '·', 'host ready' + (msg.serverVersion ? ' v' + msg.serverVersion : ''));
+        const current = msg.protocol >= MIN_HOST_PROTOCOL;
+        // Hosts before protocol 2 all report a meaningless '0.3.0'.
+        appendRow('dim', '·', 'host ready' + (current && msg.serverVersion ? ' v' + msg.serverVersion : ''));
+        if (!current) {
+          appendRow('warn', '!', 'browy backend is out of date, so newer features (like deleting chats) won\'t work. re-run the installer to update it:');
+          appendRow('dim', ' ', INSTALL_CMD);
+        }
         // Wait for the persisted id so we resume the previous DevTools chat
         // instead of starting a throwaway one.
         sessionIdReady.then(() => {
@@ -557,13 +574,19 @@ port.onMessage.addListener((msg) => {
       setBusy(false);
       break;
     case '__host_missing':
-      appendRow('err', '✗', 'browy backend not installed. install: https://browyhq.github.io/install/');
+      if (lastHostNotice !== 'missing') {
+        lastHostNotice = 'missing';
+        appendRow('err', '✗', 'browy backend not installed. install it, then reopen devtools: ' + INSTALL_CMD);
+      }
       hostReady = false;
       sessionStarted = false;
       setBusy(false);
       break;
     case '__host_stale':
-      appendRow('err', '✗', 'browy backend installed but does not trust this extension. upgrade: https://browyhq.github.io/install/');
+      if (lastHostNotice !== 'stale') {
+        lastHostNotice = 'stale';
+        appendRow('err', '✗', 'browy backend is too old for this extension. update it, then reopen devtools: ' + INSTALL_CMD);
+      }
       hostReady = false;
       sessionStarted = false;
       setBusy(false);

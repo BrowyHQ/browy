@@ -403,4 +403,19 @@ export interface Transport {
   close(): void;
 }
 
-export const PROTOCOL_VERSION = 1;
+/**
+ * Wire-protocol version, sent in `hello.ack`. Bump it whenever the extension
+ * starts relying on a message an older host doesn't speak: the extension
+ * compares it against its own MIN_HOST_PROTOCOL and asks the user to update.
+ *
+ * The Chrome Web Store auto-updates the extension; nothing updates the host.
+ * A newer extension talking to an older host is therefore the normal state
+ * after every release, not an edge case.
+ *
+ *   1 — baseline, every host up to and including 0.1.6. `sdk.ready` (0.1.5)
+ *       and `chat.delete` (0.1.6) shipped without a bump, so a protocol-1 host
+ *       may or may not speak them, and all of them report serverVersion "0.3.0".
+ *   2 — 0.1.7: guarantees `sdk.ready` and `chat.delete`, and serverVersion is
+ *       the real package version.
+ */
+export const PROTOCOL_VERSION = 2;

@@ -562,6 +562,18 @@ let reconnectAttempts = 0;
 const RELOAD_AFTER_FAILURES = 5;
 const INSTALL_PS1_URL = 'https://browyhq.github.io/install/';
 const INSTALL_SH_URL = 'https://browyhq.github.io/install/';
+// The README one-liners. Running either one again updates an existing install
+// in place, so they double as the update commands.
+const INSTALL_CMDS = {
+  win:  'irm https://github.com/BrowyHQ/browy/releases/latest/download/install.ps1 | iex',
+  unix: 'curl -fsSL https://github.com/BrowyHQ/browy/releases/latest/download/install.sh | bash',
+};
+// Lowest host protocol this panel fully works with. Bump it together with
+// PROTOCOL_VERSION in src/protocol.ts when the panel starts relying on
+// something new from the host.
+const MIN_HOST_PROTOCOL = 2;
+const HOST_UPDATE_SNOOZE_KEY = 'browy.hostUpdateSnoozeUntil';
+const FIRST_SEND_KEY = 'browy.firstSendDone';
 
 // Reconnect / host-loss banner shown above the chat panel.
 function showConnBanner(text, opts = {}) {
@@ -650,6 +662,313 @@ function setControlsState(state) {
 
 // Back-compat shim removed — all callers use setControlsState directly.
 
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch {}
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    return ok;
+  } catch { return false; }
+}
+
+// ── First-run screen ───────────────────────────────────────────────────────
+//
+// Shown when Chrome reports the native host as missing (never installed) or
+// stale (installed, but its manifest predates this extension's id). It
+// replaces a red one-line banner over a disabled input, which is where
+// first-run users were being lost: installing the host is the one step that
+// leaves the browser. Nothing here phones home; the screen simply goes away
+// the first time the host answers.
+
+// Map the platform to one of the two install commands we ship.
+// `platformOs` is chrome.runtime.getPlatformInfo().os; `navPlatform` is the
+// navigator fallback for when that API is unavailable.
+function osKey(platformOs, navPlatform) {
+  const o = String(platformOs || '').toLowerCase();
+  if (o === 'win') return 'win';
+  if (o === 'cros') return 'cros';
+  if (o === 'mac' || o === 'linux' || o === 'openbsd') return 'unix';
+  const p = String(navPlatform || '').toLowerCase();
+  if (p.startsWith('win')) return 'win';
+  if (p.includes('cros') || p.includes('chrome os')) return 'cros';
+  return 'unix';
+}
+
+let onboardMode = null;    // null | 'missing' | 'stale'
+let onboardOs = 'win';     // tab currently shown: 'win' | 'unix' | 'cros'
+let detectedOs = null;     // what this machine actually is
+let obPhase = 'waiting';   // 'waiting' | 'checking' | 'starting' | 'crashed'
+let obPollTimer = null;
+let obProbeTimer = null;
+// Chrome answers a probe for a missing host in ~5 ms, so without a floor the
+// "checking…" from the button was never actually visible and the button
+// looked dead.
+const OB_CHECKING_MIN_MS = 800;
+let obCheckingUntil = 0;
+
+const OB_WHERE = {
+  win:  'open PowerShell, paste, press enter. about 80 MB, installs into your user folder, no admin rights needed.',
+  unix: 'open a terminal, paste, press enter. about 80 MB, installs into your home folder, no sudo needed.',
+};
+const OB_STATUS = {
+  waiting:  "waiting for the backend. this screen moves on by itself once it's installed.",
+  waitingUpdate: "waiting for the update. this screen moves on by itself once it's done.",
+  checking: 'checking…',
+  starting: 'found it. starting the backend, the first start takes a few seconds…',
+  crashed:  'found the backend, but it stopped while starting. retrying… if this keeps happening, run the command again to reinstall.',
+};
+
+async function detectOs() {
+  if (detectedOs) return detectedOs;
+  let platformOs = '';
+  try { platformOs = (await chrome.runtime.getPlatformInfo())?.os || ''; } catch {}
+  detectedOs = osKey(platformOs, navigator.userAgentData?.platform || navigator.platform);
+  return detectedOs;
+}
+
+function renderOnboard() {
+  const el = document.getElementById('onboard');
+  if (!el) return;
+  el.dataset.os = onboardOs;
+  el.dataset.phase = obPhase;
+  const title = document.getElementById('obTitle');
+  const why = document.getElementById('obWhy');
+  if (onboardOs === 'cros') {
+    if (title) title.textContent = 'the backend needs windows, macos or linux';
+    if (why) why.textContent = "browy's agent runs as a small program on your computer, and chromeos can't run it yet.";
+  } else if (onboardMode === 'stale') {
+    if (title) title.textContent = 'update the backend';
+    if (why) why.textContent = 'the backend on this computer is too old to talk to this version of the extension. running the installer again updates it in place and keeps your chats.';
+  } else {
+    if (title) title.textContent = 'install the backend';
+    if (why) why.textContent = 'the agent runs in a small program on this computer. this panel is its window.';
+  }
+  const cmdKey = onboardOs === 'win' ? 'win' : 'unix';
+  const cmd = document.getElementById('obCmd');
+  if (cmd) cmd.textContent = INSTALL_CMDS[cmdKey];
+  const where = document.getElementById('obWhere');
+  if (where) where.textContent = OB_WHERE[cmdKey];
+  el.querySelectorAll('.ob-os button').forEach((b) => {
+    b.setAttribute('aria-selected', String(b.dataset.os === cmdKey));
+  });
+  const status = document.getElementById('obStatus');
+  if (status) {
+    status.textContent = obPhase === 'waiting' && onboardMode === 'stale'
+      ? OB_STATUS.waitingUpdate
+      : (OB_STATUS[obPhase] || OB_STATUS.waiting);
+  }
+}
+
+function setOnboardPhase(phase) {
+  obPhase = phase;
+  renderOnboard();
+}
+
+// Idempotent: while the screen is up, every probe that finds nothing lands
+// here again.
+function showOnboarding(mode) {
+  const el = document.getElementById('onboard');
+  if (!el) return;
+  const firstShow = !onboardMode;
+  onboardMode = mode;
+  // The verdict is in; cancel the "must be starting" guess that awaited it.
+  clearTimeout(obProbeTimer); obProbeTimer = null;
+  const hold = obPhase === 'checking' ? obCheckingUntil - Date.now() : 0;
+  if (hold > 0) {
+    // Let a manual "checking…" register before settling back.
+    obProbeTimer = setTimeout(() => {
+      obProbeTimer = null;
+      if (onboardMode && obPhase === 'checking') setOnboardPhase('waiting');
+    }, hold);
+  } else {
+    obPhase = 'waiting';
+  }
+  if (firstShow) {
+    onboardOs = detectedOs || onboardOs;
+    detectOs().then((os) => {
+      if (onboardMode && onboardOs !== os) { onboardOs = os; renderOnboard(); }
+    });
+    setBase('sleep');
+  }
+  hideConnBanner();
+  hideHostUpdateBanner();
+  el.classList.add('open');
+  el.setAttribute('aria-hidden', 'false');
+  renderOnboard();
+  if (!obPollTimer && onboardOs !== 'cros') startOnboardPolling();
+}
+
+/** @returns {boolean} whether the screen was actually showing. */
+function hideOnboarding() {
+  if (!onboardMode) return false;
+  onboardMode = null;
+  stopOnboardPolling();
+  clearTimeout(obProbeTimer); obProbeTimer = null;
+  const el = document.getElementById('onboard');
+  if (el) {
+    el.classList.remove('open');
+    el.setAttribute('aria-hidden', 'true');
+  }
+  setBase('idle');
+  return true;
+}
+
+// Cheap: Chrome rejects a missing host in milliseconds without spawning
+// anything. The traffic also keeps the service worker from idling out.
+function startOnboardPolling() {
+  stopOnboardPolling();
+  obPollTimer = setInterval(() => {
+    if (document.visibilityState === 'visible') probeHost(false);
+  }, 4000);
+}
+function stopOnboardPolling() {
+  if (obPollTimer) { clearInterval(obPollTimer); obPollTimer = null; }
+}
+
+function probeHost(manual) {
+  if (!bgPort || !onboardMode || onboardOs === 'cros') return;
+  if (manual && obPhase !== 'starting') {
+    obCheckingUntil = Date.now() + OB_CHECKING_MIN_MS;
+    setOnboardPhase('checking');
+  }
+  try { bgPort.postMessage({ type: '__retry_host' }); } catch { return; }
+  armStartingGuess();
+}
+
+// A missing or stale host is rejected within milliseconds. If no verdict has
+// arrived by now, a real host process is running and just hasn't finished its
+// cold start (about 10 s).
+function armStartingGuess() {
+  clearTimeout(obProbeTimer);
+  obProbeTimer = setTimeout(() => {
+    obProbeTimer = null;
+    if (onboardMode && obPhase !== 'crashed') setOnboardPhase('starting');
+  }, 2500);
+}
+
+// ── Host-update banner ─────────────────────────────────────────────────────
+//
+// The Web Store auto-updates this extension; nothing updates the host. So
+// after every release, users run a new panel against an old host, and
+// features quietly fail (deleting a chat just times out on a pre-0.1.6 host).
+// When the host reports an older protocol than we need, say so once, with the
+// command that fixes it.
+function shouldOfferHostUpdate(protocol, minProtocol, snoozeUntil, now) {
+  const p = Number(protocol);
+  if (Number.isFinite(p) && p >= minProtocol) return false;
+  return !(Number(snoozeUntil) > now);
+}
+
+async function offerHostUpdateIfNeeded(protocol) {
+  let snoozeUntil = 0;
+  try {
+    const r = await chrome.storage.local.get([HOST_UPDATE_SNOOZE_KEY]);
+    snoozeUntil = r[HOST_UPDATE_SNOOZE_KEY] || 0;
+  } catch {}
+  if (!shouldOfferHostUpdate(protocol, MIN_HOST_PROTOCOL, snoozeUntil, Date.now())) {
+    hideHostUpdateBanner();
+    return;
+  }
+  const os = await detectOs();
+  if (hostState === 'offline') return; // went down while we were deciding
+  const b = document.getElementById('updBanner');
+  if (!b) return;
+  b.dataset.cmd = INSTALL_CMDS[os === 'win' ? 'win' : 'unix'];
+  b.dataset.where = os === 'win' ? 'PowerShell' : 'a terminal';
+  const t = document.getElementById('updBannerText');
+  if (t) t.textContent = 'browy backend is out of date';
+  b.classList.add('show');
+}
+function hideHostUpdateBanner() {
+  document.getElementById('updBanner')?.classList.remove('show');
+}
+
+// ── "Try one of these" ─────────────────────────────────────────────────────
+//
+// Shown on the empty chat until the first message is ever sent, then never
+// again. Right after installing from the Web Store the active tab is usually
+// the store itself, which Chrome never lets an extension read, so a suggestion
+// sent from there could only fail.
+let firstSendDone = true; // until storage says otherwise; never flash these at existing users
+// Cached on purpose: #empty is detached from the DOM whenever a chat has
+// messages, and getElementById can't find detached nodes. Looking these up
+// on demand silently skipped every update made mid-chat, so the suggestions
+// reappeared on the next new chat after the first send had retired them.
+const trySuggestEl = document.getElementById('trySuggest');
+const tryWarnEl = document.getElementById('tryWarn');
+
+function isRestrictedUrl(url) {
+  let u;
+  try { u = new URL(url); } catch { return true; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return true;
+  const h = u.hostname;
+  if (h === 'chromewebstore.google.com') return true;
+  if (h === 'chrome.google.com' && u.pathname.startsWith('/webstore')) return true;
+  if (h === 'microsoftedge.microsoft.com' && u.pathname.startsWith('/addons')) return true;
+  return false;
+}
+
+async function loadFirstSendFlag() {
+  try {
+    const r = await chrome.storage.local.get([FIRST_SEND_KEY, INDEX_KEY]);
+    if (r[FIRST_SEND_KEY]) return true;
+    // Saved chats predate this flag and prove a message was sent.
+    if (Array.isArray(r[INDEX_KEY]) && r[INDEX_KEY].length) {
+      chrome.storage.local.set({ [FIRST_SEND_KEY]: true }).catch(() => {});
+      return true;
+    }
+    return false;
+  } catch { return true; }
+}
+
+function markFirstSendDone() {
+  if (firstSendDone) return;
+  firstSendDone = true;
+  updateTrySuggestions();
+  chrome.storage.local.set({ [FIRST_SEND_KEY]: true }).catch(() => {});
+}
+
+function updateTrySuggestions() {
+  if (!trySuggestEl) return;
+  const show = !firstSendDone && (hostState === 'online' || hostState === 'booting');
+  trySuggestEl.hidden = !show;
+  if (tryWarnEl) tryWarnEl.hidden = !(show && lastTab?.url && isRestrictedUrl(lastTab.url));
+}
+
+function useSuggestion(text) {
+  if (hostState === 'offline' || busy || !text) return;
+  inp.value = text;
+  autoSize();
+  goBtn.disabled = false;
+  // Fill but don't fire on a page the agent can't touch; the warning says why.
+  if (lastTab?.url && isRestrictedUrl(lastTab.url)) { inp.focus(); return; }
+  send();
+}
+
+// Everything the panel does when the host goes away, whatever the reason.
+function markHostDown() {
+  sessionReady = false;
+  sdkReady = false;
+  setLive(false);
+  if (busy) setBusy(false);
+  brand.textContent = 'offline';
+  tabTitleText = '—'; currentAction = null; setTtl();
+  hideHostUpdateBanner();
+  try {
+    const hint = document.querySelector('#empty .hint');
+    if (hint) hint.textContent = '// offline. check that the browy backend is installed and running';
+    setControlsState('offline');
+    updateTrySuggestions();
+    if (typeof closeChatsOverlay === 'function') closeChatsOverlay();
+  } catch {}
+}
+
 function connect() {
   // Hard-fail fast if our context is dead — full page reload picks up the
   // freshly-installed extension code + a working chrome.runtime.
@@ -673,12 +992,14 @@ function connect() {
   bgPort.onMessage.addListener((raw) => {
     if (raw.type === '__host_ready') {
       reconnectAttempts = 0;
+      const cameFromOnboarding = hideOnboarding();
       hideConnBanner();
       setLive(true); setError(false); brand.textContent = '·';
       try {
         const hint = document.querySelector('#empty .hint');
         if (hint) hint.textContent = '// type below';
         setControlsState('online');
+        updateTrySuggestions();
       } catch {}
       browyPost({
         type: 'session.start',
@@ -686,46 +1007,57 @@ function connect() {
         capabilities: ['cdp.activeTab'],
       });
       refreshActiveTab();
+      offerHostUpdateIfNeeded(raw.protocol);
+      if (cameFromOnboarding) {
+        // The one moment of the install that deserves a reaction.
+        pose('love', 1800); react('bounce'); sndRecv();
+        try { inp.focus(); } catch {}
+      }
       return;
     }
     if (raw.type === '__host_pending') {
       reconnectAttempts = 0; // SW is alive even if host isn't
+      if (onboardMode) {
+        // Our port to the service worker was re-established and it is asking
+        // for the host again. Keep the first-run screen up: a missing host is
+        // rejected in milliseconds, and a real one arrives as __host_ready.
+        armStartingGuess();
+        return;
+      }
       brand.textContent = 'starting…';
       // Booting is NOT offline. Let the user type (and queue a send) while
       // the host cold-starts, and never tell them to install a backend they
       // already have.
       try {
         setControlsState('booting');
+        updateTrySuggestions();
         hideConnBanner();
         const hint = document.querySelector('#empty .hint');
         if (hint) hint.textContent = '// starting the browy backend — first run takes a few seconds';
       } catch {}
       return;
     }
-    if (raw.type === '__host_error' || raw.type === '__host_disconnected' || raw.type === '__host_missing' || raw.type === '__host_stale') {
-      sessionReady = false;
-      sdkReady = false;
-      setLive(false); setBusy(false); brand.textContent = 'offline';
-      tabTitleText = '—'; currentAction = null; setTtl();
+    if (raw.type === '__host_missing' || raw.type === '__host_stale') {
+      markHostDown();
+      showOnboarding(raw.type === '__host_stale' ? 'stale' : 'missing');
+      return;
+    }
+    if (raw.type === '__host_error' || raw.type === '__host_disconnected') {
+      markHostDown();
+      if (onboardMode) {
+        // Found a host but it died starting up. After a disconnect the service
+        // worker retries on its own backoff, so stop adding probes on top.
+        // __host_error gets no automatic retry, so keep probing for that one.
+        if (raw.type === '__host_disconnected') stopOnboardPolling();
+        clearTimeout(obProbeTimer); obProbeTimer = null;
+        setOnboardPhase('crashed');
+        return;
+      }
       try {
-        const hint = document.querySelector('#empty .hint');
-        if (hint) hint.textContent = '// offline. check that the browy backend is installed and running';
-        setControlsState('offline');
-        if (typeof closeChatsOverlay === 'function') closeChatsOverlay();
-        if (raw.type === '__host_missing') {
-          showConnBanner('Browy backend not installed.', {
-            action: { label: 'Install →', href: INSTALL_PS1_URL },
-          });
-        } else if (raw.type === '__host_stale') {
-          showConnBanner('Backend installed but does not trust this extension. Upgrade the backend.', {
-            action: { label: 'Upgrade →', href: INSTALL_PS1_URL },
-          });
-        } else {
-          showConnBanner('Host disconnected. Retrying…', {
-            warn: true,
-            action: { label: 'Reinstall →', href: INSTALL_PS1_URL },
-          });
-        }
+        showConnBanner('Host disconnected. Retrying…', {
+          warn: true,
+          action: { label: 'Reinstall →', href: INSTALL_PS1_URL },
+        });
       } catch {}
       return;
     }
@@ -749,7 +1081,7 @@ function connect() {
       // Safety net: any real message from the host proves it's alive, so
       // make sure the online controls reflect that even if __host_ready
       // was somehow missed during a fast SW restart.
-      try { setControlsState('online'); hideConnBanner(); } catch {}
+      try { hideOnboarding(); setControlsState('online'); updateTrySuggestions(); hideConnBanner(); } catch {}
       refreshActiveTab();
       flushPendingHostMsgs();
       // If the chats overlay was opened while the host was still booting,
@@ -783,9 +1115,10 @@ function connect() {
     sessionReady = false;
     sdkReady = false;
     bgPort = null;
-    setLive(false); setBusy(false); brand.textContent = 'offline';
+    setLive(false); if (busy) setBusy(false); brand.textContent = 'offline';
     tabTitleText = '—'; currentAction = null; setTtl();
-    try { setControlsState('offline'); } catch {}
+    hideHostUpdateBanner();
+    try { setControlsState('offline'); updateTrySuggestions(); } catch {}
     // If the disconnect happened because the extension was just reloaded,
     // chrome.runtime.id will already be undefined → reload immediately.
     if (isExtensionContextInvalidated()) {
@@ -802,10 +1135,15 @@ function connect() {
       });
       return;
     }
-    showConnBanner(
-      `Host disconnected — reconnecting (${reconnectAttempts}/${RELOAD_AFTER_FAILURES})…`,
-      { warn: true }
-    );
+    // With no host, the service worker idles out and drops this port now and
+    // then. The first-run screen already explains the situation, so don't
+    // flash a reconnect warning on top of it.
+    if (!onboardMode) {
+      showConnBanner(
+        `Host disconnected — reconnecting (${reconnectAttempts}/${RELOAD_AFTER_FAILURES})…`,
+        { warn: true }
+      );
+    }
     // Quick first retry; back off if it keeps failing.
     const delay = reconnectAttempts === 1 ? 500 : Math.min(2000 * reconnectAttempts, 8000);
     setTimeout(connect, delay);
@@ -844,6 +1182,7 @@ function handle(m) {
   if (m.type === 'focused_tab' && m.url) {
     const wasBrand = lastTab?.brand;
     lastTab = m;
+    updateTrySuggestions();
     brand.textContent = (m.brand || '').toLowerCase();
     let host = '';
     try { host = new URL(m.url).hostname.replace(/^www\./, ''); } catch { host = m.url; }
@@ -1190,6 +1529,7 @@ function send() {
   if (!t || busy || !ws || ws.readyState !== 1) return;
   ws.send(JSON.stringify({ type: 'chat', text: t }));
   addBub('u', t);
+  markFirstSendDone();
   inp.value = ''; autoSize();
   goBtn.disabled = true;
   setBusy(true);
@@ -1491,6 +1831,51 @@ exportBtn?.addEventListener('click', () => { exportChat(); });
 chatsCloseBtn?.addEventListener('click', () => { closeChatsOverlay(); });
 chatsNewBtn?.addEventListener('click', () => { closeChatsOverlay(); startNewChat(); });
 chatsSearch?.addEventListener('input', () => { renderChatsList(chatsSearch.value, { useCache: true }); });
+
+// First-run screen controls.
+document.getElementById('obCopy')?.addEventListener('click', async () => {
+  const btn = document.getElementById('obCopy');
+  const ok = await copyText(INSTALL_CMDS[onboardOs === 'win' ? 'win' : 'unix']);
+  if (!btn) return;
+  if (!ok) {
+    // Clipboard refused; select the command so Ctrl/Cmd+C still works.
+    try { window.getSelection().selectAllChildren(document.getElementById('obCmd')); } catch {}
+  }
+  btn.textContent = ok ? 'copied' : 'select';
+  btn.classList.toggle('copied', ok);
+  setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1800);
+});
+document.querySelectorAll('#onboard .ob-os button').forEach((b) => {
+  b.addEventListener('click', () => { onboardOs = b.dataset.os; renderOnboard(); });
+});
+document.getElementById('obCheck')?.addEventListener('click', () => probeHost(true));
+// Coming back from the terminal is the moment the backend is most likely to
+// have just appeared; check right away instead of waiting for the next tick.
+document.addEventListener('visibilitychange', () => {
+  if (onboardMode && document.visibilityState === 'visible') probeHost(false);
+});
+window.addEventListener('focus', () => { if (onboardMode) probeHost(false); });
+
+trySuggestEl?.addEventListener('click', (e) => {
+  const q = e.target.closest?.('.try-q');
+  if (q) useSuggestion(q.textContent.trim());
+});
+
+// Host-update banner controls.
+document.getElementById('updCopy')?.addEventListener('click', async () => {
+  const b = document.getElementById('updBanner');
+  const t = document.getElementById('updBannerText');
+  const ok = await copyText(b?.dataset.cmd || '');
+  if (t) {
+    t.textContent = ok
+      ? `copied. paste it into ${b.dataset.where}; browy reconnects by itself`
+      : `couldn't copy. run: ${b?.dataset.cmd || 'the installer from browyhq.github.io/install'}`;
+  }
+});
+document.getElementById('updLater')?.addEventListener('click', async () => {
+  hideHostUpdateBanner();
+  try { await chrome.storage.local.set({ [HOST_UPDATE_SNOOZE_KEY]: Date.now() + 24 * 60 * 60 * 1000 }); } catch {}
+});
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && chatsOverlay.classList.contains('open')) {
     e.preventDefault(); closeChatsOverlay();
@@ -1592,7 +1977,10 @@ function toggleMinimize() { setMinimized(!minimized); }
 
 connect = (function (orig) { return orig; })(connect);
 (async function bootstrap() {
+  // Resolve the OS early so a first-run screen opens on the right tab.
+  detectOs();
   BROWY_SESSION_ID = await loadStoredSessionId();
+  firstSendDone = await loadFirstSendFlag();
   const savedHtml = await loadStoredChatHtml();
   if (savedHtml && savedHtml.trim() && savedHtml.indexOf('class="empty"') === -1) {
     msgs.innerHTML = savedHtml;
@@ -1608,7 +1996,7 @@ connect = (function (orig) { return orig; })(connect);
   // Start in the BOOTING state, not offline — connect() runs immediately and
   // the host is almost always either up or coming up. Starting in 'offline'
   // flashed "install the browy backend" at users who already have it.
-  try { setControlsState('booting'); } catch {}
+  try { setControlsState('booting'); updateTrySuggestions(); } catch {}
   connect();
 })();
 startIdleLoop();

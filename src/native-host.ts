@@ -71,7 +71,10 @@ import os from 'os';
 import { fileURLToPath } from 'url';
 import { execSync, exec } from 'child_process';
 
-const SERVER_VERSION = '0.3.0';
+// Injected from package.json by build.mjs. Every host up to 0.1.6 reported a
+// hard-coded '0.3.0' here, which matched no release and couldn't be compared.
+declare const __BROWY_VERSION__: string;
+const SERVER_VERSION = typeof __BROWY_VERSION__ === 'string' ? __BROWY_VERSION__ : '0.0.0-dev';
 
 // ── Logger to file (stdout is sacred for native messaging) ─────────────────
 const LOG_DIR = path.join(os.homedir(), '.browseragent');

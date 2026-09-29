@@ -11,12 +11,16 @@
 // connection — no manual keep-alive trick needed.
 
 const HOST_NAME = 'com.browy.host';
-const PROTOCOL = 1;
+// Must match PROTOCOL_VERSION in src/protocol.ts.
+const PROTOCOL = 2;
 
 /** chrome.runtime.Port to the native host. Lazily created on first need. */
 let nativePort = null;
 let nativeReady = false;
 let nativeServerVersion = null;
+/** Protocol the connected host reported in hello.ack. Clients compare it
+ *  against their own minimum to decide whether to ask for a host update. */
+let nativeProtocol = null;
 
 /** Map of internal port name → chrome.runtime.Port (the panel/devtools client). */
 const clients = new Map();
@@ -73,8 +77,9 @@ function ensureNativeHost() {
     if (msg.type === 'hello.ack') {
       nativeReady = true;
       nativeServerVersion = msg.serverVersion;
+      nativeProtocol = typeof msg.protocol === 'number' ? msg.protocol : 1;
       reconnectDelay = 1000; // reset backoff on successful handshake
-      broadcastToClients({ type: '__host_ready', serverVersion: msg.serverVersion });
+      broadcastToClients({ type: '__host_ready', serverVersion: msg.serverVersion, protocol: nativeProtocol });
       return;
     }
     broadcastToClients(msg);
@@ -262,7 +267,23 @@ chrome.runtime.onConnect.addListener((port) => {
 
     // Internal client → SW commands (not forwarded)
     if (msg.type === '__ping') {
-      try { port.postMessage({ type: '__pong', nativeReady, nativeServerVersion }); } catch {}
+      try { port.postMessage({ type: '__pong', nativeReady, nativeServerVersion, nativeProtocol }); } catch {}
+      return;
+    }
+    // "Is the backend there yet?" from the first-run screen. After a missing
+    // or stale verdict we deliberately stop reconnecting, so something has to
+    // ask again. Deliberately does NOT emit __host_pending: for a missing host
+    // that would flash the booting UI on every probe. The verdict arrives the
+    // normal way — __host_missing / __host_stale within milliseconds, or
+    // __host_ready once a real host finishes starting.
+    if (msg.type === '__retry_host') {
+      if (nativeReady) {
+        try {
+          port.postMessage({ type: '__host_ready', serverVersion: nativeServerVersion, protocol: nativeProtocol });
+        } catch {}
+        return;
+      }
+      ensureNativeHost();
       return;
     }
 
@@ -314,6 +335,7 @@ chrome.runtime.onConnect.addListener((port) => {
     port.postMessage({
       type: nativeReady ? '__host_ready' : '__host_pending',
       serverVersion: nativeServerVersion,
+      protocol: nativeProtocol,
     });
   } catch {}
 });

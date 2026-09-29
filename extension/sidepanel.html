@@ -747,6 +747,140 @@
     .chats-foot button:hover { border-color: var(--green); color: var(--green); }
     .chats-foot .spacer { flex: 1; }
     .chats-foot .hint { color: var(--ink-2); font-family: var(--mono); font-size: 10px; }
+
+    /* ── First-run screen: shown only while the backend is missing/stale ── */
+    .onboard {
+      position: absolute; inset: 0;
+      background: var(--solid);
+      z-index: 45;                /* under the chats overlay, over messages + input */
+      display: none;
+      overflow-y: auto;
+      -webkit-app-region: no-drag;
+      font-family: var(--mono);
+      color: var(--ink);
+    }
+    .onboard.open { display: block; }
+    .onboard::-webkit-scrollbar { width: 4px; }
+    .onboard::-webkit-scrollbar-thumb { background: rgba(74,222,128,0.25); }
+    .ob-body { padding: 18px 16px 20px; display: flex; flex-direction: column; gap: 14px; }
+    .ob-greet { color: var(--green); font-size: 15px; letter-spacing: 0.08em; }
+    .ob-tag { color: var(--ink-2); font-size: 11px; line-height: 1.5; margin-top: -8px; }
+    .ob-steps { list-style: none; display: flex; flex-direction: column; gap: 12px; }
+    .ob-steps li { display: flex; gap: 10px; align-items: flex-start; }
+    .ob-n {
+      flex: 0 0 20px; height: 20px;
+      display: flex; align-items: center; justify-content: center;
+      border: 1px solid var(--line-2); color: var(--ink-2);
+      font-size: 10px; font-weight: 700;
+    }
+    .ob-steps li.done .ob-n { border-color: var(--green); color: var(--green); }
+    .ob-steps li.cur  .ob-n { border-color: var(--lime); color: var(--bg); background: var(--lime); }
+    .ob-step { flex: 1; min-width: 0; font-size: 12px; line-height: 1.5; }
+    .ob-step b { font-weight: 600; color: var(--ink); }
+    .ob-steps li.done .ob-step b { color: var(--ink-2); font-weight: 500; }
+    .ob-step p { color: var(--ink-2); font-size: 11px; margin-top: 2px; }
+    .ob-os { display: flex; gap: 0; margin-top: 10px; }
+    .ob-os button {
+      background: transparent; color: var(--ink-2);
+      border: 1px solid var(--line-2); border-bottom: none;
+      font-family: var(--mono); font-size: 10px; letter-spacing: 0.05em;
+      padding: 4px 9px; cursor: pointer;
+    }
+    .ob-os button + button { border-left: none; }
+    .ob-os button[aria-selected="true"] { color: var(--green); background: var(--solid-2); }
+    .ob-cmd {
+      display: flex; align-items: stretch;
+      border: 1px solid var(--line-2); background: var(--solid-2);
+    }
+    .ob-cmd code {
+      flex: 1; min-width: 0;
+      padding: 8px 9px;
+      font-family: var(--mono); font-size: 11px; line-height: 1.45;
+      color: var(--lime);
+      word-break: break-all;
+      user-select: all;
+    }
+    .ob-cmd button {
+      flex: 0 0 auto;
+      background: transparent; color: var(--green);
+      border: none; border-left: 1px solid var(--line-2);
+      font-family: var(--mono); font-size: 11px; font-weight: 700;
+      letter-spacing: 0.05em; text-transform: uppercase;
+      padding: 0 12px; cursor: pointer;
+    }
+    .ob-cmd button:hover { background: rgba(74,222,128,0.10); }
+    .ob-cmd button.copied { color: var(--lime); }
+    .ob-where { margin-top: 6px !important; }
+    .ob-status {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 10px;
+      border: 1px dashed var(--line-2);
+      color: var(--ink-2); font-size: 11px; line-height: 1.45;
+    }
+    .ob-status .ob-dot {
+      flex: 0 0 7px; height: 7px; border-radius: 50%;
+      background: var(--ink-2);
+      animation: cbpulse 1.6s steps(2) infinite;
+    }
+    .onboard[data-phase="starting"] .ob-status { color: var(--green); border-color: rgba(74,222,128,0.35); }
+    .onboard[data-phase="starting"] .ob-dot { background: var(--green); animation-duration: 0.6s; }
+    .onboard[data-phase="crashed"] .ob-status { color: #facc15; border-color: rgba(250,204,21,0.35); }
+    .onboard[data-phase="crashed"] .ob-dot { background: #facc15; }
+    .ob-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 11px; }
+    .ob-actions button {
+      background: transparent; color: var(--ink);
+      border: 1px solid var(--line-2);
+      font-family: var(--mono); font-size: 11px; letter-spacing: 0.05em;
+      padding: 5px 10px; cursor: pointer;
+    }
+    .ob-actions button:hover { border-color: var(--green); color: var(--green); }
+    .ob-actions a { color: var(--ink-2); }
+    .ob-actions a:hover { color: var(--green); }
+    .onboard[data-os="cros"] .ob-os,
+    .onboard[data-os="cros"] .ob-cmd,
+    .onboard[data-os="cros"] .ob-where,
+    .onboard[data-os="cros"] .ob-status,
+    .onboard[data-os="cros"] #obCheck { display: none; }
+
+    /* ── "Try one of these" — first empty chat after install, until first send ── */
+    .try { margin-top: 18px; display: flex; flex-direction: column; align-items: stretch; gap: 6px; text-align: left; letter-spacing: 0; }
+    .try[hidden] { display: none; }
+    .try-h { color: var(--ink-2); font-size: 11px; opacity: 0.8; }
+    .try-q {
+      background: transparent;
+      border: 1px solid var(--line-2);
+      color: var(--ink);
+      font-family: var(--mono); font-size: 11.5px; line-height: 1.4;
+      text-align: left;
+      padding: 7px 10px;
+      cursor: pointer;
+    }
+    .try-q::before { content: '> '; color: var(--green); }
+    .try-q:hover { border-color: var(--green); background: rgba(74,222,128,0.06); }
+    .try-warn { color: #facc15; font-size: 10.5px; line-height: 1.45; }
+    .try-warn[hidden] { display: none; }
+
+    /* ── Host-update banner: host older than this extension expects ── */
+    .upd-banner {
+      flex: 0 0 auto;
+      display: none;
+      align-items: center; flex-wrap: wrap;
+      gap: 6px 8px;
+      padding: 6px 10px;
+      font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.04em;
+      border-bottom: 1px solid var(--line);
+      background: rgba(250, 204, 21, 0.10); color: #facc15;
+    }
+    .upd-banner.show { display: flex; }
+    .upd-banner .ub-actions { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+    .upd-banner button {
+      background: transparent; color: inherit;
+      border: 1px solid rgba(250, 204, 21, 0.45);
+      font-family: var(--mono); font-size: 10px; letter-spacing: 0.04em;
+      padding: 2px 7px; cursor: pointer;
+    }
+    .upd-banner button:hover { background: rgba(250, 204, 21, 0.14); }
+    .upd-banner .ub-later { border-color: transparent; text-decoration: underline; opacity: 0.8; }
   </style>
 </head>
 <body>
@@ -1085,12 +1219,29 @@
     <span id="connBannerAction"></span>
   </div>
 
+  <div class="upd-banner" id="updBanner" role="status" aria-live="polite"
+       title="Your installed backend is older than this extension, so newer features (like deleting chats) won't work. Re-running the installer updates it in place and keeps your chats.">
+    <span id="updBannerText">browy backend is out of date</span>
+    <span class="cb-spacer"></span>
+    <span class="ub-actions">
+      <button type="button" id="updCopy">copy update command</button>
+      <button type="button" class="ub-later" id="updLater">later</button>
+    </span>
+  </div>
+
   <div class="panel">
 
     <div class="msgs" id="msgs">
       <div class="empty" id="empty">
         <div class="greet">browy</div>
         <div class="hint">// type below</div>
+        <div class="try" id="trySuggest" hidden>
+          <div class="try-h">// try one of these</div>
+          <button type="button" class="try-q">summarize this page in 5 bullets</button>
+          <button type="button" class="try-q">find every button on this page with no aria-label and tell me what it says</button>
+          <button type="button" class="try-q">put every link on this page in a table: text and url</button>
+          <div class="try-warn" id="tryWarn" hidden>// open a regular web page first. browser pages like this one are off-limits to extensions</div>
+        </div>
       </div>
     </div>
 
@@ -1100,6 +1251,55 @@
         <textarea id="inp" rows="1" placeholder="ask browy…" autofocus></textarea>
       </div>
       <button class="send" id="goBtn" disabled>↵</button>
+    </div>
+
+    <!-- First-run screen. Covers messages + input while the backend is missing
+         or too old to trust this extension; gone for good once it connects. -->
+    <div class="onboard" id="onboard" aria-hidden="true" data-os="win" data-phase="waiting">
+      <div class="ob-body">
+        <div class="ob-greet">browy</div>
+        <div class="ob-tag">// the browser agent that runs on the AI subscription you already pay for</div>
+
+        <ol class="ob-steps">
+          <li class="done">
+            <span class="ob-n">✓</span>
+            <div class="ob-step"><b>extension installed</b></div>
+          </li>
+          <li class="cur">
+            <span class="ob-n">2</span>
+            <div class="ob-step">
+              <b id="obTitle">install the backend</b>
+              <p id="obWhy">the agent runs in a small program on this computer. this panel is its window.</p>
+              <div class="ob-os" role="tablist" aria-label="Operating system">
+                <button type="button" role="tab" data-os="win" aria-selected="true">windows</button>
+                <button type="button" role="tab" data-os="unix" aria-selected="false">macos · linux</button>
+              </div>
+              <div class="ob-cmd">
+                <code id="obCmd"></code>
+                <button type="button" id="obCopy" title="Copy the install command">copy</button>
+              </div>
+              <p class="ob-where" id="obWhere"></p>
+            </div>
+          </li>
+          <li>
+            <span class="ob-n">3</span>
+            <div class="ob-step">
+              <b>sign in to github copilot</b>
+              <p>you'll be asked on your first message. it's the subscription browy runs on.</p>
+            </div>
+          </li>
+        </ol>
+
+        <div class="ob-status" role="status" aria-live="polite">
+          <span class="ob-dot" aria-hidden="true"></span>
+          <span id="obStatus">waiting for the backend. this screen moves on by itself once it's installed.</span>
+        </div>
+
+        <div class="ob-actions">
+          <button type="button" id="obCheck">check again</button>
+          <a id="obGuide" href="https://browyhq.github.io/install/" target="_blank" rel="noopener noreferrer">full install guide →</a>
+        </div>
+      </div>
     </div>
 
     <!-- Past-chats overlay (slides in over .panel) -->
