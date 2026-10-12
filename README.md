@@ -57,7 +57,7 @@ Think Claude Code or Aider, but in your browser. An open-source alternative to B
 
 ### Step 2: install the native host
 
-**Windows** (bundles Node, ~80 MB):
+**Windows** (bundles Node and the Copilot CLI, ~140 MB):
 
 ```powershell
 irm https://github.com/BrowyHQ/browy/releases/latest/download/install.ps1 | iex

@@ -25,6 +25,7 @@ import os from 'os';
 import path from 'path';
 import { createRequire } from 'module';
 import { createInterface } from 'readline';
+import { copilotClientOptions } from './agent/copilot-cli.js';
 
 const require = createRequire(import.meta.url);
 const { CopilotClient, approveAll } = require('@github/copilot-sdk');
@@ -91,7 +92,7 @@ export async function runHeadless(argv: string[]): Promise<void> {
   const fs = await import('fs');
   fs.mkdirSync(BROWY_CLI_WORKDIR_DEFAULT, { recursive: true });
 
-  const client = new CopilotClient();
+  const client = new CopilotClient(copilotClientOptions());
   await client.start();
 
   if (opts.listOnly) {
@@ -153,35 +154,35 @@ export async function runHeadless(argv: string[]): Promise<void> {
   });
 }
 
+// The SDK session has no streaming sendMessage(). Like the browser agent in
+// agent/loop.ts, subscribe with session.on(), send, and finish at session.idle.
 async function streamOnce(session: any, text: string): Promise<void> {
-  const stream = await session.sendMessage(text);
-  for await (const event of stream) {
-    if (!event || typeof event !== 'object') continue;
-    switch (event.type) {
-      case 'text_delta':
-      case 'text':
-      case 'response.output_text.delta':
-        if (typeof event.delta === 'string') process.stdout.write(event.delta);
-        else if (typeof event.text === 'string') process.stdout.write(event.text);
-        break;
-      case 'tool_call':
-      case 'tool_use': {
-        const name = event.name || event.tool || '?';
-        process.stderr.write(`\n\x1b[2m· ${name}\x1b[0m\n`);
-        break;
+  let streamed = false;
+  const done = new Promise<void>((resolve, reject) => {
+    const off = session.on((ev: { type: string; data?: any }) => {
+      switch (ev.type) {
+        case 'assistant.message_delta':
+          if (ev.data?.deltaContent) { process.stdout.write(ev.data.deltaContent); streamed = true; }
+          break;
+        case 'assistant.message':
+          // Some models send the whole message without deltas.
+          if (!streamed && ev.data?.content) process.stdout.write(ev.data.content);
+          streamed = false;
+          break;
+        case 'tool.execution_start':
+          process.stderr.write(`\n\x1b[2m· ${ev.data?.toolName || '?'}\x1b[0m\n`);
+          break;
+        case 'session.idle':
+          off(); resolve();
+          break;
+        case 'session.error':
+          off(); reject(new Error(ev.data?.message || 'session error'));
+          break;
       }
-      case 'tool_result': {
-        // Keep terminal output clean; tool results are large.
-        break;
-      }
-      case 'error':
-        process.stderr.write(`\n\x1b[31merror: ${event.message || JSON.stringify(event)}\x1b[0m\n`);
-        break;
-      default:
-        // Unknown event types are no-ops; the SDK's stream shape evolves.
-        break;
-    }
-  }
+    });
+  });
+  await session.send({ prompt: text });
+  await done;
   process.stdout.write('\n');
 }
 

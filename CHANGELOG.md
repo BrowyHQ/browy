@@ -2,6 +2,27 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [0.1.8]: the current Copilot CLI, and Browy's own instructions reach the model
+*Released 2026-10-12*
+
+Browy 0.1.7 shipped Copilot CLI 1.0.36, and the current release is 1.0.95. Updating it turned up a bigger problem: the instructions that tell the model it is Browy, how to use the indexed tools, and when to hand a sign-in back to you were never being sent.
+
+### Changed
+
+- **Copilot CLI 1.0.95.** The CLI is now a native binary in a per-platform package, `@github/copilot-<platform>-<arch>`, instead of a Node script. The Copilot SDK Browy uses can't find it on its own, so the backend locates it and passes it in. On Windows the CLI starts in 0.6 s instead of 5.8 s, measured with the same SDK calls Browy makes. The cost is size: the binary is about 150 MB unpacked, so the Windows download grows from about 80 MB to about 140 MB.
+- **"Fill this form" fills it and stops.** Browy now submits only when you ask it to submit, send, post or buy. Otherwise it leaves the form filled and tells you it's ready for you to check. Its instructions used to say fill, then submit, though they weren't reaching the model (see below).
+
+### Fixed
+
+- **Browy's system prompt was never sent.** The SDK builds a session from `systemMessage` and ignores `systemPrompt`, which is the name Browy used, so chats ran on the CLI's default instructions plus Browy's tool list. Asked its name, Browy now answers "I'm Browy".
+- **`browy run` works.** It called a `sendMessage()` method the SDK doesn't have and crashed on the first prompt with `t.sendMessage is not a function`. It now streams replies the way the side panel does.
+- **The host log records what the agent does.** The backend's console hook called `require()` inside an ES module bundle, which throws, so the agent's progress lines never reached `~/.browseragent/native-host.log`. They do now, including which Copilot CLI started.
+- **Every platform's package carries its own CLI.** CI builds the Intel Mac and Linux arm64 packages on runners of the other architecture, where npm installs the runner's binary. Staging now removes it and fetches the target's own package.
+
+### Upgrading
+
+Run the install command again to update the backend. The extension's version moves to 0.1.8 to stay in step; its code is unchanged.
+
 ## [0.1.7]: first-run setup, and the extension knows when your backend is too old
 *Released 2026-09-29*
 

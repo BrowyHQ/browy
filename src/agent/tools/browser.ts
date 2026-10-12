@@ -547,7 +547,7 @@ register({
 register({
   def: {
     type: 'function', name: 'submit_form',
-    description: `Submit the form containing the element at index [N] (or the page's primary form if no index). Prefers clicking the form's submit button (so JS handlers run); falls back to form.requestSubmit() / form.submit(). Returns urlChanged so you can verify navigation occurred.`,
+    description: `Submit the form containing the element at index [N] (or the page's primary form if no index). Only call this when the user asked you to submit, send, post or buy; otherwise leave the filled form for them to check. Prefers clicking the form's submit button (so JS handlers run); falls back to form.requestSubmit() / form.submit(). Returns urlChanged so you can verify navigation occurred.`,
     parameters: { type: 'object', properties: {
       index: { type: 'number', description: 'Optional: any [N] inside the form to submit.' },
     }, required: [] },

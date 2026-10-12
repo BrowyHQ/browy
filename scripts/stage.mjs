@@ -19,6 +19,7 @@
  *   node scripts/stage.mjs --target=linux-x64
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execSync } from 'node:child_process';
@@ -115,33 +116,57 @@ if (exists(copilotPrebuilds) && prebuildName) {
   }
 }
 
-// 7.1 Drop the @github/copilot-<platform>-<arch> packages entirely (~106MB).
+// 7.1 Keep exactly one Copilot CLI: the TARGET's native binary.
 //
-// These are standalone prebuilt CLI binaries selected by @github/copilot's
-// `bin` shim (npm-loader.js) when a HUMAN runs `copilot` from a shell. Browy
-// never takes that path: the Copilot SDK resolves the CLI via
-// getBundledCliPath() -> "@github/copilot/index.js" and spawns it with
-// `node index.js` (see @github/copilot-sdk/dist/client.js), which loads the
-// native addons from prebuilds/ that we trim above.
+// @github/copilot used to be the CLI itself (index.js, loaded by the SDK with
+// node). Since it moved to native binaries it is only a loader, npm-loader.js,
+// and the CLI is @github/copilot-<platform>-<arch>/copilot[.exe], which
+// src/agent/copilot-cli.ts finds and hands to the SDK as `cliPath`.
 //
-// Worse, npm resolves these by the arch of the machine running `npm ci`, and
+// npm installs that package by the arch of the machine running `npm ci`, and
 // release.yml stages darwin-x64 on an arm64 runner and linux-arm64 on an x64
-// runner. So the Intel-Mac tarball was shipping a 106MB *arm64* binary that
-// nothing would ever execute. Verified against the released v0.1.5 artifact:
-// Browy-0.1.5-darwin-x64.tar.gz contained @github/copilot-darwin-arm64/.
-//
-// Removing them cuts each platform download by roughly 75%.
+// runner. (That is how Browy-0.1.5-darwin-x64.tar.gz came to contain
+// @github/copilot-darwin-arm64.) So drop whatever npm picked and fetch the
+// target's own package with `npm pack`, which ignores os and cpu.
 const githubScope = path.join(stage, 'node_modules', '@github');
-if (exists(githubScope)) {
-  for (const dir of fs.readdirSync(githubScope)) {
-    if (/^copilot-(win32|darwin|linux)-(x64|arm64)$/.test(dir)) {
-      const full = path.join(githubScope, dir);
-      const mb = dirSizeMB(full);
-      rm(full);
-      log(`trimmed node_modules/@github/${dir} (${mb.toFixed(1)}MB — never executed; SDK spawns copilot/index.js)`);
-    }
+const cliPlatform = {
+  'win-x64': 'win32-x64',
+  'darwin-x64': 'darwin-x64',
+  'darwin-arm64': 'darwin-arm64',
+  'linux-x64': 'linux-x64',
+  'linux-arm64': 'linux-arm64',
+}[target];
+const cliPkgJson = path.join(githubScope, 'copilot', 'package.json');
+if (!cliPlatform || !exists(cliPkgJson)) {
+  throw new Error(`[stage:${target}] cannot place the Copilot CLI: unknown target or @github/copilot not installed`);
+}
+const cliVersion = JSON.parse(fs.readFileSync(cliPkgJson, 'utf8')).version;
+for (const dir of fs.readdirSync(githubScope)) {
+  if (/^copilot-(win32|darwin|linux|linuxmusl)-(x64|arm64)$/.test(dir) && dir !== `copilot-${cliPlatform}`) {
+    const full = path.join(githubScope, dir);
+    const mb = dirSizeMB(full);
+    rm(full);
+    log(`removed node_modules/@github/${dir} (${mb.toFixed(1)}MB, not this target)`);
   }
 }
+const cliDir = path.join(githubScope, `copilot-${cliPlatform}`);
+const cliBin = path.join(cliDir, isWin ? 'copilot.exe' : 'copilot');
+const cliDirVersion = exists(path.join(cliDir, 'package.json'))
+  ? JSON.parse(fs.readFileSync(path.join(cliDir, 'package.json'), 'utf8')).version
+  : null;
+if (cliDirVersion !== cliVersion || !exists(cliBin)) {
+  rm(cliDir);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'browy-cli-'));
+  const tgz = execSync(`npm pack @github/copilot-${cliPlatform}@${cliVersion} --pack-destination "${tmp}" --silent`, { cwd: tmp })
+    .toString().trim().split(/\r?\n/).pop();
+  fs.mkdirSync(cliDir, { recursive: true });
+  execSync(`tar -xzf "${path.join(tmp, tgz)}" -C "${cliDir}" --strip-components=1`);
+  rm(tmp);
+  log(`fetched @github/copilot-${cliPlatform}@${cliVersion} for this target`);
+}
+if (!exists(cliBin)) throw new Error(`[stage:${target}] Copilot CLI binary missing: ${cliBin}`);
+if (!isWin) fs.chmodSync(cliBin, 0o755);
+log(`Copilot CLI ${cliVersion}: @github/copilot-${cliPlatform} (${dirSizeMB(cliDir).toFixed(1)}MB)`);
 
 // 7.5 Bundle the browser extension at a stable path next to the host so the
 // installer can lay it down somewhere the user can `Load unpacked` from

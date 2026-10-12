@@ -5,6 +5,7 @@ import { chromium, type Browser, type CDPSession, type Page } from 'playwright-c
 import os from 'os';
 import path from 'path';
 import { getForegroundInfo, brandFromProcessName, stripBrowserSuffix, shutdownForeground } from './foreground.js';
+import { copilotClientOptions } from './copilot-cli.js';
 
 // Copilot SDK is CJS — use require
 import { createRequire } from 'module';
@@ -150,7 +151,7 @@ const SYSTEM_PROMPT = `You are Browy — a browser-automation copilot that lives
 2. **Read the <browser_context> before acting.** Stats hint when a page is skeletony (wait/scroll first). The snapshot already lists what's clickable — don't speculate.
 3. **Refresh after mutation.** After navigate, after a click that loads new content, after expanding a menu — call \`inspect_page\`. Don't act on stale indices.
 4. **Two-step combobox rule.** Custom dropdowns (not native <select>) need a click-to-open turn, then an inspect turn to see the options, then a click-option turn. Don't try to "type and pick" in one shot.
-5. **Forms in three steps.** For any non-trivial form: \`extract_form\` → \`fill_form\` (one bulk call) → \`submit_form\`. Don't fill fields one tool call at a time. Don't submit before filling all required fields.
+5. **Forms: fill in bulk, submit only when asked.** For any non-trivial form: \`extract_form\` → \`fill_form\` (one bulk call). Don't fill fields one tool call at a time. Call \`submit_form\`, or click a submit, send, post, pay or buy button, only when the user asked you to submit, send, post or buy. Otherwise stop with the form filled and tell the user it is ready for them to check and submit. Never submit before filling all required fields.
 6. **Page-changing actions LAST in a batch.** If you must do multiple actions in one model turn, save the action that mutates the URL/page (form submit, navigate, link click) for last so earlier actions execute against the page you inspected.
 7. **Verify after acting.** Each indexed action returns urlChanged / titleChanged signals — if a click should have navigated and didn't, treat as failure. Inspect, don't blindly retry.
 8. **Loop breaker.** If you've taken 3 steps on the same URL with no progress, OR repeated the same failed action twice — STOP, switch strategy (different element, different URL, evaluate_js, ask the user).
@@ -458,7 +459,9 @@ export class Agent {
     // Ensure our isolated workdir exists so workingDirectory passed to
     // createSession is valid on the spawned `copilot` subprocess.
     try { (await import('fs')).mkdirSync(BROWSERAGENT_WORKDIR, { recursive: true }); } catch {}
-    this.copilotClient = new CopilotClient();
+    const cliOptions = copilotClientOptions();
+    console.log(`  Copilot CLI: ${cliOptions.cliPath || '(SDK default lookup)'}`);
+    this.copilotClient = new CopilotClient(cliOptions);
     await this.copilotClient.start();
     // Sweep stale BrowserAgent sessions left over from previous runs
     // (crashes, kill -9, etc.) so they don't accumulate on disk.
@@ -786,7 +789,10 @@ export class Agent {
       // Identity so we can never collide with the user's `copilot` CLI sessions
       clientName: BROWSERAGENT_CLIENT_NAME,
       workingDirectory: BROWSERAGENT_WORKDIR,
-      systemPrompt: SYSTEM_PROMPT,
+      // `systemMessage`, not `systemPrompt`: the SDK builds session.create
+      // from named fields and silently dropped the old key, so until 0.1.8
+      // this prompt never reached the model.
+      systemMessage: { content: SYSTEM_PROMPT },
       model: this.config.model,
       tools: filteredTools,
       availableTools: allowedToolNames,

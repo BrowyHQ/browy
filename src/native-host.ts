@@ -16,18 +16,22 @@
 // progress logs, etc.) we redirect every console.* method to stderr BEFORE
 // importing anything else. The NativeMessagingTransport writes framed bytes
 // directly via `process.stdout.write(buffer)`, which still works.
+import { createRequire } from 'module';
 {
-  // Hook console.* into a per-day debug log so the agent's progress
-  // messages (createSession, listChats, copilot SDK init, …) survive.
+  // Hook console.* into the host log so the agent's progress messages
+  // (createSession, listChats, copilot SDK init, …) survive.
   // We can't reference logStream here because this runs before fs imports
   // resolve, so we open a second stream lazily on first use.
   let consoleStream: any = null;
   const ensureStream = () => {
     if (consoleStream) return consoleStream;
     try {
-      const fs2 = require('fs');
-      const os2 = require('os');
-      const path2 = require('path');
+      // Not bare require(): this file ships as an ESM bundle, where esbuild's
+      // require shim throws, and until 0.1.8 every console line was dropped.
+      const req = createRequire(import.meta.url);
+      const fs2 = req('fs');
+      const os2 = req('os');
+      const path2 = req('path');
       const dir = path2.join(os2.homedir(), '.browseragent');
       try { fs2.mkdirSync(dir, { recursive: true }); } catch {}
       const logPath = path2.join(dir, 'native-host.log');
@@ -68,8 +72,8 @@ import { NativeMessagingTransport } from './transports/native-messaging.js';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
-import { fileURLToPath } from 'url';
 import { execSync, exec } from 'child_process';
+import { resolveCopilotCli } from './agent/copilot-cli.js';
 
 // Injected from package.json by build.mjs. Every host up to 0.1.6 reported a
 // hard-coded '0.3.0' here, which matched no release and couldn't be compared.
@@ -134,43 +138,28 @@ function invalidateAuthProbeCache(): void {
   authProbeCache = null;
 }
 
-/** Locate the Copilot CLI entry point that actually ships with Browy.
+/** Argv that starts the bundled Copilot CLI in a terminal, found by
+ *  resolveCopilotCli() (agent/copilot-cli.ts). Current CLIs are a native
+ *  binary and run as-is; the old Node-script CLI needs node in front.
  *
- *  COPILOT_CLI_PATH / BROWY_NODE_PATH are read here but NOTHING in the repo
- *  ever set them, so every platform silently fell through to bare `copilot`
- *  on PATH. On a clean machine that binary does not exist — the bundled one
- *  lives under our own node_modules and is never linked into the user's
- *  shell — so clicking "Sign in to GitHub Copilot" opened a terminal that
- *  printed `command not found: copilot`. We now resolve the bundled entry
- *  point relative to this file and only fall back to PATH as a last resort.
- */
-function resolveCopilotCli(): string | undefined {
-  const explicit = process.env.COPILOT_CLI_PATH;
-  if (explicit && fs.existsSync(explicit)) return explicit;
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    // Staged layout: ~/.browy/app/dist/native-host.js → ~/.browy/app/node_modules
-    path.join(here, '..', 'node_modules', '@github', 'copilot', 'index.js'),
-    // Dev layout: <repo>/dist/native-host.js → <repo>/node_modules
-    path.join(here, '..', '..', 'node_modules', '@github', 'copilot', 'index.js'),
-  ];
-  for (const c of candidates) {
-    try { if (fs.existsSync(c)) return c; } catch { /* keep trying */ }
-  }
-  return undefined;
+ *  Resolving the bundled CLI matters: an earlier version relied on
+ *  COPILOT_CLI_PATH, which nothing set, so every platform fell through to bare
+ *  `copilot` on PATH. A clean machine has none, and "Sign in to GitHub
+ *  Copilot" opened a terminal saying `command not found`. PATH stays as the
+ *  last resort only. */
+function copilotLaunchArgs(cli: string): string[] {
+  return cli.endsWith('.js') ? [process.env.BROWY_NODE_PATH || process.execPath, cli] : [cli];
 }
 
 function openCopilotSignInTerminal(): boolean {
   const copilotCli = resolveCopilotCli();
-  const nodeBin = process.env.BROWY_NODE_PATH || process.execPath;
   invalidateAuthProbeCache();
-  log('sign-in: copilotCli=', copilotCli || '(not found — falling back to PATH)', 'node=', nodeBin);
+  log('sign-in: copilotCli=', copilotCli || '(not found — falling back to PATH)');
   try {
     if (process.platform === 'win32') {
-      // If we know an exact CLI path use it; otherwise just invoke `copilot`
-      // from PATH (works when the user has @github/copilot installed globally).
+      // cmd /k strips one outer pair of quotes, hence ""a" "b"".
       const cmd = copilotCli
-        ? `start "Browy — Copilot Sign-In" cmd /k ""${nodeBin}" "${copilotCli}""`
+        ? `start "Browy — Copilot Sign-In" cmd /k "${copilotLaunchArgs(copilotCli).map((a) => `"${a}"`).join(' ')}"`
         : `start "Browy — Copilot Sign-In" cmd /k "copilot"`;
       log('opening sign-in terminal:', cmd);
       exec(cmd, { shell: 'cmd.exe' }, (err: unknown) => {
@@ -178,11 +167,11 @@ function openCopilotSignInTerminal(): boolean {
       });
       return true;
     }
+    const target = copilotCli ? copilotLaunchArgs(copilotCli).map(shQuote).join(' ') : 'copilot';
     if (process.platform === 'darwin') {
       // Terminal's `do script` takes a shell command as an AppleScript string,
       // so inner double quotes must be escaped for AppleScript and the whole
       // -e argument single-quoted for the shell.
-      const target = copilotCli ? `${shQuote(nodeBin)} ${shQuote(copilotCli)}` : 'copilot';
       const apple = `tell application "Terminal"
         activate
         do script ${jsonForAppleScript(target)}
@@ -192,7 +181,6 @@ function openCopilotSignInTerminal(): boolean {
       });
       return true;
     }
-    const target = copilotCli ? `${shQuote(nodeBin)} ${shQuote(copilotCli)}` : 'copilot';
     exec(`x-terminal-emulator -e ${target} || gnome-terminal -- ${target} || xterm -e ${target}`, () => {});
     return true;
   } catch (e) {
