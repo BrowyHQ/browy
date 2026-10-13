@@ -7,6 +7,8 @@ The Chromium extension surface: what loads inside your browser. There are **two 
 
 Both share session state, model selection, and chat history.
 
+[Watch Browy fill a 26-field form from the paper in another tab](https://youtu.be/bnellxgwJwY) (65 seconds, real time).
+
 ---
 
 ## Installation
