@@ -2,6 +2,17 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [0.1.10]: `run_script` is off until you switch it on
+*Released 2026-10-13*
+
+### Security
+
+- **`run_script` is opt-in.** It runs Node.js on your computer with your user's privileges, which means files, the network and the shell, but it was a browser tool that was on by default, and Settings described it as running a script in the page. Any page Browy reads can carry text aimed at the model, and the Copilot CLI's own tools that reach your machine, like `bash`, have always stayed off until you switch them on. `run_script` now works the same way: it's listed with them under Settings, Tools, host, and it stays off until you turn it on.
+
+### Upgrading
+
+Run the install command again to update the backend; that's where the change takes effect, so `run_script` is off from then on. The 0.1.10 extension adds its switch under host tools. Until your browser has it, the old switch under DevTools no longer turns `run_script` on.
+
 ## [0.1.9]: a new chat no longer inherits the last chat's actions
 *Released 2026-10-13*
 

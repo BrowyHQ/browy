@@ -238,10 +238,10 @@ chrome.runtime.onConnect.addListener((port) => {
       if (msg.disabledTools === undefined) {
         chrome.storage.local.get(['settings']).then(({ settings }) => {
           const toolsMap = settings && settings.tools;
-          // Names used for the host opt-in (must match HOST_TOOL_ALLOWLIST in
-          // src/agent/loop.ts and the optIn entries in options.js).
+          // Names used for the opt-in tools (must match OPT_IN_TOOLS in
+          // src/agent/tool-policy.ts and the optIn entries in options.js).
           const HOST_TOOL_NAMES = new Set([
-            'read_file', 'write_file', 'bash', 'grep', 'glob', 'web_fetch',
+            'run_script', 'read_file', 'write_file', 'bash', 'grep', 'glob', 'web_fetch',
           ]);
           let disabled = [];
           let enabledHost = [];

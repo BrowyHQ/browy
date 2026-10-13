@@ -7,6 +7,7 @@ import path from 'path';
 import { getForegroundInfo, brandFromProcessName, stripBrowserSuffix, shutdownForeground } from './foreground.js';
 import { copilotClientOptions } from './copilot-cli.js';
 import { RecentActions } from './recent-actions.js';
+import { OPT_IN_TOOLS, toolPolicy } from './tool-policy.js';
 
 // Copilot SDK is CJS — use require
 import { createRequire } from 'module';
@@ -131,7 +132,7 @@ const SYSTEM_PROMPT = `You are Browy — a browser-automation copilot that lives
 
 **Power tools:**
 - \`evaluate_js\` — arbitrary JS in the page (top-level await ok). Use when indexed tools can't express what you need: shadow-DOM walks, custom waits, structured extraction, framework-specific APIs.
-- \`run_script\` — Node.js on the user's machine for file I/O / shell.
+- \`run_script\` — Node.js on the user's machine for file I/O / shell. Off unless the user switched it on in Settings; if it isn't among your tools, it's off.
 
 **DevTools:** \`get_console_logs\`, \`get_network_requests\`, \`get_cookies\`, \`get_storage\`, \`replay_request\`.
 
@@ -190,17 +191,6 @@ interface BrowserConnection {
   browser: Browser;
 }
 
-/** Host (Copilot SDK) tools the user is allowed to opt into via the
- *  extension Settings page. These reach the host machine's filesystem and
- *  shell, so they're OFF by default and added to the strict `availableTools`
- *  allowlist only when the user explicitly enables them. The names mirror
- *  the SDK's built-in tool surface — we don't reimplement them, we just
- *  stop suppressing them from the model. Anything not in this set is
- *  ignored even if requested, so a compromised renderer can't escalate. */
-const HOST_TOOL_ALLOWLIST = new Set<string>([
-  'read_file', 'write_file', 'bash', 'grep', 'glob', 'web_fetch',
-]);
-
 export class Agent {
   private config: Config;
   /** All currently-connected browsers (Brave, Edge, Chrome, ...). */
@@ -237,11 +227,10 @@ export class Agent {
    *  registry. ensureSession() removes these from the SDK's allowlist before
    *  creating/resuming a session. Empty set = no overrides (all built-ins). */
   private disabledTools: Set<string> = new Set();
-  /** Names of Copilot SDK host tools the user has explicitly opted into via
-   *  the extension Settings (read_file, write_file, bash, grep, glob,
-   *  web_fetch). Default empty — these are off unless the user enables them.
-   *  Names listed here are added to `availableTools` so the SDK's built-in
-   *  implementations become reachable from the model. */
+  /** Names of opt-in tools the user has switched on in the extension
+   *  Settings: the Copilot SDK's host tools (read_file, write_file, bash,
+   *  grep, glob, web_fetch) and Browy's run_script. Default empty, so all of
+   *  them stay off (agent/tool-policy.ts). */
   private enabledHostTools: Set<string> = new Set();
   private onActivity: ActivityCallback = () => {};
   private currentTabInfo: { url: string; title: string; brand: string; tabCount: number } = {
@@ -722,12 +711,12 @@ export class Agent {
     this.disabledTools = new Set(names);
   }
 
-  /** Mirror of setDisabledTools for the host-tool opt-in. The whitelist of
-   *  acceptable names lives in HOST_TOOL_ALLOWLIST below — anything else is
-   *  ignored so a compromised extension can't quietly enable arbitrary SDK
-   *  capabilities. Empty list (default) keeps all host tools blocked. */
+  /** Mirror of setDisabledTools for the opt-in tools. The acceptable names
+   *  are OPT_IN_TOOLS in agent/tool-policy.ts; anything else is ignored so a
+   *  compromised extension can't quietly enable arbitrary capabilities. Empty
+   *  list (default) keeps every opt-in tool off. */
   setEnabledHostTools(names: readonly string[]): void {
-    const safe = (names || []).filter((n) => HOST_TOOL_ALLOWLIST.has(n));
+    const safe = (names || []).filter((n) => OPT_IN_TOOLS.has(n));
     this.enabledHostTools = new Set(safe);
   }
 
@@ -747,22 +736,14 @@ export class Agent {
     // `includeDefaultTools: false` flag was *not* a real SDK option and was
     // being silently ignored.)
     //
-    // PER-USER OVERLAY: when the user has disabled tools via the extension
-    // Settings page (forwarded on session.start), we further trim the
-    // allowlist. Disabled names are also stripped from the `tools` array we
-    // hand the SDK so even the function definitions don't leak into the
-    // model's prompt.
-    const blocked = this.disabledTools;
-    const filteredTools = blocked.size ? tools.filter((t) => !blocked.has(t.name)) : tools;
-    const allowedToolNames = filteredTools.map((t) => t.name);
-    // Host-tool opt-in: extend the strict allowlist with SDK tools the user
-    // enabled in Settings. We do NOT add their definitions to `tools` — the
-    // SDK ships its own implementations; we just stop suppressing them.
-    if (this.enabledHostTools.size) {
-      for (const name of this.enabledHostTools) {
-        if (!allowedToolNames.includes(name)) allowedToolNames.push(name);
-      }
-    }
+    // PER-USER OVERLAY: the extension Settings page (forwarded on
+    // session.start) can switch browser tools off and opt-in tools on.
+    // agent/tool-policy.ts applies both: a disabled tool is dropped from the
+    // definitions we hand the SDK as well as the allowlist, so it never
+    // reaches the model's prompt, and tools that act on the machine (the
+    // SDK's host tools and Browy's run_script) stay off until switched on.
+    const { tools: filteredTools, allow: allowedToolNames } =
+      toolPolicy(tools, this.disabledTools, this.enabledHostTools);
 
     // Try to resume an existing on-disk session for this Browy id. This is
     // what makes "reload the side panel and pick up where I left off" work.

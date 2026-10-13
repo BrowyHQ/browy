@@ -84,7 +84,6 @@ const TOOL_REGISTRY = [
 
   { cat: 'devtools', name: 'screenshot',          desc: 'PNG of the viewport (saved to disk)' },
   { cat: 'devtools', name: 'evaluate_js',         desc: 'run arbitrary JS in the page (powerful — scripts run with full DOM access)' },
-  { cat: 'devtools', name: 'run_script',          desc: 'fetch + execute a script in the page' },
   { cat: 'devtools', name: 'get_console_logs',    desc: 'read recent console.* output' },
   { cat: 'devtools', name: 'get_network_requests', desc: 'recent network activity (Network panel-style)' },
   { cat: 'devtools', name: 'get_cookies',         desc: 'cookies for the current origin' },
@@ -92,11 +91,12 @@ const TOOL_REGISTRY = [
   { cat: 'devtools', name: 'upload_file',         desc: 'upload a file via picker' },
 
   // ── Host tools (opt-in, OFF by default) ───────────────────────────────
-  // These come from the Copilot SDK and reach the user's machine, not the
-  // browser tab. We hide them behind explicit opt-in because a prompt
-  // injection on a visited page could otherwise read ~/.ssh, run arbitrary
-  // shell, or fetch from internal URLs. Names are validated against
-  // HOST_TOOL_ALLOWLIST in src/agent/loop.ts.
+  // These reach the user's machine, not the browser tab. Most come from the
+  // Copilot SDK; run_script is Browy's own. We hide them behind explicit
+  // opt-in because a prompt injection on a visited page could otherwise read
+  // ~/.ssh, run arbitrary shell, or fetch from internal URLs. Names are
+  // validated against OPT_IN_TOOLS in src/agent/tool-policy.ts.
+  { cat: 'host', optIn: true, name: 'run_script', desc: 'run Node.js on your machine: files, network, shell (full user privileges)' },
   { cat: 'host', optIn: true, name: 'read_file',  desc: 'read any file on your machine (the agent runs as your user)' },
   { cat: 'host', optIn: true, name: 'write_file', desc: 'create or overwrite files on your machine' },
   { cat: 'host', optIn: true, name: 'bash',       desc: 'run arbitrary shell commands (full user privileges)' },

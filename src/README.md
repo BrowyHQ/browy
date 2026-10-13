@@ -97,7 +97,7 @@ Every tool returns JSON. Some return signals (`urlChanged`, `titleChanged`) that
 
 ### Power
 - `evaluate_js` — arbitrary JS in the page (top-level await OK)
-- `run_script` — Node.js on the user's machine (file I/O, shell)
+- `run_script` — Node.js on the user's machine (file I/O, shell). Opt-in: off until the user switches it on in Settings
 
 ### DevTools
 - `get_console_logs`, `get_network_requests`, `get_cookies`, `get_storage`, `replay_request`
