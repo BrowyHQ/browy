@@ -44,13 +44,13 @@
 ## Browy 是什么
 
 Browy 是一个浏览器 AI 智能体。你把它装成一个 Chromium 扩展；它会在浏览器里增加两个 UI 表面（侧边栏对话和 DevTools 面板 CLI），两边都通过一个跑在你机器上的小型 Node 原生消息主机和模型通信。主机包装了
-[GitHub Copilot SDK](https://www.npmjs.com/package/@github/copilot-sdk)，所以每一次模型调用都走你已有的 Copilot 订阅，不需要额外的 API key。
+[GitHub Copilot SDK](https://www.npmjs.com/package/@github/copilot-sdk)，所以每一次模型调用都走你已有的 Copilot 订阅。
 
 智能体通过 Chrome DevTools Protocol（用 `chrome.debugger`）驱动当前激活的标签页。它从可访问性树（屏幕阅读器读的同一棵树）上读取页面，按索引点击和输入，捕获网络与控制台事件，并在结构化工具不够用时执行 JavaScript。
 
-**Browy 是给单个人类操作员用的生产力工具，不是用来在别人服务上跑无人值守自动化的工具。** 你指向一个标签页；它读取并对那个标签页采取动作；你在对话里实时看到每一步动作。回路里没有 Browy 的服务器，也没有别人可以靠跟它说话来淹没的收件箱。
+**Browy 是给单个人类操作员用的生产力工具，不是用来在别人服务上跑无人值守自动化的工具。** 你指向一个标签页；它读取并对那个标签页采取动作；你在对话里实时看到每一步动作。它运行在你的机器上、你自己的浏览器里，每个任务都从你的对话开始。
 
-可以理解为浏览器里的 Claude Code 或 Aider。Browser-Use 和 Skyvern 的开源替代品。
+可以理解为浏览器里的 Claude Code 或 Aider。Browser Use 和 Skyvern 的开源替代品；它和这两个以及 Nanobrowser 等工具的对比见[对比页](https://browyhq.github.io/zh-cn/compare/)。
 
 ---
 
@@ -141,24 +141,23 @@ Browy 处理得很好的真实任务。每一项都链接到完整对话记录�
 - **作用在你真实的浏览器配置上。** 不是无头傀儡。你的 cookie、扩展、密码管理器、登录态都还在。多数"先去 X 登录一下"的步骤直接消失。
 - **基于索引的可访问性树快照。** 每一回合，Browy 给模型一份编号好的可见交互元素列表（`[12]<button>Submit</button>`）。智能体按索引点击。没有脆弱的 CSS 选择器，没有 XPath 猜测。
 - **懂 DevTools。** 网络请求、控制台日志、cookie、storage、`evaluate_js` 都是一等工具。调试你正在做的应用比操作别人的应用更有价值。
-- **自带模型。** 你的 Copilot 订阅暴露的任何前沿模型都能选（Claude、GPT、Gemini、Llama、Codex）。在 DevTools CLI 里用 `/model` 切换，或者在设置里选。
-- **一个订阅，不会有意外账单。** Browy 建在 GitHub Copilot SDK 之上。Browy 这一层没有自己的计量表。Copilot 收你多少，Browy 就收你多少。
+- **自带模型。** 你的 Copilot 套餐提供的前沿模型都能选（Claude、GPT、Gemini 等）。在 DevTools CLI 里用 `/model` 切换，或者在设置里选。
+- **一个订阅。** Browy 建在 GitHub Copilot SDK 之上，所以它跑在你已有的 Copilot 套餐上，Copilot Free 也可以。它的每次提问和你在编辑器或终端里用 Copilot 一样，计入你的套餐用量。
 - **开源，Apache-2.0。** 审计主机。审计扩展。固定一个已知良好的构建。智能体循环就在一个文件里（[`src/agent/loop.ts`](src/agent/loop.ts)），工具注册表在另一个文件里（[`src/agent/tools/browser.ts`](src/agent/tools/browser.ts)）。
 
 ---
 
 ## Browy 与同类项目对比
 
-| | **Browy** | [Browser-Use](https://github.com/browser-use/browser-use) | [Skyvern](https://github.com/Skyvern-AI/skyvern) | [Aider](https://github.com/Aider-AI/aider) |
+| | **Browy** | [Browser Use](https://github.com/browser-use/browser-use) | [Skyvern](https://github.com/Skyvern-AI/skyvern) | [Nanobrowser](https://github.com/nanobrowser/nanobrowser) |
 |---|---|---|---|---|
-| 开源 | ✅ Apache-2.0 | ✅ MIT | ✅ AGPL | ✅ Apache-2.0 |
-| 本地运行 | ✅ | ✅（Python） | ❌ 云端 | ✅ |
-| 作用在你真实的浏览器配置 | ✅ | ❌ 全新沙箱 | ❌ 云端 | 不适用（终端） |
-| 浏览器扩展 UI | ✅ 侧边栏 + DevTools | ❌ | ❌ | ❌ |
-| 原生 DevTools 面板 | ✅ | ❌ | ❌ | ❌ |
-| 前沿模型选择 | ✅ Claude、GPT、Gemini、Llama（走 Copilot） | 按 token 的 API | 按任务 | 按 token 的 API |
-| 无头 CLI 模式 | ✅ `browy run` | ✅ | ✅ | ✅ |
-| 计费方式 | 你已有的 Copilot 订阅 | 按 token 的 API | 按任务 | 按 token 的 API |
+| 开源 | ✅ Apache-2.0 | ✅ MIT | ✅ AGPL-3.0 | ✅ Apache-2.0 |
+| 在哪工作 | 你自己的 Chrome、Edge 或 Brave 标签页，保持登录态 | 它启动的浏览器（可以复用你的 Chrome 配置），或 Browser Use Cloud | 它自己的浏览器，或通过远程调试连上你的 Chrome，或 Skyvern Cloud | 你的 Chrome 或 Edge |
+| 界面 | 侧边栏对话 + DevTools 面板 | Python 库、CLI、云 API | Web 应用、SDK、API | 侧边栏对话 |
+| Chrome DevTools 里的面板 | ✅ | ❌ | ❌ | ❌ |
+| 模型 | 你的 GitHub Copilot 套餐：Claude、GPT、Gemini | 你自己的 API key，或 Browser Use 点数 | 你自己的 key，或 Skyvern Cloud 套餐 | 你自己的 API key，或通过 Ollama 用本地模型 |
+
+Stagehand、Claude in Chrome、ChatGPT 等更多工具见[完整对比](https://browyhq.github.io/zh-cn/compare/)，内容按各项目自己的文档核对过。
 
 ---
 
@@ -203,10 +202,10 @@ Browy 是 **v0.1.x**，早期版本。Chrome Web Store 商店页面对 Windows�
 Browy 放大一个人类操作员。它不取代操作员。
 
 - **你看见每一个动作。** 工具调用以行内卡片的形式在侧边栏里实时渲染。Browy 不会执行任何你看不到的工具。
-- **触碰主机的工具默认关闭。** Shell、文件系统和 `web_fetch` 需要在设置里显式打开，按工具粒度。
+- **触碰主机的工具默认关闭。** Shell、文件系统、`web_fetch` 和 `run_script` 需要在设置里显式打开，按工具粒度。
 - **没有后台活动。** 智能体只在你发消息时才行动。没有轮询、没有定时任务、没有屏幕外自动化。
-- **页面内容发给 GitHub Copilot。** 和在终端里跑 `gh copilot` 是同一条通道。受你的 Copilot 订阅条款约束。
-- **没有 Browy 的服务器。** 维护者读不到你的对话或页面内容。我们不收集遥测。
+- **页面内容发给 GitHub Copilot。** 和在终端里跑 `copilot` 是同一条通道。受你的 Copilot 订阅条款约束。
+- **对话保存在你的机器上。** 对话记录存放在你磁盘上的 `~/.copilot/` 里，和你的 Copilot CLI 会话放在一起。
 - **智能体驱动时 Chrome 会显示它标准的调试器横幅。** 你始终知道 Browy 在不在动作。
 
 详细的安全与威胁模型说明在 [browyhq.github.io/zh-cn/security/](https://browyhq.github.io/zh-cn/security/)。

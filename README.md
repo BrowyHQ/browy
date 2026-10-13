@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-**The browser agent that runs on the AI subscription you already pay for.** A Chromium extension for Chrome, Edge, and Brave that drives your real, logged-in tabs through chat. Side panel for day-to-day work, DevTools panel CLI for power users. No second bill: it runs on your existing GitHub Copilot subscription.
+**The browser agent that runs on the AI subscription you already pay for.** A Chromium extension for Chrome, Edge, and Brave that drives your real, logged-in tabs through chat. Side panel for day-to-day work, DevTools panel CLI for power users. It runs on your existing GitHub Copilot subscription, with the models your plan includes.
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Status](https://img.shields.io/badge/status-early%20access-blueviolet)](#status)
@@ -42,13 +42,13 @@
 
 ## What Browy is
 
-Browy is a browser AI agent. You install it as a Chromium extension; it adds two UI surfaces (a side panel chat and a DevTools panel CLI) that talk to a small Node native-messaging host running on your machine. The host wraps the [GitHub Copilot SDK](https://www.npmjs.com/package/@github/copilot-sdk), so every model call uses your existing Copilot subscription, no extra API keys.
+Browy is a browser AI agent. You install it as a Chromium extension; it adds two UI surfaces (a side panel chat and a DevTools panel CLI) that talk to a small Node native-messaging host running on your machine. The host wraps the [GitHub Copilot SDK](https://www.npmjs.com/package/@github/copilot-sdk), so every model call goes through the Copilot subscription you already have.
 
 The agent drives the active tab through the [Chrome DevTools Protocol](https://chromedevtools.github.io/devtools-protocol/) via `chrome.debugger`. It reads pages off the accessibility tree (the same tree screen readers use), clicks and types by index, captures network and console activity, and runs JavaScript when the structured tools are not enough.
 
-**Browy is a productivity tool for a single human operator, not a way to run unattended automation against other people's services.** You point it at a tab; it reads and acts on that tab; you see every action stream back into the chat. There is no Browy server in the loop and no inbox that other people can flood by talking to it.
+**Browy is a productivity tool for a single human operator, not a way to run unattended automation against other people's services.** You point it at a tab; it reads and acts on that tab; you see every action stream back into the chat. It runs on your machine and in your own browser, and every task starts from your chat.
 
-Think Claude Code or Aider, but in your browser. An open-source alternative to Browser-Use and Skyvern.
+Think Claude Code or Aider, but in your browser. An open-source alternative to Browser Use and Skyvern; see [how it compares](https://browyhq.github.io/compare/) with them, Nanobrowser and others.
 
 ---
 
@@ -137,24 +137,23 @@ For a guided walkthrough with screenshots, see [Your first chat](https://browyhq
 - **Runs against your real browser profile.** Not a headless puppet. Your cookies, your extensions, your password manager, your existing logins. Most "first, log in to X" steps disappear.
 - **Indexed accessibility-tree snapshot.** Every turn, Browy gives the model a numbered list of every visible interactive element (`[12]<button>Submit</button>`). The agent clicks by index. No brittle CSS selectors, no XPath guesswork.
 - **DevTools-aware.** Network requests, console logs, cookies, storage, and `evaluate_js` are first-class tools. Great for debugging the app you are building, not just operating apps that are already running.
-- **Bring your own model.** Pick from any frontier model your Copilot subscription exposes (Claude, GPT, Gemini, Llama, Codex). Switch with `/model` in the DevTools CLI or in Settings.
-- **One subscription, no surprise bills.** Browy is built on the GitHub Copilot SDK. There is no Browy meter. Whatever Copilot costs you, that is what Browy costs you.
+- **Bring your own model.** Pick from the frontier models your Copilot plan offers (Claude, GPT, Gemini and more). Switch with `/model` in the DevTools CLI or in Settings.
+- **One subscription.** Browy is built on the GitHub Copilot SDK, so it runs on the Copilot plan you already have, Copilot Free included. Its prompts count toward your plan the same way Copilot in your editor or terminal does.
 - **Open source, Apache-2.0.** Audit the host. Audit the extension. Pin a known-good build. The agent loop is in one file ([`src/agent/loop.ts`](src/agent/loop.ts)) and the tool registry is in another ([`src/agent/tools/browser.ts`](src/agent/tools/browser.ts)).
 
 ---
 
 ## Browy vs alternatives
 
-| | **Browy** | [Browser-Use](https://github.com/browser-use/browser-use) | [Skyvern](https://github.com/Skyvern-AI/skyvern) | [Aider](https://github.com/Aider-AI/aider) |
+| | **Browy** | [Browser Use](https://github.com/browser-use/browser-use) | [Skyvern](https://github.com/Skyvern-AI/skyvern) | [Nanobrowser](https://github.com/nanobrowser/nanobrowser) |
 |---|---|---|---|---|
-| Open source | ✅ Apache-2.0 | ✅ MIT | ✅ AGPL | ✅ Apache-2.0 |
-| Runs locally | ✅ | ✅ (Python) | ❌ Cloud | ✅ |
-| Uses your real browser profile | ✅ | ❌ Fresh sandbox | ❌ Cloud | n/a (terminal) |
-| Browser extension UI | ✅ Side panel + DevTools | ❌ | ❌ | ❌ |
-| Native DevTools panel | ✅ | ❌ | ❌ | ❌ |
-| Frontier-model choice | ✅ Claude, GPT, Gemini, Llama (via Copilot) | Per-token API | Per-task | Per-token API |
-| Headless CLI mode | ✅ `browy run` | ✅ | ✅ | ✅ |
-| Billing model | Your existing Copilot subscription | Per-token API | Per-task | Per-token API |
+| Open source | ✅ Apache-2.0 | ✅ MIT | ✅ AGPL-3.0 | ✅ Apache-2.0 |
+| Where it works | Your own Chrome, Edge or Brave tabs, signed in | A browser it starts (it can reuse your Chrome profile), or Browser Use Cloud | Its own browser or your Chrome over remote debugging, or Skyvern Cloud | Your Chrome or Edge |
+| Interface | Side panel chat + DevTools panel | Python library, CLI, cloud API | Web app, SDKs, API | Side panel chat |
+| Panel inside Chrome DevTools | ✅ | ❌ | ❌ | ❌ |
+| Models | Your GitHub Copilot plan: Claude, GPT, Gemini | Your own API key, or Browser Use credits | Your own key, or Skyvern Cloud plans | Your own API keys, or a local model through Ollama |
+
+Stagehand, Claude in Chrome, ChatGPT and more are on the [full comparison](https://browyhq.github.io/compare/), checked against each project's own docs.
 
 ---
 
@@ -197,10 +196,10 @@ The roadmap and current open work live on the [GitHub project board](https://git
 Browy amplifies a human operator. It does not replace the operator.
 
 - **You see every action.** Tool calls render inline in the side panel as they happen. Browy never executes a tool you cannot watch.
-- **Host-touching tools are off by default.** Shell, filesystem, and `web_fetch` require an explicit Settings toggle, one tool at a time.
+- **Host-touching tools are off by default.** Shell, filesystem, `web_fetch` and `run_script` require an explicit Settings toggle, one tool at a time.
 - **No background activity.** The agent only acts when you send a message. No polling, no scheduled runs, no off-screen automation.
-- **Page content goes to GitHub Copilot.** Same path as `gh copilot` in a terminal. Governed by your Copilot subscription terms.
-- **No Browy server.** The maintainer cannot read your chats or your page content. Telemetry is not collected.
+- **Page content goes to GitHub Copilot.** Same path as `copilot` in a terminal. Governed by your Copilot subscription terms.
+- **Chats are stored on your machine.** Transcripts live in `~/.copilot/` on your disk, alongside your Copilot CLI sessions.
 - **Chrome shows its standard debugger banner whenever the agent is driving.** You always know when Browy is attached.
 
 Detailed security and threat-model notes at [browyhq.github.io/security/](https://browyhq.github.io/security/).
