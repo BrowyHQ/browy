@@ -23,7 +23,7 @@ $repo        = if ($env:BROWY_REPO)        { $env:BROWY_REPO }        else { 'br
 $installDir  = if ($env:BROWY_INSTALL_DIR) { $env:BROWY_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Browy\app' }
 $target      = 'win-x64'  # Only Windows x64 is shipped today.
 
-# Force TLS 1.2 — older PS defaults to SSLv3 and the GitHub API rejects it.
+# Force TLS 1.2: older PS defaults to SSLv3 and the GitHub API rejects it.
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # 1. Resolve version (skip lookup when a local zip was supplied)
@@ -79,7 +79,7 @@ try {
     Expand-Archive -Path $zip -DestinationPath $extractTmp -Force
     $browyRoot = Join-Path $extractTmp 'Browy'
     if (-not (Test-Path $browyRoot)) {
-        throw "Browy: archive layout unexpected — missing Browy/ root"
+        throw "Browy: archive layout unexpected, missing Browy/ root"
     }
     Copy-Item -Path (Join-Path $browyRoot '*') -Destination $installDir -Recurse -Force
 
@@ -101,7 +101,7 @@ try {
     Copy-Item -Path (Join-Path $installDir 'extension\*') -Destination $extensionDir -Recurse -Force
 
     Write-Host ""
-    Write-Host "✓ Browy $version installed to $installDir" -ForegroundColor Green
+    Write-Host "OK: Browy $version installed to $installDir" -ForegroundColor Green
     Write-Host ""
     # Most people arrive here from the side panel's first-run screen, which
     # notices the backend on its own. Send them straight back to it.
@@ -121,7 +121,7 @@ try {
         try {
             Start-Process explorer.exe $extensionDir
         } catch {
-            # Non-fatal — the path is printed above.
+            # Non-fatal: the path is printed above.
         }
     }
 } finally {
