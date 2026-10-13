@@ -2,6 +2,17 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [0.1.9]: a new chat no longer inherits the last chat's actions
+*Released 2026-10-13*
+
+### Fixed
+
+- **A new chat could claim work it never did.** Browy shows the model its last few tool calls, so it can check whether a click or a fill worked. That list belonged to the whole backend instead of to one chat, so a new chat's first message arrived with the previous chat's tool calls attached. Asked in a fresh chat to fill a form it had just filled in another, the model replied that the form was filled and called no tools. Each chat now keeps its own list.
+
+### Upgrading
+
+Run the install command again to update the backend. The extension's version moves to 0.1.9 to stay in step; its code is unchanged.
+
 ## [0.1.8]: the current Copilot CLI, and Browy's own instructions reach the model
 *Released 2026-10-12*
 

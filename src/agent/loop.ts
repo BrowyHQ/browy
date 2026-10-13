@@ -6,6 +6,7 @@ import os from 'os';
 import path from 'path';
 import { getForegroundInfo, brandFromProcessName, stripBrowserSuffix, shutdownForeground } from './foreground.js';
 import { copilotClientOptions } from './copilot-cli.js';
+import { RecentActions } from './recent-actions.js';
 
 // Copilot SDK is CJS — use require
 import { createRequire } from 'module';
@@ -247,11 +248,10 @@ export class Agent {
     url: '', title: '', brand: 'Browser', tabCount: 0,
   };
   private rediscoverTimer: NodeJS.Timeout | null = null;
-  /** Ring buffer of the last few tool calls — surfaced as <recent_actions> in
-   *  the next chat turn so the agent sees its own trajectory (browser-use,
-   *  ReAct, SeeAct all do this — closes the loop on "did the click work?"). */
-  private recentActions: { name: string; args: string; result: string; ok: boolean; ms: number }[] = [];
-  private static readonly RECENT_ACTIONS_LIMIT = 5;
+  /** Last few tool calls per chat, surfaced as <recent_actions> in that
+   *  chat's next turn (agent/recent-actions.ts). Keyed by chat, never shared. */
+  private recentActions = new RecentActions(5);
+  private chatKey(): string { return this.browyProtocolSessionId || ''; }
 
   constructor(config: Config) {
     this.config = config;
@@ -1091,10 +1091,10 @@ export class Agent {
     if (this.copilotSession && this.browyProtocolSessionId === id) {
       const old = this.copilotSession;
       this.copilotSession = null;
-      this.recentActions = [];
       try { await old.abort(); } catch {}
       try { await old.disconnect(); } catch {}
     }
+    this.recentActions.clear(id);
     this.previewTimePins.delete(id);
     try {
       await this.copilotClient.deleteSession(id);
@@ -1207,19 +1207,11 @@ export class Agent {
     } catch { argStr = '{}'; }
     const r = (result || '').replace(/\s+/g, ' ').trim();
     const trimResult = r.length > 100 ? r.slice(0, 97) + '…' : r;
-    this.recentActions.push({ name, args: argStr, result: trimResult, ok, ms });
-    if (this.recentActions.length > Agent.RECENT_ACTIONS_LIMIT) {
-      this.recentActions.splice(0, this.recentActions.length - Agent.RECENT_ACTIONS_LIMIT);
-    }
+    this.recentActions.record(this.chatKey(), { name, args: argStr, result: trimResult, ok, ms });
   }
 
   private serializeRecentActions(): string {
-    if (!this.recentActions.length) return '';
-    const lines = this.recentActions.map(a => {
-      const tag = a.ok ? 'ok' : 'err';
-      return `- ${a.name}(${a.args}) → ${tag} ${a.ms}ms${a.result ? ': ' + a.result : ''}`;
-    });
-    return `<recent_actions>\n${lines.join('\n')}\n</recent_actions>\n`;
+    return this.recentActions.serialize(this.chatKey());
   }
 
   private async refreshTabInfo() {
@@ -1258,7 +1250,7 @@ export class Agent {
     // we still need to delete the right session from disk.
     const id = old?.sessionId || this.browyProtocolSessionId;
     this.copilotSession = null;
-    this.recentActions = [];
+    this.recentActions.clear(this.chatKey());
     if (old) {
       try { await old.abort(); } catch {}
       try { await old.disconnect(); } catch {}
