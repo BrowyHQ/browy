@@ -2,7 +2,8 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.11]: Stop stops, replies stream, and a stuck tab no longer stalls a run
+*Released 2026-10-14*
 
 ### Fixed
 
@@ -16,6 +17,10 @@ All notable changes to Browy will be documented in this file. The format follows
 
 - **Copilot SDK 1.0.21 and Copilot CLI 1.0.97.** Browy was still on SDK 0.3.0 from April, six months and a major version behind. SDK 1.x brings its own Copilot runtime, but that runtime can't run the interactive sign-in, so Browy keeps shipping the full CLI and hands it to the SDK. The download stays about the same size. Dependabot now opens weekly update PRs, and every release takes them first.
 - **Two windows, one Browy.** Each window's Browy now works on that window's tabs; it used to follow whichever window you focused last. A message sent from a second window while the first is busy waits its turn and starts as soon as the first finishes, instead of failing with "agent is busy on another panel", and Stop takes it out of the line. Closing a panel mid-run stops that run, and its output no longer spills into the other open panels.
+
+### Upgrading
+
+Run the install command again to update the backend, which is where most of this lives. The 0.1.11 extension adds the rest: each window working on its own tabs, the note when a message is waiting for another window, and a Stop that leaves no tool spinning. With an older extension, `close_tab` says it couldn't close the tab rather than switching you to another one.
 
 ## [0.1.10]: `run_script` is off until you switch it on
 *Released 2026-10-13*
