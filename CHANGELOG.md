@@ -2,6 +2,17 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [0.1.12]: a stuck tool call no longer ends the run
+*Released 2026-10-14*
+
+### Fixed
+
+- **One tool call that never answered could end a whole run.** On 14 October a long outreach run stopped at the five-minute safety stop: one `inspect_page` request reached the backend but never reached the tool, so 0.1.11's one-minute limit on browser calls never started. Every tool request now gets an answer within two minutes. If the tool is still running, or never started, Browy tells the model the call failed and the run carries on. A late result from the abandoned call is dropped, and the backend log notes which of the two happened.
+
+### Upgrading
+
+Run the install command again to update the backend. The extension's version moves to 0.1.12 to stay in step; its code is unchanged, so there's nothing to reload.
+
 ## [0.1.11]: Stop stops, replies stream, and a stuck tab no longer stalls a run
 *Released 2026-10-14*
 

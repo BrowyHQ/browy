@@ -211,6 +211,13 @@ interface TurnControl {
   stop: (() => void) | null;
 }
 
+/** How long a tool request may go unanswered before the turn answers it with
+ *  an error, so the model can carry on. Each call to the browser already
+ *  gives up after a minute; this also covers tools that make several slow
+ *  calls, and requests that never reach a tool at all. BROWY_TOOL_DEADLINE_MS
+ *  shortens it for tests. */
+const TOOL_DEADLINE_MS = Number(process.env.BROWY_TOOL_DEADLINE_MS) || 2 * 60 * 1000;
+
 export class Agent {
   private config: Config;
   /** All currently-connected browsers (Brave, Edge, Chrome, ...). */
@@ -263,6 +270,10 @@ export class Agent {
   private chatKey(): string { return this.browyProtocolSessionId || ''; }
   /** The chat() turn currently running, if any. */
   private turn: TurnControl | null = null;
+  /** SDK request id → panel step id, for tool calls whose handler is running. */
+  private toolSteps = new Map<string, string>();
+  /** Requests the turn's deadline already answered; their late results are dropped. */
+  private abandonedTools = new Set<string>();
 
   constructor(config: Config) {
     this.config = config;
@@ -561,10 +572,12 @@ export class Agent {
       return defineTool(tool.def.name, {
         description: tool.def.description,
         parameters: tool.def.parameters,
-        handler: async (args: Record<string, unknown>) => {
+        handler: async (args: Record<string, unknown>, invocation?: { requestId?: string }) => {
           const freshCtx = self.getBrowserContext();
           // Stable id so UI can match start↔end of the same call
           const id = `${tool.def.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+          const requestId = invocation?.requestId;
+          if (requestId) self.toolSteps.set(requestId, id);
 
           self.emit({ type: 'activity', event: 'tool_start', tool: tool.def.name, args });
           self.emit({ type: 'tool_step', id, name: tool.def.name, args, status: 'start' });
@@ -572,16 +585,21 @@ export class Agent {
           let result = '';
           try {
             result = await tool.run(args, freshCtx);
+            // The turn's deadline already answered and reported this call.
+            if (requestId && self.abandonedTools.delete(requestId)) return result;
             const dur = Date.now() - t0;
             self.emit({ type: 'activity', event: 'tool_end', tool: tool.def.name, result: result.slice(0, 300), durationMs: dur });
             self.emit({ type: 'tool_step', id, name: tool.def.name, status: 'end', result: result.slice(0, 200), durationMs: dur });
             self.recordRecentAction(tool.def.name, args, result, true, dur);
           } catch (err) {
+            if (requestId && self.abandonedTools.delete(requestId)) throw err;
             const dur = Date.now() - t0;
             const errMsg = err instanceof Error ? err.message : String(err);
             self.emit({ type: 'tool_step', id, name: tool.def.name, status: 'error', result: errMsg, durationMs: dur });
             self.recordRecentAction(tool.def.name, args, errMsg, false, dur);
             throw err;
+          } finally {
+            if (requestId) self.toolSteps.delete(requestId);
           }
 
           // Reconnect CDP after navigation
@@ -906,25 +924,51 @@ export class Agent {
         // Tool calls the runtime has started and not finished, so the
         // watchdog can say what it was waiting on.
         const running = new Map<string, string>();
+        // Every tool request the runtime sends gets an answer within
+        // TOOL_DEADLINE_MS, whatever happens on our side. On 14 Oct a request
+        // reached the host, never reached Browy's tool, and the run sat
+        // silent until the five-minute watchdog ended it. The SDK drops a
+        // request without a trace when its session handle has no handler.
+        const toolTimers = new Map<string, NodeJS.Timeout>();
+        const giveUpOnTool = (requestId: string, name: string) => {
+          toolTimers.delete(requestId);
+          const stepId = this.toolSteps.get(requestId);
+          const limit = TOOL_DEADLINE_MS >= 60_000 ? `${Math.round(TOOL_DEADLINE_MS / 60_000)} minutes` : `${Math.round(TOOL_DEADLINE_MS / 1000)} seconds`;
+          const message = `${name} got no answer within ${limit}, so Browy gave up on it. `
+            + 'The tab may be busy, frozen or showing a dialog. Try again, or switch to the tab first.';
+          console.log(`  ⏱ ${name} ${stepId ? 'was still running' : 'never reached its handler'} after ${TOOL_DEADLINE_MS / 1000} s `
+            + `(request ${requestId}, session handle ${session.disconnected ? 'disconnected' : 'connected'})`);
+          this.abandonedTools.add(requestId);
+          if (!stepId) this.emit({ type: 'tool_step', id: `${name}-${requestId}`, name, args: {}, status: 'start' });
+          this.emit({ type: 'tool_step', id: stepId || `${name}-${requestId}`, name, status: 'error', result: message, durationMs: TOOL_DEADLINE_MS });
+          this.recordRecentAction(name, {}, message, false, TOOL_DEADLINE_MS);
+          session.rpc.tools.handlePendingToolCall({ requestId, result: JSON.stringify({ error: message }) })
+            .catch((e: unknown) => console.log(`  ⏱ could not answer ${name}: ${e instanceof Error ? e.message : String(e)}`));
+        };
         const finish = (settle: () => void) => {
           if (settled) return;
           settled = true;
           try { unsub?.(); } catch {}
           clearTimeout(idleTimer);
+          for (const t of toolTimers.values()) clearTimeout(t);
+          toolTimers.clear();
+          this.abandonedTools.clear();
           ctl.stop = null;
           settle();
         };
         // The Stop button ends the turn here with whatever was said so far;
         // abort() asks the SDK to stop the turn alongside.
         ctl.stop = () => finish(() => resolve(turn.text));
-        // Last resort, reset by every SDK event. Browy's own tools give up
-        // after a minute, so five silent minutes means the runtime is stuck.
-        // Abort the SDK turn as well, or the next message queues behind it.
+        // Last resort, reset by every SDK event. Tool calls are answered
+        // within two minutes, so five silent minutes means the runtime itself
+        // is stuck. Abort the SDK turn as well, or the next message queues
+        // behind it.
         const IDLE_MS = 5 * 60 * 1000;
         const armIdle = () => {
           clearTimeout(idleTimer);
           idleTimer = setTimeout(() => {
             const waiting = [...new Set(running.values())].join(', ');
+            console.log(`  ⏱ watchdog: 5 min without SDK events (running: ${waiting || 'none'}, session handle ${session.disconnected ? 'disconnected' : 'connected'})`);
             session.abort().catch(() => {});
             finish(() => reject(new Error(waiting
               ? `No progress for 5 minutes while ${waiting} was still running, so Browy stopped. Send a message to carry on.`
@@ -955,6 +999,17 @@ export class Agent {
                 break;
               case 'tool.execution_complete':
                 running.delete(d.toolCallId);
+                break;
+              case 'external_tool.requested':
+                if (d.requestId && !toolTimers.has(d.requestId)) {
+                  const requestId = String(d.requestId);
+                  const name = String(d.toolName || 'a tool');
+                  toolTimers.set(requestId, setTimeout(() => giveUpOnTool(requestId, name), TOOL_DEADLINE_MS));
+                }
+                break;
+              case 'external_tool.completed':
+                clearTimeout(toolTimers.get(d.requestId));
+                toolTimers.delete(d.requestId);
                 break;
               case 'abort':
                 ctl.stopped = true;
