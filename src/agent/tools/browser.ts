@@ -14,6 +14,10 @@ export interface BrowserToolContext {
    *  tab directly from the browser. The playwright-backed context populates
    *  this implicitly via Agent.refreshTabInfo() instead. */
   getActiveTabInfo?: () => Promise<{ url: string; title: string; tabCount: number; brand: string } | null>;
+  /** Optional: index into getPages() of the tab the agent is working on, or
+   *  -1 when unknown. Extension-mode contexts track this; the playwright path
+   *  works it out from the CDP target instead. */
+  getActivePageIndex?: () => number;
 }
 
 export interface ToolHandler {
@@ -1086,24 +1090,33 @@ register({
       if (idx < 0 || idx >= pages.length) return JSON.stringify({ error: `Invalid tab index ${idx}. Use list_tabs.` });
       target = pages[idx];
     } else {
-      // Active page = page that owns ctx.cdp; fall back to first.
-      target = pages[0];
-      idx = 0;
-      // Try to identify active page by URL match against cdp target.
-      try {
-        const { targetInfo } = await ctx.cdp.send('Target.getTargetInfo' as any) as any;
-        const activeUrl = targetInfo?.url;
-        const found = pages.findIndex((p) => p.url() === activeUrl);
-        if (found >= 0) { target = pages[found]; idx = found; }
-      } catch {}
+      // The agent's current tab. Extension mode tracks it; the playwright
+      // path matches the CDP target's URL. Never guess: until 0.1.11 an
+      // unknown current tab fell back to the first tab in the list, which
+      // is usually one of the user's own.
+      idx = ctx.getActivePageIndex ? ctx.getActivePageIndex() : -1;
+      if (idx < 0 && !ctx.getActivePageIndex) {
+        try {
+          const { targetInfo } = await ctx.cdp.send('Target.getTargetInfo' as any) as any;
+          const activeUrl = targetInfo?.url;
+          idx = pages.findIndex((p) => p.url() === activeUrl);
+        } catch {}
+      }
+      if (idx < 0) return JSON.stringify({ error: 'Could not tell which tab is current. Call list_tabs and pass the index of the tab to close.' });
+      target = pages[idx];
     }
     let closedTitle = '';
     try { closedTitle = await target.title(); } catch {}
     const closedUrl = target.url();
-    await target.close().catch(() => {});
-    // After close, switch active page to a remaining tab if we just closed the active one.
+    try {
+      await target.close();
+    } catch (e) {
+      return JSON.stringify({ error: `Could not close the tab: ${e instanceof Error ? e.message : String(e)}` });
+    }
     const remaining = ctx.getPages();
-    if (remaining.length > 0) {
+    // Extension mode moves the agent to whichever tab the browser shows next
+    // in that window. The playwright path has to pick a neighbour itself.
+    if (!ctx.getActivePageIndex && remaining.length > 0) {
       await ctx.setActivePage(remaining[Math.min(idx, remaining.length - 1)]);
     }
     return JSON.stringify({ success: true, closed: { index: idx, title: closedTitle, url: closedUrl }, remaining: remaining.length });

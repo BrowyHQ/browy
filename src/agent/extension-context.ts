@@ -14,6 +14,13 @@ import type { BrowserToolContext } from './tools/browser.js';
 
 type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void; method: string };
 
+/** How long a call to the extension may go unanswered. Until 0.1.11 there was
+ *  no limit: a tab that was frozen, discarded or blocked by a dialog left
+ *  chrome.debugger without a reply, the tool call never returned, and the
+ *  whole turn sat there until the five-minute watchdog gave up. */
+const CDP_TIMEOUT_MS = 60_000;
+const TAB_TIMEOUT_MS = 15_000;
+
 interface ExtTabState {
   tabId: number;
   url: string;
@@ -38,6 +45,8 @@ export class ExtensionContext {
   constructor(
     private sessionId: string,
     private transport: Transport,
+    /** Test hook: shortens every call deadline. */
+    private timeoutOverrideMs?: number,
   ) {}
 
   // ── Inbound from runner ─────────────────────────────────────────────────
@@ -59,10 +68,15 @@ export class ExtensionContext {
     }
   }
 
-  /** Reject every in-flight call. Called when the session/transport closes. */
-  dispose(reason = 'session closed'): void {
+  /** Reject every in-flight call, e.g. when the user presses Stop. */
+  cancelPending(reason: string): void {
     for (const p of this.pending.values()) p.reject(new Error(reason));
     this.pending.clear();
+  }
+
+  /** Reject every in-flight call. Called when the session/transport closes. */
+  dispose(reason = 'session closed'): void {
+    this.cancelPending(reason);
     this.cdpListeners.clear();
   }
 
@@ -72,17 +86,24 @@ export class ExtensionContext {
     return `${prefix}-${++this.callSeq}-${Date.now().toString(36)}`;
   }
 
-  private sendAndWait<T = unknown>(envelope: Omit<ServerMessage, never>, method: string): Promise<T> {
+  private sendAndWait<T = unknown>(envelope: Omit<ServerMessage, never>, method: string, timeoutMs = TAB_TIMEOUT_MS): Promise<T> {
     const callId = (envelope as any).callId;
+    const limit = this.timeoutOverrideMs ?? timeoutMs;
     return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (!this.pending.delete(callId)) return;
+        reject(new Error(`${method} got no answer from the browser in ${Math.round(limit / 1000)}s. `
+          + 'The tab may be frozen, discarded or showing a dialog. Switching to it or reloading it usually helps.'));
+      }, limit);
       this.pending.set(callId, {
-        resolve: (v) => resolve(v as T),
-        reject,
+        resolve: (v) => { clearTimeout(timer); resolve(v as T); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
         method,
       });
       try {
         this.transport.send(envelope as ServerMessage);
       } catch (e) {
+        clearTimeout(timer);
         this.pending.delete(callId);
         reject(e instanceof Error ? e : new Error(String(e)));
       }
@@ -106,7 +127,11 @@ export class ExtensionContext {
           method,
           params: params ?? {},
         };
-        const wrapped = await self.sendAndWait<{ tabId: number; result: unknown }>(envelope, method);
+        // Runtime.evaluate can carry its own deadline; wait a little longer
+        // than that so the page's own timeout error is the one reported.
+        const own = Number((params as { timeout?: unknown } | undefined)?.timeout);
+        const limit = Number.isFinite(own) && own > 0 ? Math.max(CDP_TIMEOUT_MS, own + 15_000) : CDP_TIMEOUT_MS;
+        const wrapped = await self.sendAndWait<{ tabId: number; result: unknown }>(envelope, method, limit);
         // Remember whichever tab the SW actually used so subsequent calls pin
         // to the same tab (avoids races if the user switches tabs mid-flow).
         if (wrapped && typeof wrapped.tabId === 'number') self.activeTabId = wrapped.tabId;
@@ -136,9 +161,18 @@ export class ExtensionContext {
       },
       bringToFront: async () => { await self.activate(info.tabId); },
       close: async () => {
-        // Best-effort tab close via runtime; extension doesn't currently
-        // expose a tab.close protocol message — closing is rare in tools
-        // and easily added later.
+        const callId = self.nextCallId('tab');
+        // Short deadline: extensions before 0.1.11 don't know tab.close and
+        // never answer it.
+        const next = await self.sendAndWait<TabInfo | null>(
+          { type: 'tab.close', sessionId: self.sessionId, callId, tabId: info.tabId } as any,
+          'tab.close',
+          10_000,
+        );
+        self.knownTabs.delete(info.tabId);
+        if (self.activeTabId === info.tabId) {
+          self.activeTabId = next && typeof next.tabId === 'number' ? next.tabId : null;
+        }
       },
     });
 
@@ -165,6 +199,7 @@ export class ExtensionContext {
         // tab.list call (added in Phase F if a tool actually needs it).
         return Array.from(self.knownTabs.values()).map((info) => makePage(info)) as any;
       },
+      getActivePageIndex: () => (self.activeTabId == null ? -1 : Array.from(self.knownTabs.keys()).indexOf(self.activeTabId)),
       setActivePage: async (page: any) => {
         if (page && typeof page._tabId === 'number') {
           await self.activate(page._tabId);

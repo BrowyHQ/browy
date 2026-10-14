@@ -403,6 +403,9 @@
     .tool-step.running .glyph::before { content: '⠋'; animation: spinFrames 0.8s steps(10) infinite; }
     .tool-step.done    .glyph::before { content: '⏺'; }
     .tool-step.error   .glyph::before { content: '⏺'; }
+    /* A call the user stopped, and the "waiting for your other window" line. */
+    .tool-step.stopped .glyph { color: var(--ink-2); }
+    .bub .note { color: var(--ink-2); font-size: 11px; font-style: italic; }
 
     .tool-step .head {
       grid-column: 2; grid-row: 1;

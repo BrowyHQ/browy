@@ -619,7 +619,12 @@ port.onMessage.addListener((msg) => {
 
     case 'chat.done':
       finalizeLiveAssistant(msg.text || '');
+      if (msg.stopped) appendRow('dim', '·', 'stopped · send a message to carry on');
       setBusy(false);
+      break;
+
+    case 'chat.queued':
+      appendRow('dim', '·', 'browy is busy in another panel · this runs when that finishes');
       break;
 
     case 'chat.error':

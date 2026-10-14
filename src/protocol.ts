@@ -59,6 +59,10 @@ export interface SessionStart {
    *  host) so per-session cdp.send calls target the panel's inspected tab
    *  instead of whatever tab is foregrounded. */
   inspectedTabId?: number;
+  /** Optional client-side hint: the browser window a side panel lives in.
+   *  Like inspectedTabId it is consumed by the extension service worker, so
+   *  each window's Browy works on that window's tabs. */
+  windowId?: number;
   /** Per-user tool blocklist. Names listed here are removed from the
    *  Copilot SDK's `availableTools` for THIS session. The extension
    *  Settings page persists toggles in chrome.storage and forwards the
@@ -211,6 +215,17 @@ export interface ChatDone {
   sessionId: string;
   text: string;
   toolCalls: ToolCallRecord[];
+  /** The user pressed Stop; `text` is what the agent had said by then. */
+  stopped?: boolean;
+}
+
+/** One agent serves every panel. A chat sent while another panel's chat is
+ *  running waits in line and starts as soon as that one ends. */
+export interface ChatQueued {
+  type: 'chat.queued';
+  sessionId: string;
+  /** 1 means it runs next. */
+  position: number;
 }
 
 export interface ChatError {
@@ -242,6 +257,14 @@ export interface TabNewRequest {
 
 export interface TabActivateRequest {
   type: 'tab.activate';
+  sessionId: string;
+  callId: string;
+  tabId: number;
+}
+
+/** Close a tab. The reply is the tab now active in that window, or null. */
+export interface TabCloseRequest {
+  type: 'tab.close';
   sessionId: string;
   callId: string;
   tabId: number;
@@ -367,10 +390,12 @@ export type ServerMessage =
   | ChatToolCallStart
   | ChatToolCallEnd
   | ChatDone
+  | ChatQueued
   | ChatError
   | CdpSendRequest
   | TabNewRequest
   | TabActivateRequest
+  | TabCloseRequest
   | TabListRequest
   | TabGetActiveRequest
   | ActivityEvent

@@ -178,6 +178,23 @@ function newSessionId() {
   return 'sp-' + Math.random().toString(36).slice(2, 10);
 }
 
+// The window this panel lives in. Sent with session.start so the agent works
+// on this window's tabs: before 0.1.11 every panel followed the last-focused
+// window, so clicking into another window moved Browy's target with you.
+const panelWindowId = (chrome.windows && chrome.windows.getCurrent)
+  ? chrome.windows.getCurrent().then((w) => (w && w.id != null ? w.id : null)).catch(() => null)
+  : Promise.resolve(null);
+
+async function startSession() {
+  const windowId = await panelWindowId;
+  browyPost({
+    type: 'session.start',
+    sessionId: BROWY_SESSION_ID,
+    capabilities: ['cdp.activeTab'],
+    ...(windowId != null ? { windowId } : {}),
+  });
+}
+
 async function loadStoredSessionId() {
   try {
     const r = await chrome.storage.local.get([SID_KEY]);
@@ -420,7 +437,9 @@ function browyTranslate(msg) {
     case 'chat.tool_result':
       return { type: 'tool_step', id: msg.callId, name: '', status: msg.ok ? 'end' : 'error', result: msg.summary, durationMs: msg.durationMs };
     case 'chat.done':
-      return { type: 'response', text: msg.text || pendingChat, toolCalls: msg.toolCalls || [] };
+      return { type: 'response', text: msg.text || pendingChat, toolCalls: msg.toolCalls || [], stopped: !!msg.stopped };
+    case 'chat.queued':
+      return { type: 'queued', position: msg.position };
     case 'chat.error':
       if (msg.code === 'auth') return { type: 'copilot_status', state: 'unauth', detail: msg.message, _fromError: true };
       return { type: 'status', status: 'error', detail: msg.message };
@@ -1001,11 +1020,7 @@ function connect() {
         setControlsState('online');
         updateTrySuggestions();
       } catch {}
-      browyPost({
-        type: 'session.start',
-        sessionId: BROWY_SESSION_ID,
-        capabilities: ['cdp.activeTab'],
-      });
+      startSession();
       refreshActiveTab();
       offerHostUpdateIfNeeded(raw.protocol);
       if (cameFromOnboarding) {
@@ -1068,11 +1083,7 @@ function connect() {
       (async () => {
         BROWY_SESSION_ID = newSessionId();
         try { await chrome.storage.local.set({ [SID_KEY]: BROWY_SESSION_ID }); } catch {}
-        browyPost({
-          type: 'session.start',
-          sessionId: BROWY_SESSION_ID,
-          capabilities: ['cdp.activeTab'],
-        });
+        startSession();
       })();
       return;
     }
@@ -1108,6 +1119,9 @@ function connect() {
       } catch {}
       return;
     }
+    // Events for a chat this panel is no longer showing, e.g. the tail of a
+    // turn after "new chat", must not land in the current conversation.
+    if (raw.sessionId && raw.sessionId !== BROWY_SESSION_ID) return;
     const legacy = browyTranslate(raw);
     if (legacy) handle(legacy);
   });
@@ -1157,7 +1171,11 @@ function connect() {
 function brandFromUrl(/* url */) { return 'Browser'; }
 async function refreshActiveTab() {
   try {
-    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    // This panel's own window, not whichever window was focused last.
+    const windowId = await panelWindowId;
+    const [tab] = await chrome.tabs.query(windowId != null
+      ? { active: true, windowId }
+      : { active: true, lastFocusedWindow: true });
     const allTabs = await chrome.tabs.query({});
     if (!tab) return;
     handle({
@@ -1239,12 +1257,26 @@ function handle(m) {
     }
   }
   if (m.type === 'response') {
+    if (m.stopped) {
+      markStopped();
+      reconcileFinal((m.text ? m.text + '\n\n' : '') + '_Stopped. Send a message to pick up where it left off._');
+      pose('idle', 400);
+      persistChatSoon();
+      return;
+    }
     // Final canonical text — reconcile in case streaming missed any chunks
     reconcileFinal(m.text || '');
     react('bounce'); sndRecv();
     pose('happy', 1100);
     persistChatSoon();
     clearAuthBannerOnSuccess();
+  }
+  if (m.type === 'queued') {
+    // Another window's chat is running. This one starts when it ends.
+    ensureLiveBubble();
+    if (liveBody && !liveText) {
+      liveBody.innerHTML = '<span class="note">Browy is working in another window. This starts as soon as that finishes.</span>';
+    }
   }
   if (m.type === 'browsers_status') {
     renderBrowsers(m.browsers || []);
@@ -1398,6 +1430,17 @@ function summarizeResult(result, status) {
   const oneline = String(result).replace(/\s+/g, ' ').trim();
   if (oneline.length > 120) return oneline.slice(0, 119) + '…';
   return oneline;
+}
+
+// After Stop, calls still marked running will never report back.
+function markStopped() {
+  if (!liveSteps) return;
+  liveSteps.querySelectorAll('.tool-step.running').forEach((node) => {
+    node.classList.remove('running');
+    node.classList.add('stopped');
+    const preview = node.querySelector('.preview');
+    if (preview) preview.textContent = 'stopped';
+  });
 }
 
 function renderToolStep(m) {
@@ -1582,9 +1625,12 @@ async function startNewChat() {
   msgs.innerHTML = '';
   msgs.appendChild(empty);
   liveBub = null; liveBody = null; liveSteps = null; liveText = ''; stepNodes.clear();
+  // The old chat's last events are filtered out once the id changes, so its
+  // idle never arrives here. The new chat starts free.
+  if (busy) setBusy(false);
   if (modeTag) modeTag.textContent = '// browser agent';
   // Tell the host to start the new session.
-  browyPost({ type: 'session.start', sessionId: BROWY_SESSION_ID, capabilities: ['cdp.activeTab'] });
+  startSession();
 }
 
 // Switch to a previously-saved chat. Source of truth is the SDK transcript
@@ -1612,6 +1658,7 @@ async function switchToChat(id) {
   try { await chrome.storage.local.set({ [SID_KEY]: id }); } catch {}
   msgs.innerHTML = '';
   liveBub = null; liveBody = null; liveSteps = null; liveText = ''; stepNodes.clear();
+  if (busy) setBusy(false);
   // Render from the SDK transcript.
   const transcript = await requestChatMessages(id);
   if (transcript && transcript.length) {
@@ -1647,7 +1694,7 @@ async function switchToChat(id) {
   }
   msgs.scrollTop = msgs.scrollHeight;
   // Resume / start the SDK session for the new id on the host side.
-  browyPost({ type: 'session.start', sessionId: BROWY_SESSION_ID, capabilities: ['cdp.activeTab'] });
+  startSession();
   closeChatsOverlay();
 }
 

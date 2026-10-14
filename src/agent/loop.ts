@@ -8,6 +8,7 @@ import { getForegroundInfo, brandFromProcessName, stripBrowserSuffix, shutdownFo
 import { copilotClientOptions } from './copilot-cli.js';
 import { RecentActions } from './recent-actions.js';
 import { OPT_IN_TOOLS, toolPolicy } from './tool-policy.js';
+import { TurnText } from './turn-text.js';
 
 // Copilot SDK is CJS — use require
 import { createRequire } from 'module';
@@ -191,6 +192,13 @@ interface BrowserConnection {
   browser: Browser;
 }
 
+/** The turn in flight, so abort() can end it. `stop` is set once the turn is
+ *  listening for SDK events; `stopped` records that Stop was pressed. */
+interface TurnControl {
+  stopped: boolean;
+  stop: (() => void) | null;
+}
+
 export class Agent {
   private config: Config;
   /** All currently-connected browsers (Brave, Edge, Chrome, ...). */
@@ -241,6 +249,8 @@ export class Agent {
    *  chat's next turn (agent/recent-actions.ts). Keyed by chat, never shared. */
   private recentActions = new RecentActions(5);
   private chatKey(): string { return this.browyProtocolSessionId || ''; }
+  /** The chat() turn currently running, if any. */
+  private turn: TurnControl | null = null;
 
   constructor(config: Config) {
     this.config = config;
@@ -752,9 +762,14 @@ export class Agent {
         this.copilotSession = await this.copilotClient.resumeSession(wantId, {
           clientName: BROWSERAGENT_CLIENT_NAME,
           workingDirectory: BROWSERAGENT_WORKDIR,
+          // The runtime does not keep the system message across a resume.
+          // Until 0.1.11 every chat continued after a host restart ran on the
+          // stock Copilot coding-agent prompt, without any of Browy's rules.
+          systemMessage: { content: SYSTEM_PROMPT },
           model: this.config.model,
           tools: filteredTools,
           availableTools: allowedToolNames,
+          streaming: true,
           onPermissionRequest: approveAll,
         });
         return;
@@ -777,13 +792,21 @@ export class Agent {
       model: this.config.model,
       tools: filteredTools,
       availableTools: allowedToolNames,
+      // Without this the SDK sends no assistant.message_delta events and each
+      // reply appears in one piece when the model finishes.
+      streaming: true,
       onPermissionRequest: approveAll,
     });
   }
 
-  async chat(userText: string): Promise<{ text: string; toolCalls: ToolCallRecord[] }> {
+  async chat(userText: string): Promise<{ text: string; toolCalls: ToolCallRecord[]; stopped?: boolean }> {
+    // Registered before the first await, so a Stop that lands while the turn
+    // is still being set up is not lost.
+    const ctl: TurnControl = { stopped: false, stop: null };
+    this.turn = ctl;
     await this.whenCopilotReady();
     if (!this.copilotClient) {
+      if (this.turn === ctl) this.turn = null;
       throw new Error('Copilot SDK is not initialised yet — try again in a moment, or run /signin if this persists.');
     }
     await this.detectFocusedTab();
@@ -861,58 +884,88 @@ export class Agent {
       // workflows. Instead we drive the session manually via session.on()
       // and resolve when we see session.idle. This also lets us stream
       // assistant.message_delta chunks to the UI in real time.
-      let finalText = '';
       const session = this.copilotSession;
+      const turn = new TurnText();
 
       const completion = new Promise<string>((resolve, reject) => {
         let unsub: (() => void) | null = null;
-        // Idle-based safety net: reset on every event. Times out only if the
-        // SDK goes silent for 5 minutes (network drop, hung tool, etc.).
-        // An actively-working agent — even one running a 30-min multi-step
-        // automation — stays alive as long as deltas keep arriving.
+        let idleTimer: NodeJS.Timeout | undefined;
+        let settled = false;
+        // Tool calls the runtime has started and not finished, so the
+        // watchdog can say what it was waiting on.
+        const running = new Map<string, string>();
+        const finish = (settle: () => void) => {
+          if (settled) return;
+          settled = true;
+          try { unsub?.(); } catch {}
+          clearTimeout(idleTimer);
+          ctl.stop = null;
+          settle();
+        };
+        // The Stop button ends the turn here with whatever was said so far;
+        // abort() asks the SDK to stop the turn alongside.
+        ctl.stop = () => finish(() => resolve(turn.text));
+        // Last resort, reset by every SDK event. Browy's own tools give up
+        // after a minute, so five silent minutes means the runtime is stuck.
+        // Abort the SDK turn as well, or the next message queues behind it.
         const IDLE_MS = 5 * 60 * 1000;
-        let idleTimer: NodeJS.Timeout;
-        const teardown = () => { try { unsub?.(); } catch {}; clearTimeout(idleTimer); };
         const armIdle = () => {
           clearTimeout(idleTimer);
-          idleTimer = setTimeout(() => { teardown(); reject(new Error('Agent went idle for 5 min with no SDK activity; giving up.')); }, IDLE_MS);
+          idleTimer = setTimeout(() => {
+            const waiting = [...new Set(running.values())].join(', ');
+            session.abort().catch(() => {});
+            finish(() => reject(new Error(waiting
+              ? `No progress for 5 minutes while ${waiting} was still running, so Browy stopped. Send a message to carry on.`
+              : 'No reply from Copilot for 5 minutes, so Browy stopped. Send a message to carry on.')));
+          }, IDLE_MS);
         };
         armIdle();
         unsub = session.on((ev: { type: string; data?: any }) => {
           armIdle();
+          const d = ev.data || {};
+          // Sub-agent chatter belongs to a tool call, not to the reply.
+          if (d.parentToolCallId) return;
           try {
-            if (ev.type === 'assistant.message_delta') {
-              const chunk: string = ev.data?.deltaContent || '';
-              if (chunk) {
-                finalText += chunk;
-                this.emit({ type: 'delta', text: chunk });
+            switch (ev.type) {
+              case 'assistant.message_delta': {
+                const out = turn.delta(String(d.messageId ?? ''), d.deltaContent || '');
+                if (out) this.emit({ type: 'delta', text: out });
+                break;
               }
-            } else if (ev.type === 'assistant.message') {
-              const content: string = ev.data?.content || '';
-              // Some models deliver the full message without prior deltas;
-              // detect that and emit as one delta so the UI streams something.
-              if (content && !finalText) {
-                finalText = content;
-                this.emit({ type: 'delta', text: content });
-              } else if (content && content.length > finalText.length) {
-                // Reconcile: server's authoritative content > what we streamed
-                const tail = content.slice(finalText.length);
-                if (tail) this.emit({ type: 'delta', text: tail });
-                finalText = content;
+              case 'assistant.message': {
+                const out = turn.message(String(d.messageId ?? ''), d.content || '');
+                if (out) this.emit({ type: 'delta', text: out });
+                if (d.reasoningText) this.emit({ type: 'reasoning', text: d.reasoningText });
+                break;
               }
-              const reasoning: string | undefined = ev.data?.reasoningText;
-              if (reasoning) this.emit({ type: 'reasoning', text: reasoning });
-            } else if (ev.type === 'session.idle') {
-              teardown();
-              resolve(finalText);
-            } else if (ev.type === 'session.error' || ev.type === 'error') {
-              teardown();
-              reject(new Error(ev.data?.message || ev.data?.error || 'session error'));
+              case 'tool.execution_start':
+                if (d.toolCallId) running.set(d.toolCallId, d.toolName || 'a tool');
+                break;
+              case 'tool.execution_complete':
+                running.delete(d.toolCallId);
+                break;
+              case 'abort':
+                ctl.stopped = true;
+                finish(() => resolve(turn.text));
+                break;
+              case 'session.idle':
+                if (d.aborted) ctl.stopped = true;
+                finish(() => resolve(turn.text));
+                break;
+              case 'session.error':
+                finish(() => reject(new Error(d.message || 'session error')));
+                break;
             }
-          } catch (e) { teardown(); reject(e as Error); }
+          } catch (e) { finish(() => reject(e as Error)); }
         });
       });
 
+      // Stop pressed while the turn was still being set up.
+      if (ctl.stopped) {
+        ctl.stop?.();
+        this.emit({ type: 'status', status: 'idle' });
+        return { text: '', toolCalls: [], stopped: true };
+      }
       await session.send({ prompt });
       const text = await completion;
       const dur = Date.now() - t0;
@@ -920,11 +973,14 @@ export class Agent {
       this.emit({ type: 'activity', event: 'llm_call_end', durationMs: dur });
       this.emit({ type: 'status', status: 'idle' });
 
+      if (ctl.stopped) return { text, toolCalls: [], stopped: true };
       return { text: text || 'No response', toolCalls: [] };
     } catch (err) {
       const errMsg = `${err instanceof Error ? err.message : String(err)}`;
       this.emit({ type: 'status', status: 'error', detail: errMsg });
       return { text: `Error: ${errMsg}`, toolCalls: [] };
+    } finally {
+      if (this.turn === ctl) this.turn = null;
     }
   }
 
@@ -1214,12 +1270,21 @@ export class Agent {
     } catch { /* ignore */ }
   }
 
-  /** Abort the current in-flight chat request without destroying the session. */
+  /** Stop the turn in flight. The panel gets whatever the agent had said
+   *  straight away, the SDK aborts the turn on the runtime side, and the
+   *  chat stays resumable: the next message carries on in the same session. */
   async abort() {
-    if (this.copilotSession) {
-      try { await this.copilotSession.abort(); } catch {}
+    const ctl = this.turn;
+    const session = this.copilotSession;
+    const aborting = session ? session.abort().catch(() => {}) : Promise.resolve();
+    if (ctl) {
+      ctl.stopped = true;
+      ctl.stop?.();
     }
-    this.emit({ type: 'status', status: 'idle' });
+    // A runtime that is slow to acknowledge must not hold up the panel. No
+    // status event here: the stopped turn reports idle itself, and by the
+    // time this resolves another panel's chat may be the one running.
+    await Promise.race([aborting, new Promise((r) => setTimeout(r, 5000))]);
   }
 
   async clearHistory() {

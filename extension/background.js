@@ -31,6 +31,10 @@ const sessionToClient = new Map();
  *  session.start.inspectedTabId. Used so two DevTools panels on different
  *  tabs don't fight over `getActiveTabId()`. */
 const sessionToTab = new Map();
+/** Map<sessionId, windowId> — the window a side panel lives in, from
+ *  session.start.windowId. A session without a pinned tab acts on the active
+ *  tab of its own window, so two windows' panels don't fight over focus. */
+const sessionToWindow = new Map();
 
 // ── Native host wiring ─────────────────────────────────────────────────────
 
@@ -60,16 +64,19 @@ function ensureNativeHost() {
     // Server → CDP/tab bridge (Phase E): SW handles these directly.
     if (msg && (msg.type === 'cdp.send' || msg.type === 'tab.new'
               || msg.type === 'tab.activate' || msg.type === 'tab.list'
-              || msg.type === 'tab.getActive')) {
+              || msg.type === 'tab.getActive' || msg.type === 'tab.close')) {
       handleBridgeRequest(msg);
       return;
     }
 
-    // Server → client routing.
+    // Server → client routing. A session-scoped message goes to its owner
+    // only. If nobody owns the session any more (its panel closed or moved to
+    // another chat) it is dropped: until 0.1.11 it fell through to the
+    // broadcast below, which streamed one window's turn into every other
+    // open Browy panel.
     const sid = msg && msg.sessionId;
-    if (sid && sessionToClient.has(sid)) {
-      const portName = sessionToClient.get(sid);
-      const cp = clients.get(portName);
+    if (sid) {
+      const cp = clients.get(sessionToClient.get(sid));
       if (cp) { try { cp.postMessage(msg); } catch {} }
       return;
     }
@@ -231,6 +238,9 @@ chrome.runtime.onConnect.addListener((port) => {
       if (msg.inspectedTabId != null) {
         sessionToTab.set(msg.sessionId, Number(msg.inspectedTabId));
       }
+      if (msg.windowId != null) {
+        sessionToWindow.set(msg.sessionId, Number(msg.windowId));
+      }
       // Stamp the per-user tool blocklist from chrome.storage onto every
       // session.start. The host keeps no preference state of its own — the
       // extension is the source of truth, so reloads + multiple panels
@@ -262,6 +272,7 @@ chrome.runtime.onConnect.addListener((port) => {
     if (msg.type === 'session.end' && msg.sessionId) {
       sessionToClient.delete(msg.sessionId);
       sessionToTab.delete(msg.sessionId);
+      sessionToWindow.delete(msg.sessionId);
       releaseSessionTabs(msg.sessionId);
     }
 
@@ -319,6 +330,7 @@ chrome.runtime.onConnect.addListener((port) => {
         sendToHost({ type: 'session.end', sessionId: sid });
         sessionToClient.delete(sid);
         sessionToTab.delete(sid);
+        sessionToWindow.delete(sid);
         // Detach debugger from tabs no other session still references —
         // critical: leaving chrome.debugger attached pins the page's V8
         // isolate and keeps Network/Runtime/Log events firing into the void
@@ -426,10 +438,17 @@ function cdpSendCommand(tabId, method, params) {
   });
 }
 
-async function getActiveTabId() {
-  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-  if (!tabs || !tabs.length) throw new Error('no active tab');
-  return tabs[0].id;
+/** The tab a session acts on when it hasn't pinned one: the active tab of the
+ *  panel's own window, or of the last-focused window when the panel didn't
+ *  say (DevTools panels, older side panels) or its window has closed. */
+async function activeTabFor(sessionId) {
+  const windowId = sessionToWindow.get(sessionId);
+  if (windowId != null) {
+    const [own] = await chrome.tabs.query({ active: true, windowId }).catch(() => []);
+    if (own) return own;
+  }
+  const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return tab || null;
 }
 
 function tabSummary(t) {
@@ -451,23 +470,38 @@ async function handleBridgeRequest(msg) {
       let tabId;
       if (msg.tabId != null) tabId = Number(msg.tabId);
       else if (msg.sessionId && sessionToTab.has(msg.sessionId)) tabId = sessionToTab.get(msg.sessionId);
-      else tabId = await getActiveTabId();
+      else {
+        const t = await activeTabFor(msg.sessionId);
+        if (!t) throw new Error('no active tab');
+        tabId = t.id;
+      }
       await ensureAttached(tabId);
       addSessionTab(msg.sessionId, tabId);
       const result = await cdpSendCommand(tabId, msg.method, msg.params);
       reply(true, { tabId, result });
     } else if (msg.type === 'tab.new') {
-      const t = await chrome.tabs.create({ url: msg.url || 'about:blank', active: msg.active !== false });
+      const opts = { url: msg.url || 'about:blank', active: msg.active !== false };
+      const windowId = sessionToWindow.get(msg.sessionId);
+      let t;
+      try { t = await chrome.tabs.create(windowId != null ? { ...opts, windowId } : opts); }
+      catch { t = await chrome.tabs.create(opts); }
       reply(true, tabSummary(t));
     } else if (msg.type === 'tab.activate') {
       const t = await chrome.tabs.update(Number(msg.tabId), { active: true });
       reply(true, tabSummary(t));
+    } else if (msg.type === 'tab.close') {
+      const tab = await chrome.tabs.get(Number(msg.tabId));
+      await chrome.tabs.remove(tab.id);
+      // Report the tab the browser shows next in that window, so the agent
+      // carries on there rather than jumping to another window.
+      const [next] = await chrome.tabs.query({ active: true, windowId: tab.windowId }).catch(() => []);
+      reply(true, next ? tabSummary(next) : null);
     } else if (msg.type === 'tab.list') {
       const tabs = await chrome.tabs.query({});
       reply(true, tabs.map(tabSummary));
     } else if (msg.type === 'tab.getActive') {
-      const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-      reply(true, tabs[0] ? tabSummary(tabs[0]) : null);
+      const t = await activeTabFor(msg.sessionId);
+      reply(true, t ? tabSummary(t) : null);
     }
   } catch (e) {
     reply(false, e);

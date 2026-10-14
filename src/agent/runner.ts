@@ -58,6 +58,11 @@ export class Runner {
    *  events back to the originator. */
   private activeSessionId: string | null = null;
 
+  /** Chats sent from other panels while the agent was busy, oldest first.
+   *  Until 0.1.11 they were refused with "agent is busy on another panel",
+   *  and the user had to notice and send the message again. */
+  private waiting: Array<{ sessionId: string; text: string }> = [];
+
   /** Latched Copilot SDK readiness, replayed to clients that attach late. */
   private sdkReady: { ok: boolean; detail?: string } | null = null;
 
@@ -93,16 +98,30 @@ export class Runner {
     transport.onClose(() => {
       const ids = this.transportSessions.get(transport.id);
       if (ids) {
-        for (const id of ids) {
-          this.sessions.get(id)?.extContext?.dispose('transport closed');
-          this.sessions.delete(id);
-        }
+        for (const id of ids) this.closeSession(id, 'transport closed');
         this.transportSessions.delete(transport.id);
       }
-      if (this.activeSessionId && !this.sessions.has(this.activeSessionId)) {
-        this.activeSessionId = null;
-      }
     });
+  }
+
+  /** Forget a session whose panel has gone. If it was mid-turn, stop the
+   *  turn: nobody can see it any more, and its browser calls would be routed
+   *  to a context that no longer exists. */
+  private closeSession(id: string, reason: string): void {
+    this.waiting = this.waiting.filter((w) => w.sessionId !== id);
+    if (this.activeSessionId === id) void this.agent.abort().catch(() => {});
+    this.sessions.get(id)?.extContext?.dispose(reason);
+    this.sessions.delete(id);
+  }
+
+  /** Start the oldest waiting chat whose panel is still open. */
+  private runNextWaiting(): void {
+    while (this.waiting.length) {
+      const next = this.waiting.shift()!;
+      if (!this.sessions.has(next.sessionId)) continue;
+      void this.onChatSend(next.sessionId, next.text).catch(() => {});
+      return;
+    }
   }
 
   // ── Inbound dispatch ─────────────────────────────────────────────────────
@@ -121,11 +140,8 @@ export class Runner {
         return this.onSessionStart(transport, msg);
 
       case 'session.end': {
-        const s = this.sessions.get(msg.sessionId);
-        s?.extContext?.dispose('session.end');
-        this.sessions.delete(msg.sessionId);
+        this.closeSession(msg.sessionId, 'session.end');
         this.transportSessions.get(transport.id)?.delete(msg.sessionId);
-        if (this.activeSessionId === msg.sessionId) this.activeSessionId = null;
         return;
       }
 
@@ -133,10 +149,24 @@ export class Runner {
         return this.onChatSend(msg.sessionId, msg.text);
 
       case 'chat.cancel': {
-        // Only honor cancel from the session that's actually driving the
-        // agent. Otherwise one panel could abort another panel's stream.
-        if (this.activeSessionId && this.activeSessionId === (msg as any).sessionId) {
-          await this.agent.abort();
+        const sid = (msg as any).sessionId;
+        // A chat still waiting its turn is simply taken out of the line.
+        const before = this.waiting.length;
+        this.waiting = this.waiting.filter((w) => w.sessionId !== sid);
+        if (this.waiting.length !== before) {
+          const s = this.sessions.get(sid);
+          s?.transport.send({ type: 'event.activity', sessionId: sid, event: 'status.idle' });
+          s?.transport.send({ type: 'chat.done', sessionId: sid, text: '', toolCalls: [], stopped: true });
+          return;
+        }
+        // Only the session driving the agent can stop it. Otherwise one
+        // panel could abort another panel's stream.
+        if (this.activeSessionId && this.activeSessionId === sid) {
+          const stopping = this.agent.abort();
+          // Release any browser call the turn was waiting on; the SDK abort
+          // has already been requested, so the turn does not carry on.
+          this.sessions.get(sid)?.extContext?.cancelPending('Stopped by the user.');
+          await stopping;
         }
         return;
       }
@@ -298,16 +328,21 @@ export class Runner {
       });
       return;
     }
-    // Single-Agent serialization: refuse if any OTHER session is currently
-    // driving the agent. Without this, calling agent.chat() from B while A
-    // is mid-stream would (a) re-bind the SDK session id mid-run and abort
-    // A's stream, and (b) misroute A's deltas to B because activeSessionId
-    // would have flipped.
+    // Single-Agent serialization: never start a chat while ANOTHER session is
+    // driving the agent. Calling agent.chat() from B while A is mid-stream
+    // would (a) re-bind the SDK session id mid-run and abort A's stream, and
+    // (b) misroute A's deltas to B because activeSessionId would have
+    // flipped. B waits in line instead and starts as soon as A ends.
     if (this.activeSessionId && this.activeSessionId !== sessionId) {
-      session.transport.send({
-        type: 'chat.error', sessionId, code: 'busy',
-        message: 'agent is busy on another panel — try again in a moment',
-      });
+      if (this.waiting.some((w) => w.sessionId === sessionId)) {
+        session.transport.send({
+          type: 'chat.error', sessionId, code: 'busy',
+          message: 'this chat already has a message waiting to run',
+        });
+        return;
+      }
+      this.waiting.push({ sessionId, text });
+      session.transport.send({ type: 'chat.queued', sessionId, position: this.waiting.length });
       return;
     }
     session.inFlight = true;
@@ -323,8 +358,8 @@ export class Runner {
       this.agent.setBrowserContextOverride(null);
     }
     try {
-      const { text: response, toolCalls } = await this.agent.chat(text);
-      session.transport.send({ type: 'chat.done', sessionId, text: response, toolCalls });
+      const { text: response, toolCalls, stopped } = await this.agent.chat(text);
+      session.transport.send({ type: 'chat.done', sessionId, text: response, toolCalls, ...(stopped ? { stopped } : {}) });
     } catch (err) {
       const m = err instanceof Error ? err.message : String(err);
       const code = looksLikeAuthError(m) ? 'auth' : 'internal';
@@ -338,6 +373,7 @@ export class Runner {
     } finally {
       session.inFlight = false;
       if (this.activeSessionId === sessionId) this.activeSessionId = null;
+      this.runNextWaiting();
     }
   }
 
