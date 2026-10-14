@@ -108,15 +108,15 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: windows-release-${{ needs.build-windows.outputs.version }}
           path: artifacts
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: mac-release-${{ needs.build-windows.outputs.version }}
           path: artifacts
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: linux-release-${{ needs.build-windows.outputs.version }}
           path: artifacts
