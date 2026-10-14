@@ -1,14 +1,18 @@
 // Where the Copilot CLI that Browy runs lives.
 //
 // Up to @github/copilot 1.0.36 the npm package was the CLI itself, a Node
-// script at @github/copilot/index.js, and Copilot SDK 0.3.0 finds it there on
-// its own. Later releases ship the CLI as a native binary in a per-platform
-// package, @github/copilot-<platform>-<arch>, and @github/copilot is only a
-// loader that execs it. The SDK's lookup does not know about that layout, so
-// Browy finds the binary and passes it in as `cliPath`.
+// script at @github/copilot/index.js. Later releases ship the CLI as a native
+// binary in a per-platform package, @github/copilot-<platform>-<arch>, and
+// @github/copilot is only a loader that execs it.
+//
+// Copilot SDK 1.x brings its own runtime in @github/copilot-sdk-<platform>,
+// but that runtime can't run an interactive `copilot` for sign-in, so Browy
+// keeps shipping the full CLI and hands it to the SDK as the stdio runtime.
+// The SDK's runtime package is left out of releases (scripts/stage.mjs).
 
 import fs from 'fs';
 import path from 'path';
+import { createRequire } from 'module';
 import { fileURLToPath } from 'url';
 
 /** Platform package names to try, most specific first. */
@@ -51,9 +55,12 @@ export function resolveCopilotCli(
   return undefined;
 }
 
-/** Options for `new CopilotClient(...)`. Empty when nothing was found, which
- *  leaves the SDK's own lookup and its error message in charge. */
-export function copilotClientOptions(): { cliPath?: string } {
+/** Options for `new CopilotClient(...)`: the CLI above as the SDK's stdio
+ *  runtime. Empty when no CLI was found, which leaves the SDK's own runtime
+ *  lookup and its error message in charge. */
+export function copilotClientOptions(): { connection?: unknown } {
   const cliPath = resolveCopilotCli();
-  return cliPath ? { cliPath } : {};
+  if (!cliPath) return {};
+  const { RuntimeConnection } = createRequire(import.meta.url)('@github/copilot-sdk');
+  return { connection: RuntimeConnection.forStdio({ path: cliPath }) };
 }

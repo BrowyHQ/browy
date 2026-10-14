@@ -1,0 +1,24 @@
+# Keep Browy's dependencies current. The Copilot SDK fell six months and a
+# major version behind (0.3.0 against 1.0.21) before anyone noticed, and the
+# Copilot CLI ships several releases a week.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    groups:
+      # The SDK and the CLI it drives are tested together, so they move together.
+      copilot:
+        patterns:
+          - "@github/copilot"
+          - "@github/copilot-sdk"
+      dev-dependencies:
+        dependency-type: development
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday

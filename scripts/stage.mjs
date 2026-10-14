@@ -121,7 +121,7 @@ if (exists(copilotPrebuilds) && prebuildName) {
 // @github/copilot used to be the CLI itself (index.js, loaded by the SDK with
 // node). Since it moved to native binaries it is only a loader, npm-loader.js,
 // and the CLI is @github/copilot-<platform>-<arch>/copilot[.exe], which
-// src/agent/copilot-cli.ts finds and hands to the SDK as `cliPath`.
+// src/agent/copilot-cli.ts finds and hands to the SDK as its stdio runtime.
 //
 // npm installs that package by the arch of the machine running `npm ci`, and
 // release.yml stages darwin-x64 on an arm64 runner and linux-arm64 on an x64
@@ -167,6 +167,19 @@ if (cliDirVersion !== cliVersion || !exists(cliBin)) {
 if (!exists(cliBin)) throw new Error(`[stage:${target}] Copilot CLI binary missing: ${cliBin}`);
 if (!isWin) fs.chmodSync(cliBin, 0o755);
 log(`Copilot CLI ${cliVersion}: @github/copilot-${cliPlatform} (${dirSizeMB(cliDir).toFixed(1)}MB)`);
+
+// 7.2 Drop the Copilot SDK's own runtime, @github/copilot-sdk-<platform>
+// (about 140MB). Browy hands the SDK the CLI above instead, because that
+// runtime can't run an interactive `copilot` for sign-in, and the SDK only
+// looks for its runtime when no CLI path is given (src/agent/copilot-cli.ts).
+for (const dir of fs.readdirSync(githubScope)) {
+  if (/^copilot-sdk-/.test(dir)) {
+    const full = path.join(githubScope, dir);
+    const mb = dirSizeMB(full);
+    rm(full);
+    log(`removed node_modules/@github/${dir} (${mb.toFixed(1)}MB, Browy ships the full CLI instead)`);
+  }
+}
 
 // 7.5 Bundle the browser extension at a stable path next to the host so the
 // installer can lay it down somewhere the user can `Load unpacked` from

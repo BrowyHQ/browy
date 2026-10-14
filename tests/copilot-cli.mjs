@@ -1,9 +1,10 @@
 // Which Copilot CLI Browy hands to the SDK.
 //
 // Newer @github/copilot releases ship the CLI as a native binary in
-// @github/copilot-<platform>-<arch>, and Copilot SDK 0.3.0 only knows the old
-// @github/copilot/index.js. Without an explicit cliPath the SDK fails to start
-// at all, so this guards the lookup on every layout Browy runs from.
+// @github/copilot-<platform>-<arch>. Browy hands that binary to the Copilot
+// SDK as its runtime, because the SDK's own runtime can't run an interactive
+// sign-in and is left out of releases. If this lookup misses, a release build
+// has no runtime at all, so this guards it on every layout Browy runs from.
 //
 // Run: node tests/copilot-cli.mjs   (Node 23.6+ strips the .ts types itself)
 

@@ -107,6 +107,7 @@ export async function runHeadless(argv: string[]): Promise<void> {
         clientName: BROWY_CLI_CLIENT,
         workingDirectory: opts.cwd,
         ...(opts.model ? { model: opts.model } : {}),
+        streaming: true,
         onPermissionRequest: approveAll,
       });
     } catch (err) {
@@ -118,6 +119,8 @@ export async function runHeadless(argv: string[]): Promise<void> {
       clientName: BROWY_CLI_CLIENT,
       workingDirectory: opts.cwd,
       ...(opts.model ? { model: opts.model } : {}),
+      // Without this the SDK sends no deltas and each reply prints at the end.
+      streaming: true,
       onPermissionRequest: approveAll,
     });
   }

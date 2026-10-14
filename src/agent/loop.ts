@@ -5,7 +5,7 @@ import { chromium, type Browser, type CDPSession, type Page } from 'playwright-c
 import os from 'os';
 import path from 'path';
 import { getForegroundInfo, brandFromProcessName, stripBrowserSuffix, shutdownForeground } from './foreground.js';
-import { copilotClientOptions } from './copilot-cli.js';
+import { copilotClientOptions, resolveCopilotCli } from './copilot-cli.js';
 import { RecentActions } from './recent-actions.js';
 import { OPT_IN_TOOLS, toolPolicy } from './tool-policy.js';
 import { TurnText } from './turn-text.js';
@@ -30,6 +30,18 @@ const BROWSERAGENT_WORKDIR = path.join(os.homedir(), '.browseragent', 'sessions'
  *  in listSessions(). */
 function isBrowySessionId(id: string): boolean {
   return /^(sp|dt)-/.test(id);
+}
+
+/** Resolve with `fallback` if `p` fails or takes longer than `ms`. The page
+ *  context Browy adds to each turn is a nice-to-have, and a tab that doesn't
+ *  answer (frozen, or blocked by a dialog) must not hold the model back for
+ *  the bridge's full minute. */
+function withDeadline<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    p.catch(() => fallback),
+    new Promise<T>((resolve) => { timer = setTimeout(() => resolve(fallback), ms); }),
+  ]).finally(() => clearTimeout(timer));
 }
 
 /** Decide whether an SDK session belongs to Browy.
@@ -459,7 +471,7 @@ export class Agent {
     // createSession is valid on the spawned `copilot` subprocess.
     try { (await import('fs')).mkdirSync(BROWSERAGENT_WORKDIR, { recursive: true }); } catch {}
     const cliOptions = copilotClientOptions();
-    console.log(`  Copilot CLI: ${cliOptions.cliPath || '(SDK default lookup)'}`);
+    console.log(`  Copilot CLI: ${resolveCopilotCli() || '(SDK bundled runtime)'}`);
     this.copilotClient = new CopilotClient(cliOptions);
     await this.copilotClient.start();
     // Sweep stale BrowserAgent sessions left over from previous runs
@@ -842,7 +854,7 @@ export class Agent {
       // round-trips for "summarize this page", "what am I looking at", etc.
       const ctx = this.currentTabInfo;
       const cdpForCtx = this.getCdpForContext();
-      const extras = await this.captureLiveContext(cdpForCtx);
+      const extras = await withDeadline(this.captureLiveContext(cdpForCtx), 5_000, {});
       const contextLines: string[] = [];
       if (ctx.url) {
         contextLines.push(`Browser:    ${ctx.brand}`);
@@ -862,10 +874,10 @@ export class Agent {
       const url = ctx.url || '';
       const isInteractivePage = url && !/^(chrome|edge|brave|about|chrome-extension):/i.test(url);
       if (cdpForCtx && isInteractivePage) {
-        try {
-          const snap = await ensureSnapshot(cdpForCtx, 0); // always fresh on user turn
-          snapshotBlock = `\n<page_snapshot>\n${serializeSnapshot(snap)}\n</page_snapshot>`;
-        } catch { /* fail-soft: agent can still call inspect_page */ }
+        // always fresh on user turn
+        const snap = await withDeadline(ensureSnapshot(cdpForCtx, 0), 10_000, null);
+        if (snap) snapshotBlock = `\n<page_snapshot>\n${serializeSnapshot(snap)}\n</page_snapshot>`;
+        // else fail-soft: agent can still call inspect_page
       }
 
       const recentBlock = this.serializeRecentActions();
@@ -1155,7 +1167,7 @@ export class Agent {
     if (!this.copilotClient || !id) return [];
     let events: any[] = [];
     if (this.copilotSession && this.browyProtocolSessionId === id) {
-      try { events = (await this.copilotSession.getMessages()) || []; } catch { return []; }
+      try { events = (await this.copilotSession.getEvents()) || []; } catch { return []; }
     } else {
       let handle: any = null;
       // Capture the on-disk timestamp before resuming so listChats can report
@@ -1174,7 +1186,7 @@ export class Agent {
           model: this.config.model,
           onPermissionRequest: approveAll,
         });
-        events = (await handle.getMessages()) || [];
+        events = (await handle.getEvents()) || [];
       } catch {
         return [];
       } finally {

@@ -6,7 +6,7 @@ All notable changes to Browy will be documented in this file. The format follows
 
 ### Fixed
 
-- **A browser call that never answered stalled the whole turn.** When a tab was frozen, discarded or showing a dialog, chrome.debugger could leave a call without a reply, and the agent waited on it until a five-minute watchdog gave up with "Agent went idle for 5 min with no SDK activity". Calls to the browser now fail after a minute, or a little after a script's own timeout, so the agent gets an error it can work around. The watchdog stays as a last resort. It now names the tool it was waiting on and aborts the turn in the Copilot runtime too, so your next message doesn't queue behind the stuck one.
+- **A browser call that never answered stalled the whole turn.** When a tab was frozen, discarded or showing a dialog, chrome.debugger could leave a call without a reply, and the agent waited on it until a five-minute watchdog gave up with "Agent went idle for 5 min with no SDK activity". Calls to the browser now fail after a minute, or a little after a script's own timeout, so the agent gets an error it can work around. The page details Browy attaches to each message give up after a few seconds, so a blocked tab no longer holds up the model either. The watchdog stays as a last resort. It now names the tool it was waiting on and aborts the turn in the Copilot runtime too, so your next message doesn't queue behind the stuck one.
 - **Replies stream, and nothing gets dropped.** Sessions were created without the SDK's `streaming` option, so each reply showed up in one piece when the model finished. And when a turn had several messages (the model says something, calls tools, then says more), every message after the first was dropped if it was shorter than what came before it, or cut mid-word if it was longer. Each message is now tracked on its own.
 - **Chats you come back to keep Browy's instructions.** Resuming a chat after the backend restarted didn't pass Browy's system prompt, and the runtime doesn't keep it, so the rest of that chat ran on the stock Copilot coding-agent prompt.
 - **Stop stops.** It ends the turn right away with whatever Browy had said, aborts the turn in the Copilot runtime, and releases any browser call it was waiting on. The chat stays put, so your next message carries on from there.
@@ -14,6 +14,7 @@ All notable changes to Browy will be documented in this file. The format follows
 
 ### Changed
 
+- **Copilot SDK 1.0.21 and Copilot CLI 1.0.97.** Browy was still on SDK 0.3.0 from April, six months and a major version behind. SDK 1.x brings its own Copilot runtime, but that runtime can't run the interactive sign-in, so Browy keeps shipping the full CLI and hands it to the SDK. The download stays about the same size. Dependabot now opens weekly update PRs, and every release takes them first.
 - **Two windows, one Browy.** Each window's Browy now works on that window's tabs; it used to follow whichever window you focused last. A message sent from a second window while the first is busy waits its turn and starts as soon as the first finishes, instead of failing with "agent is busy on another panel", and Stop takes it out of the line. Closing a panel mid-run stops that run, and its output no longer spills into the other open panels.
 
 ## [0.1.10]: `run_script` is off until you switch it on

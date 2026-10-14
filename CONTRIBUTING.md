@@ -216,11 +216,12 @@ Browser-driving tools go in `browser.ts`. Host-touching tools (shell, filesystem
 
 Releases are cut from `main` by the maintainer. Each release:
 
-1. Bumps `extension/manifest.json` and `package.json`.
-2. Adds a new section to [CHANGELOG.md](CHANGELOG.md) with `### Added` / `### Changed` / `### Fixed` / `### Removed` subsections per [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-3. Tags `v0.X.Y` and pushes the tag.
-4. The release workflow builds the installers and uploads to [GitHub Releases](https://github.com/BrowyHQ/browy/releases).
-5. The Chrome Web Store listing is updated separately, only when the extension code itself changes.
+1. Brings dependencies up to date: merges the open Dependabot PRs and checks `npm outdated`, so every release ships the current Copilot SDK and CLI.
+2. Bumps `extension/manifest.json` and `package.json`.
+3. Adds a new section to [CHANGELOG.md](CHANGELOG.md) with `### Added` / `### Changed` / `### Fixed` / `### Removed` subsections per [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+4. Tags `v0.X.Y` and pushes the tag.
+5. The release workflow builds the installers and uploads to [GitHub Releases](https://github.com/BrowyHQ/browy/releases).
+6. The Chrome Web Store listing is updated separately, only when the extension code itself changes.
 
 You do not need to bump versions in your PR. The maintainer batches version bumps with releases.
 
