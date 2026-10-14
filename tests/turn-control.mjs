@@ -71,18 +71,21 @@ const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
 // ── one agent, several panels ──────────────────────────────────────────────
 
-function fakeAgent() {
+function fakeAgent({ stuck = false } = {}) {
   const a = {
-    chats: [], aborts: 0, current: null,
+    chats: [], aborts: 0, current: null, resolvers: [],
     setActivityCallback() {}, setBrowyProtocolSessionId() {}, setBrowserContextOverride() {},
     setDisabledTools() {}, setEnabledHostTools() {}, getModel: () => 'm', listModels: async () => [],
     chat(text) {
       a.chats.push(text);
-      return new Promise((resolve) => { a.current = resolve; });
+      return new Promise((resolve) => { a.current = resolve; a.resolvers.push(resolve); });
     },
     finish(text) { const r = a.current; a.current = null; r({ text, toolCalls: [] }); },
+    resolveAt(i, text) { a.resolvers[i]({ text, toolCalls: [] }); },
+    // A stuck agent ignores Stop, like a turn waiting on something that never answers.
     async abort() {
       a.aborts++;
+      if (stuck) return;
       const r = a.current; a.current = null;
       if (r) r({ text: 'partial', toolCalls: [], stopped: true });
     },
@@ -90,9 +93,9 @@ function fakeAgent() {
   return a;
 }
 
-function harness() {
-  const agent = fakeAgent();
-  const runner = new Runner(agent, { serverVersion: 'test' });
+function harness(opts = {}) {
+  const agent = fakeAgent(opts);
+  const runner = new Runner(agent, { serverVersion: 'test', stopGraceMs: 30 });
   const out = [];
   let deliver;
   runner.attach({ id: 'native', send: (m) => out.push(m), onMessage: (cb) => { deliver = cb; }, onClose() {}, close() {} });
@@ -150,9 +153,40 @@ function harness() {
   check('and the next window in line gets the agent', h.agent.chats.join() === 'first,second');
 }
 
+// ── Stop always frees the panel (0.1.13) ───────────────────────────────────
+
+{
+  // Until 0.1.13 a turn stuck before it reached Copilot ignored Stop, and the
+  // panel stayed busy until the extension was reloaded.
+  const h = harness({ stuck: true });
+  await h.send({ type: 'session.start', sessionId: 'sp-a', capabilities: [] });
+  await h.send({ type: 'chat.send', sessionId: 'sp-a', text: 'first' });
+  await h.send({ type: 'chat.cancel', sessionId: 'sp-a' });
+  await tick(80);
+  const done = h.of('sp-a', 'chat.done');
+  check('Stop frees the panel of a turn that ignores it', done.length === 1 && done[0].stopped === true, JSON.stringify(done));
+  await h.send({ type: 'chat.send', sessionId: 'sp-a', text: 'second' });
+  check('and the next message runs', h.agent.chats.join() === 'first,second', h.agent.chats.join());
+  h.agent.resolveAt(0, 'late first');
+  await tick();
+  check("the freed turn's late result is dropped", h.of('sp-a', 'chat.done').length === 1, JSON.stringify(h.of('sp-a', 'chat.done')));
+  h.agent.resolveAt(1, 'second done');
+  await tick();
+  const all = h.of('sp-a', 'chat.done');
+  check('the next turn still finishes normally', all.length === 2 && all[1].text === 'second done', JSON.stringify(all));
+}
+
+{
+  // A chat the host has no record of used to vanish without a reply.
+  const h = harness();
+  await h.send({ type: 'chat.send', sessionId: 'sp-ghost', text: 'hello' });
+  const err = h.of('sp-ghost', 'chat.error')[0];
+  check('a chat for an unknown session is answered with no_session', err?.code === 'no_session' && h.agent.chats.length === 0, JSON.stringify(err));
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 if (failures.length) {
   console.error('FAIL:\n  - ' + failures.join('\n  - '));
   process.exit(1);
 }
-console.log('PASS — turn control (14 assertions)');
+console.log('PASS — turn control (19 assertions)');

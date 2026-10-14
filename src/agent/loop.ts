@@ -205,11 +205,16 @@ interface BrowserConnection {
 }
 
 /** The turn in flight, so abort() can end it. `stop` is set once the turn is
- *  listening for SDK events; `stopped` records that Stop was pressed. */
+ *  listening for SDK events; `stopped` records that Stop was pressed; `halt`
+ *  ends whatever setup step the turn is waiting on. */
 interface TurnControl {
   stopped: boolean;
   stop: (() => void) | null;
+  halt: () => void;
 }
+
+/** Thrown inside chat() when Stop ends a setup step. */
+const STOPPED = Symbol('stopped');
 
 /** How long a tool request may go unanswered before the turn answers it with
  *  an error, so the model can carry on. Each call to the browser already
@@ -274,6 +279,14 @@ export class Agent {
   private toolSteps = new Map<string, string>();
   /** Requests the turn's deadline already answered; their late results are dropped. */
   private abandonedTools = new Set<string>();
+  /** Browy's tool handlers by name, so chat() can run a request the SDK
+   *  failed to dispatch. */
+  private toolHandlersByName = new Map<string, (args: Record<string, unknown>, invocation?: { requestId?: string }) => Promise<string>>();
+  /** Set when a turn stalled or the SDK dropped a request: the next turn
+   *  detaches this session handle and opens a fresh one. */
+  private sessionSuspect = false;
+  /** The ensureSession() in flight, so a chat is never resumed twice at once. */
+  private sessionOpening: Promise<void> | null = null;
 
   constructor(config: Config) {
     this.config = config;
@@ -569,46 +582,53 @@ export class Agent {
     const self = this;
 
     return allTools.map(tool => {
+      const handler = async (args: Record<string, unknown>, invocation?: { requestId?: string }) => {
+        const freshCtx = self.getBrowserContext();
+        // Stable id so UI can match start↔end of the same call
+        const id = `${tool.def.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+        // Recorded before the first await: chat() reads it in the same tick
+        // to tell whether the SDK dispatched a request at all.
+        const requestId = invocation?.requestId;
+        if (requestId) self.toolSteps.set(requestId, id);
+
+        self.emit({ type: 'activity', event: 'tool_start', tool: tool.def.name, args });
+        self.emit({ type: 'tool_step', id, name: tool.def.name, args, status: 'start' });
+        const t0 = Date.now();
+        let result = '';
+        try {
+          result = await tool.run(args, freshCtx);
+          // The turn's deadline already answered and reported this call.
+          if (requestId && self.abandonedTools.delete(requestId)) return result;
+          const dur = Date.now() - t0;
+          self.emit({ type: 'activity', event: 'tool_end', tool: tool.def.name, result: result.slice(0, 300), durationMs: dur });
+          self.emit({ type: 'tool_step', id, name: tool.def.name, status: 'end', result: result.slice(0, 200), durationMs: dur });
+          self.recordRecentAction(tool.def.name, args, result, true, dur);
+        } catch (err) {
+          if (requestId && self.abandonedTools.delete(requestId)) throw err;
+          const dur = Date.now() - t0;
+          const errMsg = err instanceof Error ? err.message : String(err);
+          self.emit({ type: 'tool_step', id, name: tool.def.name, status: 'error', result: errMsg, durationMs: dur });
+          self.recordRecentAction(tool.def.name, args, errMsg, false, dur);
+          throw err;
+        } finally {
+          if (requestId) self.toolSteps.delete(requestId);
+        }
+
+        // Reconnect CDP after navigation
+        if (tool.def.name === 'navigate') {
+          await self.reconnectToActivePage();
+        }
+
+        return result;
+      };
+      self.toolHandlersByName.set(tool.def.name, handler);
+      // Test hook: register this tool without a handler, so the SDK drops its
+      // requests the way it did on 14 Oct and chat() has to run them itself.
+      const dropped = process.env.BROWY_TEST_DROP_TOOL === tool.def.name;
       return defineTool(tool.def.name, {
         description: tool.def.description,
         parameters: tool.def.parameters,
-        handler: async (args: Record<string, unknown>, invocation?: { requestId?: string }) => {
-          const freshCtx = self.getBrowserContext();
-          // Stable id so UI can match start↔end of the same call
-          const id = `${tool.def.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-          const requestId = invocation?.requestId;
-          if (requestId) self.toolSteps.set(requestId, id);
-
-          self.emit({ type: 'activity', event: 'tool_start', tool: tool.def.name, args });
-          self.emit({ type: 'tool_step', id, name: tool.def.name, args, status: 'start' });
-          const t0 = Date.now();
-          let result = '';
-          try {
-            result = await tool.run(args, freshCtx);
-            // The turn's deadline already answered and reported this call.
-            if (requestId && self.abandonedTools.delete(requestId)) return result;
-            const dur = Date.now() - t0;
-            self.emit({ type: 'activity', event: 'tool_end', tool: tool.def.name, result: result.slice(0, 300), durationMs: dur });
-            self.emit({ type: 'tool_step', id, name: tool.def.name, status: 'end', result: result.slice(0, 200), durationMs: dur });
-            self.recordRecentAction(tool.def.name, args, result, true, dur);
-          } catch (err) {
-            if (requestId && self.abandonedTools.delete(requestId)) throw err;
-            const dur = Date.now() - t0;
-            const errMsg = err instanceof Error ? err.message : String(err);
-            self.emit({ type: 'tool_step', id, name: tool.def.name, status: 'error', result: errMsg, durationMs: dur });
-            self.recordRecentAction(tool.def.name, args, errMsg, false, dur);
-            throw err;
-          } finally {
-            if (requestId) self.toolSteps.delete(requestId);
-          }
-
-          // Reconnect CDP after navigation
-          if (tool.def.name === 'navigate') {
-            await self.reconnectToActivePage();
-          }
-
-          return result;
-        },
+        ...(dropped ? {} : { handler }),
       });
     });
   }
@@ -761,7 +781,22 @@ export class Agent {
   }
 
   private async ensureSession() {
+    if (this.sessionSuspect && this.copilotSession) {
+      // The last turn stalled on this handle, or the SDK stopped dispatching
+      // its tools. Detach it before resuming, so the detach can't land on the
+      // fresh handle.
+      const old = this.copilotSession;
+      this.copilotSession = null;
+      this.sessionSuspect = false;
+      console.log(`  ↻ reopening session ${old.sessionId} after a stall`);
+      await withDeadline(Promise.resolve().then(() => old.disconnect()), 10_000, undefined);
+    }
     if (this.copilotSession) return;
+    this.sessionOpening ??= this.openSession().finally(() => { this.sessionOpening = null; });
+    return this.sessionOpening;
+  }
+
+  private async openSession() {
     // Tools close over `self.getBrowserContext()` and read the current CDP at
     // call time, so we only need to build them once per session.
     const tools = this.buildCopilotTools(this.getBrowserContext());
@@ -832,20 +867,45 @@ export class Agent {
   async chat(userText: string): Promise<{ text: string; toolCalls: ToolCallRecord[]; stopped?: boolean }> {
     // Registered before the first await, so a Stop that lands while the turn
     // is still being set up is not lost.
-    const ctl: TurnControl = { stopped: false, stop: null };
+    let halt: () => void = () => {};
+    const halted = new Promise<void>((resolve) => { halt = resolve; });
+    const ctl: TurnControl = { stopped: false, stop: null, halt: () => halt() };
     this.turn = ctl;
-    await this.whenCopilotReady();
-    if (!this.copilotClient) {
-      if (this.turn === ctl) this.turn = null;
-      throw new Error('Copilot SDK is not initialised yet — try again in a moment, or run /signin if this persists.');
-    }
-    await this.detectFocusedTab();
-    await this.refreshTabInfo();
-    // Extension mode: Agent has no playwright activePage, so refreshTabInfo
-    // can't populate currentTabInfo. Pull it directly from the BrowserToolContext.
-    if (this.contextOverride?.getActiveTabInfo) {
+    const stoppedResult = () => {
+      this.emit({ type: 'status', status: 'idle' });
+      return { text: '', toolCalls: [] as ToolCallRecord[], stopped: true };
+    };
+    // A setup step ends at once when Stop is pressed, and after `ms` the turn
+    // carries on with `fallback`. Until 0.1.13 a step that never finished
+    // held the panel, Stop included, until the extension was reloaded.
+    // Errors still come through.
+    const step = async <T>(what: string, p: Promise<T>, ms: number, fallback: T): Promise<T> => {
+      let timer: NodeJS.Timeout | undefined;
       try {
-        const info = await this.contextOverride.getActiveTabInfo();
+        const r = await Promise.race([
+          p,
+          halted.then((): T => { throw STOPPED; }),
+          new Promise<T>((resolve) => {
+            timer = setTimeout(() => { console.log(`  ⏱ ${what} took over ${ms / 1000} s`); resolve(fallback); }, ms);
+          }),
+        ]);
+        if (ctl.stopped) throw STOPPED;
+        return r;
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+    try {
+      await step('waiting for Copilot to start', this.whenCopilotReady(), 60_000, undefined);
+      if (!this.copilotClient) {
+        throw new Error('Copilot SDK is not initialised yet — try again in a moment, or run /signin if this persists.');
+      }
+      await step('finding the focused tab', this.detectFocusedTab(), 10_000, undefined);
+      await step('reading the tab', this.refreshTabInfo(), 10_000, undefined);
+      // Extension mode: Agent has no playwright activePage, so refreshTabInfo
+      // can't populate currentTabInfo. Pull it directly from the BrowserToolContext.
+      if (this.contextOverride?.getActiveTabInfo) {
+        const info = await step('reading the active tab', this.contextOverride.getActiveTabInfo().catch(() => null), 35_000, null);
         if (info && info.url) {
           this.currentTabInfo = {
             url: info.url,
@@ -854,12 +914,17 @@ export class Agent {
             tabCount: info.tabCount || 1,
           };
         }
-      } catch { /* fall through to whatever refreshTabInfo set */ }
+      }
+    } catch (e) {
+      if (this.turn === ctl) this.turn = null;
+      if (e === STOPPED) return stoppedResult();
+      throw e;
     }
     this.emit({ type: 'status', status: 'thinking' });
 
     try {
-      await this.ensureSession();
+      const opened = await step('opening the chat', this.ensureSession().then(() => true), 60_000, false);
+      if (!opened) throw new Error('Copilot did not open this chat within a minute. Send your message again to retry.');
       // Genuine activity — drop any preview pin so this chat legitimately
       // floats back to the top of the list.
       if (this.browyProtocolSessionId) this.previewTimePins.delete(this.browyProtocolSessionId);
@@ -872,7 +937,7 @@ export class Agent {
       // round-trips for "summarize this page", "what am I looking at", etc.
       const ctx = this.currentTabInfo;
       const cdpForCtx = this.getCdpForContext();
-      const extras = await withDeadline(this.captureLiveContext(cdpForCtx), 5_000, {});
+      const extras = await step('reading the page', this.captureLiveContext(cdpForCtx), 5_000, {});
       const contextLines: string[] = [];
       if (ctx.url) {
         contextLines.push(`Browser:    ${ctx.brand}`);
@@ -893,7 +958,7 @@ export class Agent {
       const isInteractivePage = url && !/^(chrome|edge|brave|about|chrome-extension):/i.test(url);
       if (cdpForCtx && isInteractivePage) {
         // always fresh on user turn
-        const snap = await withDeadline(ensureSnapshot(cdpForCtx, 0), 10_000, null);
+        const snap = await step('snapshotting the page', ensureSnapshot(cdpForCtx, 0).catch(() => null), 10_000, null);
         if (snap) snapshotBlock = `\n<page_snapshot>\n${serializeSnapshot(snap)}\n</page_snapshot>`;
         // else fail-soft: agent can still call inspect_page
       }
@@ -930,6 +995,8 @@ export class Agent {
         // silent until the five-minute watchdog ended it. The SDK drops a
         // request without a trace when its session handle has no handler.
         const toolTimers = new Map<string, NodeJS.Timeout>();
+        // Each request is handled once, even if the runtime delivers it again.
+        const seenRequests = new Set<string>();
         const giveUpOnTool = (requestId: string, name: string) => {
           toolTimers.delete(requestId);
           const stepId = this.toolSteps.get(requestId);
@@ -969,6 +1036,8 @@ export class Agent {
           idleTimer = setTimeout(() => {
             const waiting = [...new Set(running.values())].join(', ');
             console.log(`  ⏱ watchdog: 5 min without SDK events (running: ${waiting || 'none'}, session handle ${session.disconnected ? 'disconnected' : 'connected'})`);
+            // Don't trust this handle for the next turn.
+            this.sessionSuspect = true;
             session.abort().catch(() => {});
             finish(() => reject(new Error(waiting
               ? `No progress for 5 minutes while ${waiting} was still running, so Browy stopped. Send a message to carry on.`
@@ -1000,13 +1069,20 @@ export class Agent {
               case 'tool.execution_complete':
                 running.delete(d.toolCallId);
                 break;
-              case 'external_tool.requested':
-                if (d.requestId && !toolTimers.has(d.requestId)) {
-                  const requestId = String(d.requestId);
-                  const name = String(d.toolName || 'a tool');
-                  toolTimers.set(requestId, setTimeout(() => giveUpOnTool(requestId, name), TOOL_DEADLINE_MS));
-                }
+              case 'external_tool.requested': {
+                if (!d.requestId) break;
+                const requestId = String(d.requestId);
+                const name = String(d.toolName || 'a tool');
+                if (seenRequests.has(requestId)) break;
+                seenRequests.add(requestId);
+                toolTimers.set(requestId, setTimeout(() => giveUpOnTool(requestId, name), TOOL_DEADLINE_MS));
+                // The SDK starts a tool synchronously while it dispatches the
+                // request, before this listener runs, and the handler records
+                // itself first thing. Not recorded means the SDK dropped the
+                // request, which is what stalled the 14 Oct run: run it here.
+                if (!this.toolSteps.has(requestId)) this.runUndispatchedTool(session, requestId, name, d.arguments);
                 break;
+              }
               case 'external_tool.completed':
                 clearTimeout(toolTimers.get(d.requestId));
                 toolTimers.delete(d.requestId);
@@ -1030,10 +1106,10 @@ export class Agent {
       // Stop pressed while the turn was still being set up.
       if (ctl.stopped) {
         ctl.stop?.();
-        this.emit({ type: 'status', status: 'idle' });
-        return { text: '', toolCalls: [], stopped: true };
+        return stoppedResult();
       }
-      await session.send({ prompt });
+      // Raced with Stop: the send itself can hang if the runtime is wedged.
+      await Promise.race([session.send({ prompt }), halted]);
       const text = await completion;
       const dur = Date.now() - t0;
 
@@ -1043,12 +1119,33 @@ export class Agent {
       if (ctl.stopped) return { text, toolCalls: [], stopped: true };
       return { text: text || 'No response', toolCalls: [] };
     } catch (err) {
+      if (err === STOPPED) return stoppedResult();
       const errMsg = `${err instanceof Error ? err.message : String(err)}`;
       this.emit({ type: 'status', status: 'error', detail: errMsg });
       return { text: `Error: ${errMsg}`, toolCalls: [] };
     } finally {
       if (this.turn === ctl) this.turn = null;
     }
+  }
+
+  /** Run a tool request the SDK received but never dispatched, and answer the
+   *  runtime directly (see the external_tool.requested case in chat()). The
+   *  handle that dropped it is reopened before the next turn. */
+  private runUndispatchedTool(session: any, requestId: string, name: string, args: unknown) {
+    this.sessionSuspect = true;
+    const handler = this.toolHandlersByName.get(name);
+    console.log(`  ↻ ${name}: the SDK did not dispatch request ${requestId} `
+      + `(session handle ${session.disconnected ? 'disconnected' : 'connected'}); ${handler ? 'running it directly' : 'no handler, the deadline answers it'}`);
+    if (!handler) return;
+    const answer = (payload: { result?: string; error?: string }) =>
+      Promise.resolve()
+        .then(() => session.rpc.tools.handlePendingToolCall({ requestId, ...payload }))
+        .catch((e: unknown) => console.log(`  ↻ could not answer ${name}: ${e instanceof Error ? e.message : String(e)}`));
+    const input = (args && typeof args === 'object' ? args : {}) as Record<string, unknown>;
+    handler(input, { requestId }).then(
+      (result) => answer({ result }),
+      (e: unknown) => answer({ error: e instanceof Error ? e.message : String(e) }),
+    );
   }
 
   /** Public: read the current focused-tab info (for UI polling). */
@@ -1347,6 +1444,7 @@ export class Agent {
     if (ctl) {
       ctl.stopped = true;
       ctl.stop?.();
+      ctl.halt();
     }
     // A runtime that is slow to acknowledge must not hold up the panel. No
     // status event here: the stopped turn reports idle itself, and by the

@@ -38,6 +38,8 @@ const empty  = document.getElementById('empty');
 const mascotBox = document.getElementById('mascotBox');
 
 let ws, busy = false, lastTab = null, currentAction = null, tabTitleText = 'connecting…';
+// Stop's safety net (see stop()), and whether this panel restarted the backend.
+let stopWatch = null, restartingHost = false;
 
 function setTtl() {
   if (currentAction) {
@@ -134,6 +136,7 @@ function renderMd(text) {
 // ── State ───────────────────────────────────────────────────────
 function setBusy(b) {
   busy = b;
+  if (!b && stopWatch) { clearTimeout(stopWatch); stopWatch = null; }
   goBtn.disabled = busy || !inp.value.trim();
   stopBtn.classList.toggle('show', b);
   dot.classList.toggle('busy', b);
@@ -406,10 +409,17 @@ function browyPost(msg) {
 }
 
 // Translate legacy WSMessage (what the UI emits) → BrowyProtocol → host.
+// The last message sent, kept so it can be sent once more if the backend
+// turns out not to know this chat (see the 'no_session' handling below).
+let lastChatText = null;
+let lastChatResent = false;
+let resendOnReady = null;
 function browySend(legacy) {
   if (!bgPort) return;
   if (legacy.type === 'chat') {
     pendingChat = '';
+    lastChatText = legacy.text;
+    lastChatResent = false;
     browyPost({ type: 'chat.send', sessionId: BROWY_SESSION_ID, text: legacy.text });
   } else if (legacy.type === 'stop') {
     browyPost({ type: 'chat.cancel', sessionId: BROWY_SESSION_ID });
@@ -1040,13 +1050,17 @@ function connect() {
         return;
       }
       brand.textContent = 'starting…';
+      // A new backend is starting, so this chat isn't registered with it
+      // yet; messages wait for session.ready.
+      sessionReady = false;
       // Booting is NOT offline. Let the user type (and queue a send) while
       // the host cold-starts, and never tell them to install a backend they
       // already have.
       try {
         setControlsState('booting');
         updateTrySuggestions();
-        hideConnBanner();
+        // Keep the notice up if this panel asked for the restart.
+        if (!restartingHost) hideConnBanner();
         const hint = document.querySelector('#empty .hint');
         if (hint) hint.textContent = '// starting the browy backend — first run takes a few seconds';
       } catch {}
@@ -1089,12 +1103,18 @@ function connect() {
     }
     if (raw.type === 'session.ready') {
       sessionReady = true;
+      restartingHost = false;
       // Safety net: any real message from the host proves it's alive, so
       // make sure the online controls reflect that even if __host_ready
       // was somehow missed during a fast SW restart.
       try { hideOnboarding(); setControlsState('online'); updateTrySuggestions(); hideConnBanner(); } catch {}
       refreshActiveTab();
       flushPendingHostMsgs();
+      if (resendOnReady) {
+        const text = resendOnReady;
+        resendOnReady = null;
+        browyPost({ type: 'chat.send', sessionId: BROWY_SESSION_ID, text });
+      }
       // If the chats overlay was opened while the host was still booting,
       // it'll be stuck on the "connecting…" placeholder. Re-render now
       // so the SDK-backed history pops in without the user having to
@@ -1122,6 +1142,16 @@ function connect() {
     // Events for a chat this panel is no longer showing, e.g. the tail of a
     // turn after "new chat", must not land in the current conversation.
     if (raw.sessionId && raw.sessionId !== BROWY_SESSION_ID) return;
+    // The backend had no record of this chat, so it dropped the message.
+    // Until 0.1.13 it said nothing and the panel waited forever. Register
+    // again and send the message once more.
+    if (raw.type === 'chat.error' && raw.code === 'no_session' && lastChatText && !lastChatResent) {
+      lastChatResent = true;
+      resendOnReady = lastChatText;
+      sessionReady = false;
+      startSession();
+      return;
+    }
     const legacy = browyTranslate(raw);
     if (legacy) handle(legacy);
   });
@@ -1586,7 +1616,24 @@ function send() {
     } catch {}
   }
 }
-function stop() { if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'stop' })); }
+function stop() {
+  if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'stop' }));
+  // The backend confirms a Stop within a second or two, and frees a stuck
+  // turn itself after three. Silence for ten means the backend itself is
+  // wedged: restart it rather than leave the panel stuck until the extension
+  // is reloaded, which was the only way out before 0.1.13.
+  clearTimeout(stopWatch);
+  stopWatch = setTimeout(() => {
+    stopWatch = null;
+    if (!busy) return;
+    restartingHost = true;
+    browyPost({ type: '__restart_host' });
+    markStopped();
+    setBusy(false);
+    finalizeLiveBubble();
+    try { showConnBanner("Browy's backend stopped answering, so it's restarting. Send your message again in a few seconds.", { warn: true }); } catch {}
+  }, 10_000);
+}
 
 // Start a brand new chat. The current chat is left intact in storage (it'll
 // reappear under "chats" in the history overlay). Backend session keeps the

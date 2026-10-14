@@ -540,6 +540,10 @@ port.onMessage.addListener((msg) => {
   switch (msg.type) {
     case '__host_pending':
       lastHostNotice = null;
+      // A new host is starting: register this panel's chat again once it's
+      // ready. Without this, chats sent after a host restart went nowhere.
+      sessionStarted = false;
+      setBusy(false);
       appendRow('dim', '·', 'starting host…');
       break;
     case '__host_ready':

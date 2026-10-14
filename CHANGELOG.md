@@ -2,6 +2,19 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [0.1.13]: Stop always works, and a dropped tool call gets run anyway
+*Released 2026-10-14*
+
+### Fixed
+
+- **A tool call the SDK drops is run anyway.** The Copilot runtime hands each of Browy's tool calls to Browy's backend and waits for the answer with no time limit, so recovering from a lost call is Browy's job. On 14 October the SDK received one such call and never passed it to the tool, and the run sat silent for five minutes. Browy now notices at once when the SDK skips a call, runs the tool itself, and reconnects the chat to Copilot before the next message. The two-minute answer from 0.1.12 stays as a backstop.
+- **Stop always frees the panel.** Every step before a message reaches Copilot, like opening the chat or reading the page, now has a time limit and ends at once on Stop. If a turn still hasn't let go three seconds after Stop, the backend frees the panel anyway. If the backend doesn't answer Stop at all for ten seconds, the side panel restarts it. Each of these used to need an extension reload.
+- **A message never disappears without a reply.** When the backend had no record of a chat, for example right after it restarted, it dropped the message and the panel waited forever. It now says so, and the side panel registers the chat again and sends the message once more. The DevTools panel also registers again after a backend restart.
+
+### Upgrading
+
+Run the install command again to update the backend, which has most of these fixes. Then reload the extension at chrome://extensions (brave://extensions in Brave) for the side panel's part: the ten-second restart and the automatic resend.
+
 ## [0.1.12]: a stuck tool call no longer ends the run
 *Released 2026-10-14*
 

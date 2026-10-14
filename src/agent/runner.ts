@@ -42,6 +42,9 @@ export interface RunnerOptions {
    *  knowledge) for now. */
   authProbe?: () => 'ready' | 'unauth' | 'unknown';
   authSignin?: () => boolean;
+  /** How long a turn may hold the panel after Stop before the runner frees
+   *  it anyway. Default 3 s; tests shorten it. */
+  stopGraceMs?: number;
 }
 
 export class Runner {
@@ -62,6 +65,10 @@ export class Runner {
    *  Until 0.1.11 they were refused with "agent is busy on another panel",
    *  and the user had to notice and send the message again. */
   private waiting: Array<{ sessionId: string; text: string }> = [];
+
+  /** The chat the agent is running. `released` means Stop freed its panel
+   *  before agent.chat() returned, so its eventual result is dropped. */
+  private currentTurn: { sessionId: string; settled: boolean; released: boolean } | null = null;
 
   /** Latched Copilot SDK readiness, replayed to clients that attach late. */
   private sdkReady: { ok: boolean; detail?: string } | null = null;
@@ -124,6 +131,21 @@ export class Runner {
     }
   }
 
+  /** Free the panel of a turn that ignored Stop. Its result, if it ever
+   *  comes, is dropped (see onChatSend). */
+  private releaseStuckTurn(turn: { sessionId: string; settled: boolean; released: boolean } | null): void {
+    if (!turn || turn.settled || turn.released || this.currentTurn !== turn) return;
+    turn.released = true;
+    console.log(`  ■ chat ${turn.sessionId}: still running ${(this.opts.stopGraceMs ?? 3000) / 1000} s after Stop; freeing the panel`);
+    const s = this.sessions.get(turn.sessionId);
+    s?.transport.send({ type: 'event.activity', sessionId: turn.sessionId, event: 'status.idle' });
+    s?.transport.send({ type: 'chat.done', sessionId: turn.sessionId, text: '', toolCalls: [], stopped: true });
+    if (s) s.inFlight = false;
+    if (this.activeSessionId === turn.sessionId) this.activeSessionId = null;
+    this.currentTurn = null;
+    this.runNextWaiting();
+  }
+
   // ── Inbound dispatch ─────────────────────────────────────────────────────
 
   private async handleClientMessage(transport: Transport, msg: ClientMessage): Promise<void> {
@@ -146,7 +168,7 @@ export class Runner {
       }
 
       case 'chat.send':
-        return this.onChatSend(msg.sessionId, msg.text);
+        return this.onChatSend(msg.sessionId, msg.text, transport);
 
       case 'chat.cancel': {
         const sid = (msg as any).sessionId;
@@ -162,10 +184,15 @@ export class Runner {
         // Only the session driving the agent can stop it. Otherwise one
         // panel could abort another panel's stream.
         if (this.activeSessionId && this.activeSessionId === sid) {
+          const turn = this.currentTurn;
           const stopping = this.agent.abort();
           // Release any browser call the turn was waiting on; the SDK abort
           // has already been requested, so the turn does not carry on.
           this.sessions.get(sid)?.extContext?.cancelPending('Stopped by the user.');
+          // Normally the turn ends within a second. If it is stuck somewhere
+          // Stop can't reach, free the panel anyway: until 0.1.13 that meant
+          // reloading the extension.
+          setTimeout(() => this.releaseStuckTurn(turn), this.opts.stopGraceMs ?? 3000);
           await stopping;
         }
         return;
@@ -318,9 +345,18 @@ export class Runner {
     }).catch(() => {});
   }
 
-  private async onChatSend(sessionId: string, text: string): Promise<void> {
+  private async onChatSend(sessionId: string, text: string, transport?: Transport): Promise<void> {
     const session = this.sessions.get(sessionId);
-    if (!session) return;
+    if (!session) {
+      // Until 0.1.13 this dropped the message without a word, and the panel
+      // waited forever. Say so; the side panel registers again and resends.
+      console.log(`  ▶ chat ${sessionId}: no such session on this host, so the panel is told to reconnect`);
+      transport?.send({
+        type: 'chat.error', sessionId, code: 'no_session',
+        message: "Browy's backend lost track of this chat. Reconnect and send the message again.",
+      });
+      return;
+    }
     if (session.inFlight) {
       session.transport.send({
         type: 'chat.error', sessionId, code: 'aborted',
@@ -343,10 +379,15 @@ export class Runner {
       }
       this.waiting.push({ sessionId, text });
       session.transport.send({ type: 'chat.queued', sessionId, position: this.waiting.length });
+      console.log(`  ▶ chat ${sessionId}: waiting behind ${this.activeSessionId} (position ${this.waiting.length})`);
       return;
     }
     session.inFlight = true;
     this.activeSessionId = sessionId;
+    const turn = { sessionId, settled: false, released: false };
+    this.currentTurn = turn;
+    const t0 = Date.now();
+    console.log(`  ▶ chat ${sessionId}: started`);
     // Bind the agent's Copilot SDK session to this protocol id so reloads
     // resume the same on-disk conversation.
     this.agent.setBrowyProtocolSessionId(sessionId);
@@ -357,10 +398,18 @@ export class Runner {
     } else {
       this.agent.setBrowserContextOverride(null);
     }
+    let outcome = 'done';
     try {
       const { text: response, toolCalls, stopped } = await this.agent.chat(text);
+      turn.settled = true;
+      // Stop already freed the panel; this late result belongs to nobody.
+      if (turn.released) return;
+      if (stopped) outcome = 'stopped';
       session.transport.send({ type: 'chat.done', sessionId, text: response, toolCalls, ...(stopped ? { stopped } : {}) });
     } catch (err) {
+      turn.settled = true;
+      if (turn.released) return;
+      outcome = 'error';
       const m = err instanceof Error ? err.message : String(err);
       const code = looksLikeAuthError(m) ? 'auth' : 'internal';
       session.transport.send({ type: 'chat.error', sessionId, message: m, code });
@@ -371,9 +420,16 @@ export class Runner {
         });
       }
     } finally {
-      session.inFlight = false;
-      if (this.activeSessionId === sessionId) this.activeSessionId = null;
-      this.runNextWaiting();
+      turn.settled = true;
+      if (turn.released) {
+        console.log(`  ■ chat ${sessionId}: the turn freed by Stop finally ended after ${Math.round((Date.now() - t0) / 1000)} s`);
+      } else {
+        console.log(`  ■ chat ${sessionId}: ${outcome} in ${Math.round((Date.now() - t0) / 1000)} s`);
+        session.inFlight = false;
+        if (this.activeSessionId === sessionId) this.activeSessionId = null;
+        if (this.currentTurn === turn) this.currentTurn = null;
+        this.runNextWaiting();
+      }
     }
   }
 

@@ -232,8 +232,10 @@ export interface ChatError {
   type: 'chat.error';
   sessionId: string;
   message: string;
-  /** "auth" → client should prompt sign-in; otherwise generic. */
-  code?: 'auth' | 'aborted' | 'internal' | 'no_capability' | 'busy';
+  /** "auth" → client should prompt sign-in; "no_session" → the host has no
+   *  record of this session id, so the client should send session.start
+   *  again; otherwise generic. */
+  code?: 'auth' | 'aborted' | 'internal' | 'no_capability' | 'busy' | 'no_session';
 }
 
 /** Server asks client to perform a CDP command on the user's browser. */

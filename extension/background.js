@@ -160,6 +160,22 @@ function sendToHost(msg) {
   }
 }
 
+/** Replace the native host with a fresh process. Disconnecting our end closes
+ *  the host's stdin, so the old process exits. Chrome doesn't fire
+ *  onDisconnect for a disconnect we make ourselves, so tidy up here. */
+function restartNativeHost() {
+  console.warn('[browy] restarting the native host for a panel whose Stop went unanswered');
+  if (nativePort) {
+    const old = nativePort;
+    nativePort = null;
+    nativeReady = false;
+    sessionToClient.clear();
+    try { old.disconnect(); } catch {}
+  }
+  broadcastToClients({ type: '__host_pending' });
+  ensureNativeHost();
+}
+
 function broadcastToClients(msg) {
   for (const port of clients.values()) {
     try { port.postMessage(msg); } catch {}
@@ -279,6 +295,12 @@ chrome.runtime.onConnect.addListener((port) => {
     // Internal client → SW commands (not forwarded)
     if (msg.type === '__ping') {
       try { port.postMessage({ type: '__pong', nativeReady, nativeServerVersion, nativeProtocol }); } catch {}
+      return;
+    }
+    // A panel's Stop went unanswered for ten seconds: the backend is wedged.
+    // Restart it, which is what reloading the extension used to achieve.
+    if (msg.type === '__restart_host') {
+      restartNativeHost();
       return;
     }
     // "Is the backend there yet?" from the first-run screen. After a missing
