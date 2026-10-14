@@ -50,7 +50,7 @@ jobs:
         shell: bash
         run: ls -la release/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-release-${{ steps.ver.outputs.version }}
           # Sideload zip ships to GH Releases; CWS variant is dev-only
@@ -73,7 +73,7 @@ jobs:
       - run: npm ci
       - run: npm run dist:mac-x64
       - run: npm run dist:mac-arm
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mac-release-${{ needs.build-windows.outputs.version }}
           path: |
@@ -91,7 +91,7 @@ jobs:
       - run: npm ci
       - run: npm run dist:linux
       - run: npm run dist:linux-arm
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-release-${{ needs.build-windows.outputs.version }}
           path: |
