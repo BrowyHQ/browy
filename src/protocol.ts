@@ -480,5 +480,9 @@ export interface Transport {
  *       may or may not speak them, and all of them report serverVersion "0.3.0".
  *   2 — 0.1.7: guarantees `sdk.ready` and `chat.delete`, and serverVersion is
  *       the real package version.
+ *
+ * 0.1.14 added `cdp.detached` (extension to host), `host.status` and
+ * `chat.done.interrupted` (host to extension) without a bump: each side works
+ * as before when the other doesn't send them, so nothing relies on them.
  */
 export const PROTOCOL_VERSION = 2;
