@@ -21,6 +21,7 @@ import type {
   ServerMessage,
   Capability,
   SessionStart,
+  CdpDetached,
 } from '../protocol.js';
 import { PROTOCOL_VERSION } from '../protocol.js';
 import type { WSMessage } from '../types.js';
@@ -284,6 +285,12 @@ export class Runner {
         s?.extContext?.handleCdpEvent(msg);
         return;
       }
+      case 'cdp.detached': {
+        const s = this.sessions.get(msg.sessionId);
+        console.log(`  ⚠ chat ${msg.sessionId}: the debugger came off tab ${msg.tabId} (${msg.reason}${msg.tabGone ? ', tab closed' : ''})`);
+        s?.extContext?.handleDetached(msg as CdpDetached);
+        return;
+      }
     }
   }
 
@@ -394,6 +401,7 @@ export class Runner {
     // Phase E: swap the agent's tool context to this session's. Single-Agent
     // shared across sessions is fine for v0.3 because we serialize chats.
     if (session.extContext) {
+      session.extContext.beginTurn();
       this.agent.setBrowserContextOverride(session.extContext.build());
     } else {
       this.agent.setBrowserContextOverride(null);

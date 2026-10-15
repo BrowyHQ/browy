@@ -9,10 +9,36 @@
 // Tools never need to know which mode they're in — the duck-typed surface is
 // identical to the playwright-backed BrowserToolContext.
 
-import type { Transport, ServerMessage, ToolResult, CdpEventFromClient, TabInfo } from '../protocol.js';
+import type { Transport, ServerMessage, ToolResult, CdpEventFromClient, CdpDetached, TabInfo } from '../protocol.js';
 import type { BrowserToolContext } from './tools/browser.js';
 
-type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void; method: string };
+/** `tabId` is set for CDP calls that name their tab, so a detach can fail them. */
+type Pending = { resolve: (v: unknown) => void; reject: (e: Error) => void; method: string; tabId?: number };
+
+/** What the model is told when Chrome takes the debugger off a tab. The
+ *  extension sends its own wording since 0.1.14 (keep the two in step with
+ *  extension/background.js); this covers older extensions, whose calls fail
+ *  with Chrome's bare "Detached while handling command.". */
+export function detachMessage(reason: string, tabGone = false): string {
+  if (reason === 'canceled_by_user') {
+    return "You clicked Cancel on Chrome's debugging bar, so Browy lost this tab. Ask me to try again and I'll reattach.";
+  }
+  if (tabGone) return "This tab was closed, so it's gone. Use list_tabs to pick another tab, or new_tab to open one.";
+  if (reason === 'target_closed') {
+    return "This tab went to a page Browy can't work on, like a chrome:// page, so Browy lost it. Go back to a normal web page, or pick another tab with list_tabs.";
+  }
+  if (reason === 'replaced_with_devtools') {
+    return 'Chrome DevTools took over this tab, so Browy lost it. Close DevTools on that tab and ask me to try again.';
+  }
+  return 'Browy lost its connection to this tab. It reattaches on the next step, so try again.';
+}
+
+/** Chrome's own wording for a lost tab, as older extensions pass it on. */
+function friendlyBrowserError(error: string): string {
+  if (/^Detached while handling command/i.test(error)) return detachMessage('unknown');
+  if (/^No tab with given id/i.test(error)) return detachMessage('target_closed', true);
+  return error;
+}
 
 /** How long a call to the extension may go unanswered. Until 0.1.11 there was
  *  no limit: a tab that was frozen, discarded or blocked by a dialog left
@@ -40,6 +66,10 @@ export class ExtensionContext {
   private activeTabId: number | null = null;
   /** Cache of last-known tab list — populated by getPages-shaped callers. */
   private knownTabs = new Map<number, ExtTabState>();
+  /** Detaches the model hasn't heard about yet, by tab. The next call to the
+   *  tab fails with the reason once instead of quietly reattaching; a call
+   *  after that reattaches. Cleared when a turn starts. */
+  private notices = new Map<number, { message: string; tabGone: boolean }>();
   private callSeq = 0;
 
   constructor(
@@ -56,7 +86,7 @@ export class ExtensionContext {
     if (!p) return false;
     this.pending.delete(msg.callId);
     if (msg.ok) p.resolve(msg.result);
-    else p.reject(new Error(msg.error || 'tool failed'));
+    else p.reject(new Error(friendlyBrowserError(msg.error || 'tool failed')));
     return true;
   }
 
@@ -66,6 +96,38 @@ export class ExtensionContext {
     for (const cb of subs) {
       try { cb(msg.params); } catch { /* never let a listener crash routing */ }
     }
+  }
+
+  /** Chrome took the debugger off a tab. Calls still waiting on it fail with
+   *  the reason now. If none was waiting, the model hasn't been told, so the
+   *  next call to that tab carries the news. */
+  handleDetached(msg: CdpDetached): void {
+    const tabId = Number(msg.tabId);
+    if (!Number.isFinite(tabId)) return;
+    const tabGone = !!msg.tabGone;
+    const message = msg.message || detachMessage(msg.reason, tabGone);
+    let told = Number(msg.failed) || 0;
+    for (const [callId, p] of this.pending) {
+      if (p.tabId !== tabId) continue;
+      this.pending.delete(callId);
+      p.reject(new Error(message));
+      told++;
+    }
+    if (told === 0) {
+      this.notices.set(tabId, { message, tabGone });
+    } else if (tabGone) {
+      this.forgetTab(tabId);
+    }
+  }
+
+  /** A new turn: what happened to tabs before it is old news. */
+  beginTurn(): void {
+    this.notices.clear();
+  }
+
+  private forgetTab(tabId: number): void {
+    this.knownTabs.delete(tabId);
+    if (this.activeTabId === tabId) this.activeTabId = null;
   }
 
   /** Reject every in-flight call, e.g. when the user presses Stop. */
@@ -86,7 +148,7 @@ export class ExtensionContext {
     return `${prefix}-${++this.callSeq}-${Date.now().toString(36)}`;
   }
 
-  private sendAndWait<T = unknown>(envelope: Omit<ServerMessage, never>, method: string, timeoutMs = TAB_TIMEOUT_MS): Promise<T> {
+  private sendAndWait<T = unknown>(envelope: Omit<ServerMessage, never>, method: string, timeoutMs = TAB_TIMEOUT_MS, tabId?: number): Promise<T> {
     const callId = (envelope as any).callId;
     const limit = this.timeoutOverrideMs ?? timeoutMs;
     return new Promise<T>((resolve, reject) => {
@@ -99,6 +161,7 @@ export class ExtensionContext {
         resolve: (v) => { clearTimeout(timer); resolve(v as T); },
         reject: (e) => { clearTimeout(timer); reject(e); },
         method,
+        tabId,
       });
       try {
         this.transport.send(envelope as ServerMessage);
@@ -118,12 +181,19 @@ export class ExtensionContext {
 
     const cdp = {
       send: async (method: string, params?: unknown) => {
+        const target = self.activeTabId;
+        const notice = target != null ? self.notices.get(target) : undefined;
+        if (notice) {
+          self.notices.delete(target!);
+          if (notice.tabGone) self.forgetTab(target!);
+          throw new Error(notice.message);
+        }
         const callId = self.nextCallId('cdp');
         const envelope = {
           type: 'cdp.send' as const,
           sessionId: self.sessionId,
           callId,
-          tabId: self.activeTabId ?? undefined,
+          tabId: target ?? undefined,
           method,
           params: params ?? {},
         };
@@ -131,7 +201,7 @@ export class ExtensionContext {
         // than that so the page's own timeout error is the one reported.
         const own = Number((params as { timeout?: unknown } | undefined)?.timeout);
         const limit = Number.isFinite(own) && own > 0 ? Math.max(CDP_TIMEOUT_MS, own + 15_000) : CDP_TIMEOUT_MS;
-        const wrapped = await self.sendAndWait<{ tabId: number; result: unknown }>(envelope, method, limit);
+        const wrapped = await self.sendAndWait<{ tabId: number; result: unknown }>(envelope, method, limit, target ?? undefined);
         // Remember whichever tab the SW actually used so subsequent calls pin
         // to the same tab (avoids races if the user switches tabs mid-flow).
         if (wrapped && typeof wrapped.tabId === 'number') self.activeTabId = wrapped.tabId;

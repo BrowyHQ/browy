@@ -7,6 +7,7 @@ All notable changes to Browy will be documented in this file. The format follows
 ### Fixed
 
 - **When a tool fails, the model now hears why.** Up to 0.1.13 every failure reached the model as "Tool execution failed", so it guessed at the cause and tried again; in one long run on 15 October that happened 11 times. The model now gets the actual error, such as a page that navigated away mid-call. A call that runs past the two-minute limit comes back as a timeout, with the reason.
+- **Losing a tab is explained instead of guessed at.** When Chrome takes its debugger off a tab, because you clicked Cancel on the "started debugging this browser" bar, the tab closed, or it moved to a page like chrome://, the step running on it fails at once with the reason and the model is told in plain words. Up to 0.1.13 it got Chrome's bare "Detached while handling command.", and the next step quietly reattached and brought the bar back. After a Cancel, Browy now leaves the browser alone until your next message. Otherwise the next step reattaches by itself.
 
 ## [0.1.13]: Stop always works, and a dropped tool call gets run anyway
 *Released 2026-10-14*

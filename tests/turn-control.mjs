@@ -73,8 +73,8 @@ const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
 function fakeAgent({ stuck = false } = {}) {
   const a = {
-    chats: [], aborts: 0, current: null, resolvers: [],
-    setActivityCallback() {}, setBrowyProtocolSessionId() {}, setBrowserContextOverride() {},
+    chats: [], aborts: 0, current: null, resolvers: [], ctx: null,
+    setActivityCallback() {}, setBrowyProtocolSessionId() {}, setBrowserContextOverride(ctx) { a.ctx = ctx; },
     setDisabledTools() {}, setEnabledHostTools() {}, getModel: () => 'm', listModels: async () => [],
     chat(text) {
       a.chats.push(text);
@@ -184,9 +184,92 @@ function harness(opts = {}) {
   check('a chat for an unknown session is answered with no_session', err?.code === 'no_session' && h.agent.chats.length === 0, JSON.stringify(err));
 }
 
+// ── a tab losing the debugger (0.1.14) ─────────────────────────────────────
+
+/** An extension context whose first call pins tab 7, as a turn's first call does. */
+async function pinnedContext() {
+  const sent = [];
+  const transport = { id: 't', send: (m) => sent.push(m), onMessage() {}, onClose() {}, close() {} };
+  const ext = new ExtensionContext('sp-a', transport, 60_000);
+  const ctx = ext.build();
+  const first = ctx.cdp.send('Runtime.evaluate', { expression: '1' });
+  ext.handleToolResult({ type: 'tool.result', sessionId: 'sp-a', callId: sent[0].callId, ok: true, result: { tabId: 7, result: {} } });
+  await first;
+  return { ext, ctx, sent };
+}
+const failure = (p) => p.then(() => null, (e) => e);
+
+{
+  // Until 0.1.14 a call on a tab that lost the debugger waited out the
+  // minute-long deadline, or failed with Chrome's bare wording.
+  const { ext, ctx, sent } = await pinnedContext();
+  const t0 = Date.now();
+  const pending = failure(ctx.cdp.send('Runtime.evaluate', { expression: '2' }));
+  ext.handleDetached({ type: 'cdp.detached', sessionId: 'sp-a', tabId: 7, reason: 'canceled_by_user', failed: 0 });
+  const err = await pending;
+  check('a detach fails the call running on that tab at once, saying why',
+    /You clicked Cancel on Chrome's debugging bar/.test(err?.message) && Date.now() - t0 < 1000, String(err));
+  const next = ctx.cdp.send('Runtime.evaluate', { expression: '3' });
+  check('the model already heard, so the next call goes to the browser', sent.length === 3 && sent[2].tabId === 7, JSON.stringify(sent.at(-1)));
+  ext.dispose();
+  await failure(next);
+}
+
+{
+  // Nothing was running on the tab when it closed: the next call says so once.
+  const { ext, ctx, sent } = await pinnedContext();
+  ext.handleDetached({ type: 'cdp.detached', sessionId: 'sp-a', tabId: 7, reason: 'target_closed', tabGone: true, message: 'TAB GONE', failed: 0 });
+  const err = await failure(ctx.cdp.send('Runtime.evaluate', {}));
+  check('a detach the model never heard about fails the next call to that tab', err?.message === 'TAB GONE' && sent.length === 1, String(err));
+  const next = ctx.cdp.send('Runtime.evaluate', {});
+  check('then calls go on, to the tab now active since that one is gone', sent.length === 2 && sent[1].tabId === undefined, JSON.stringify(sent.at(-1)));
+  ext.dispose();
+  await failure(next);
+}
+
+{
+  const { ext, ctx, sent } = await pinnedContext();
+  ext.handleDetached({ type: 'cdp.detached', sessionId: 'sp-a', tabId: 7, reason: 'canceled_by_user', message: 'M', failed: 1 });
+  const a = ctx.cdp.send('Runtime.evaluate', {});
+  check('a detach the extension already reported through a failed call is not repeated', sent.length === 2);
+  ext.handleToolResult({ type: 'tool.result', sessionId: 'sp-a', callId: sent[1].callId, ok: true, result: { tabId: 7, result: {} } });
+  await a;
+  ext.handleDetached({ type: 'cdp.detached', sessionId: 'sp-a', tabId: 7, reason: 'unknown', message: 'OLD NEWS', failed: 0 });
+  ext.beginTurn();
+  const b = ctx.cdp.send('Runtime.evaluate', {});
+  check('a new turn drops notices from before it', sent.length === 3);
+  ext.dispose();
+  await failure(b);
+}
+
+{
+  // Extensions before 0.1.14 pass on Chrome's own words.
+  const { ext, ctx, sent } = await pinnedContext();
+  const pending = failure(ctx.cdp.send('Runtime.evaluate', {}));
+  ext.handleToolResult({ type: 'tool.result', sessionId: 'sp-a', callId: sent[1].callId, ok: false, error: 'Detached while handling command.' });
+  const err = await pending;
+  check("Chrome's bare detach error is put in plain words", /lost its connection to this tab/.test(err?.message), String(err));
+}
+
+{
+  // The runner hands cdp.detached to the chat's own context.
+  const h = harness();
+  await h.send({ type: 'session.start', sessionId: 'sp-a', capabilities: ['cdp.activeTab'] });
+  await h.send({ type: 'chat.send', sessionId: 'sp-a', text: 'go' });
+  const first = h.agent.ctx.cdp.send('Runtime.evaluate', {});
+  const call1 = h.out.find((m) => m.type === 'cdp.send');
+  await h.send({ type: 'tool.result', sessionId: 'sp-a', callId: call1.callId, ok: true, result: { tabId: 5, result: {} } });
+  await first;
+  const pending = failure(h.agent.ctx.cdp.send('Runtime.evaluate', {}));
+  await h.send({ type: 'cdp.detached', sessionId: 'sp-a', tabId: 5, reason: 'replaced_with_devtools', failed: 0 });
+  check('the runner routes a detach to the chat it belongs to', /DevTools took over this tab/.test((await pending)?.message));
+  h.agent.finish('done');
+  await tick();
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 if (failures.length) {
   console.error('FAIL:\n  - ' + failures.join('\n  - '));
   process.exit(1);
 }
-console.log('PASS — turn control (19 assertions)');
+console.log('PASS: turn control (27 assertions)');

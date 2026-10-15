@@ -122,6 +122,25 @@ export interface CdpEventFromClient {
   params: unknown;
 }
 
+/** The extension lost chrome.debugger on a tab: the tab closed, the user
+ *  clicked Cancel on Chrome's debugging bar, DevTools took over, or similar.
+ *  Calls the extension was still running on the tab have already been
+ *  answered with `message`; `failed` counts this session's. Hosts before
+ *  0.1.14 ignore it. */
+export interface CdpDetached {
+  type: 'cdp.detached';
+  sessionId: string;
+  tabId: number;
+  /** chrome.debugger.onDetach's reason (target_closed, canceled_by_user,
+   *  replaced_with_devtools, ...), or 'unknown' when Chrome gave none. */
+  reason: string;
+  /** The tab itself is gone, not just the debugger. */
+  tabGone?: boolean;
+  /** What the model is told. */
+  message?: string;
+  failed?: number;
+}
+
 export interface AuthSignin {
   type: 'auth.signin';
 }
@@ -162,6 +181,7 @@ export type ClientMessage =
   | HistoryClear
   | ToolResult
   | CdpEventFromClient
+  | CdpDetached
   | AuthSignin
   | ListModels
   | SetModel

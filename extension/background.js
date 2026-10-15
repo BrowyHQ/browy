@@ -160,6 +160,19 @@ function sendToHost(msg) {
   }
 }
 
+/** Send to the host that is connected now, without starting one. Answers to
+ *  its calls and events from its tabs belong to that host; a new host has no
+ *  use for them, and starting one from here skipped the reconnect backoff. */
+function postToHost(msg) {
+  if (!nativePort) return false;
+  try {
+    nativePort.postMessage(msg);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Replace the native host with a fresh process. Disconnecting our end closes
  *  the host's stdin, so the old process exits. Chrome doesn't fire
  *  onDisconnect for a disconnect we make ourselves, so tidy up here. */
@@ -289,8 +302,12 @@ chrome.runtime.onConnect.addListener((port) => {
       sessionToClient.delete(msg.sessionId);
       sessionToTab.delete(msg.sessionId);
       sessionToWindow.delete(msg.sessionId);
+      canceledSessions.delete(msg.sessionId);
       releaseSessionTabs(msg.sessionId);
     }
+    // A new message is the go-ahead to use the browser again after the user
+    // clicked Cancel on Chrome's debugging bar.
+    if (msg.type === 'chat.send' && msg.sessionId) canceledSessions.delete(msg.sessionId);
 
     // Internal client → SW commands (not forwarded)
     if (msg.type === '__ping') {
@@ -353,6 +370,7 @@ chrome.runtime.onConnect.addListener((port) => {
         sessionToClient.delete(sid);
         sessionToTab.delete(sid);
         sessionToWindow.delete(sid);
+        canceledSessions.delete(sid);
         // Detach debugger from tabs no other session still references —
         // critical: leaving chrome.debugger attached pins the page's V8
         // isolate and keeps Network/Runtime/Log events firing into the void
@@ -385,6 +403,144 @@ const attachedTabs = new Set();
 /** Map<sessionId, Set<tabId>> — which sessions are listening on which tabs. */
 const sessionTabs = new Map();
 const DEBUGGER_VERSION = '1.3';
+
+// ── Losing the debugger on a tab ───────────────────────────────────────────
+//
+// Chrome takes the debugger off a tab when it closes, when it goes to a page
+// extensions can't touch (chrome://, the Web Store), when the user clicks
+// Cancel on the "started debugging this browser" bar, and so on. Calls still
+// running on the tab then fail with the reason straight away, the host and
+// the tab's panels are told, and the next call reattaches. After a Cancel the
+// session leaves the browser alone until the user sends another message.
+
+/** Map<tabId, Set<call>>: CDP calls still running, so a detach can fail them. */
+const pendingCdp = new Map();
+/** Map<tabId, detach>: detaches still being sorted out (see beginDetach). */
+const detaching = new Map();
+/** Tabs that lost the debugger and still exist; reattaching one is news. */
+const recentlyDetached = new Set();
+/** Map<sessionId, message>: sessions whose user clicked Cancel on the
+ *  debugging bar. Their CDP calls fail with the message until they send
+ *  another chat message. */
+const canceledSessions = new Map();
+const DETACH_SETTLE_MS = 250;
+
+/** What the model is told. Keep in step with detachMessage() in
+ *  src/agent/extension-context.ts, which covers extensions older than this. */
+function detachMessage(reason, tabGone) {
+  if (reason === 'canceled_by_user') {
+    return "You clicked Cancel on Chrome's debugging bar, so Browy lost this tab. Ask me to try again and I'll reattach.";
+  }
+  if (tabGone) return "This tab was closed, so it's gone. Use list_tabs to pick another tab, or new_tab to open one.";
+  if (reason === 'target_closed') {
+    return "This tab went to a page Browy can't work on, like a chrome:// page, so Browy lost it. Go back to a normal web page, or pick another tab with list_tabs.";
+  }
+  if (reason === 'replaced_with_devtools') {
+    return 'Chrome DevTools took over this tab, so Browy lost it. Close DevTools on that tab and ask me to try again.';
+  }
+  return 'Browy lost its connection to this tab. It reattaches on the next step, so try again.';
+}
+
+function sessionsUsingTab(tabId) {
+  const out = new Set();
+  for (const [sid, tabs] of sessionTabs) if (tabs.has(tabId)) out.add(sid);
+  for (const [sid, t] of sessionToTab) if (t === tabId) out.add(sid);
+  for (const call of pendingCdp.get(tabId) || []) if (call.sessionId) out.add(call.sessionId);
+  return out;
+}
+
+function postToSessionClient(sessionId, msg) {
+  const cp = clients.get(sessionToClient.get(sessionId));
+  if (cp) { try { cp.postMessage(msg); } catch {} }
+}
+
+/** Start sorting out a detach on `tabId`, or join the one under way. Chrome
+ *  answers a running command itself ("Detached while handling command.")
+ *  but without the reason, onDetach brings the reason, and the two arrive in
+ *  either order. A detach this extension made itself brings no onDetach at
+ *  all. So each detach waits a moment to collect both, then reports once. */
+function beginDetach(tabId, reason) {
+  let d = detaching.get(tabId);
+  if (!d) {
+    d = { tabId, reason: null, tabGone: undefined, message: '', failed: new Map(), sessions: sessionsUsingTab(tabId) };
+    d.settled = new Promise((resolve) => { d.resolve = resolve; });
+    detaching.set(tabId, d);
+    attachedTabs.delete(tabId);
+    setTimeout(() => { finishDetach(d).catch((e) => console.warn('[browy] detach report failed:', e)); }, DETACH_SETTLE_MS);
+  }
+  if (reason && !d.reason) d.reason = reason;
+  return d;
+}
+
+/** A call failed because of detach `d`; the model hears about it from that. */
+function countDetachFailure(d, sessionId) {
+  if (!sessionId) return;
+  d.failed.set(sessionId, (d.failed.get(sessionId) || 0) + 1);
+  d.sessions.add(sessionId);
+}
+
+async function finishDetach(d) {
+  if (d.tabGone === undefined) d.tabGone = !(await chrome.tabs.get(d.tabId).then(() => true, () => false));
+  d.reason = d.reason || 'unknown';
+  d.message = detachMessage(d.reason, d.tabGone);
+  // Calls Chrome hasn't answered (older builds may never answer them).
+  for (const call of [...(pendingCdp.get(d.tabId) || [])]) {
+    countDetachFailure(d, call.sessionId);
+    call.fail(d.message);
+  }
+  detaching.delete(d.tabId);
+  if (!d.tabGone) recentlyDetached.add(d.tabId);
+  d.resolve(d);
+  console.warn(`[browy] debugger detached from tab ${d.tabId}: ${d.reason}${d.tabGone ? ' (tab closed)' : ''}`);
+  for (const sid of d.sessions) {
+    if (d.reason === 'canceled_by_user') canceledSessions.set(sid, d.message);
+    postToHost({
+      type: 'cdp.detached', sessionId: sid, tabId: d.tabId, reason: d.reason,
+      tabGone: d.tabGone, message: d.message, failed: d.failed.get(sid) || 0,
+    });
+    postToSessionClient(sid, {
+      type: '__debugger_detached', sessionId: sid, tabId: d.tabId, reason: d.reason, tabGone: d.tabGone,
+    });
+  }
+}
+
+/** chrome.debugger.sendCommand, kept in pendingCdp while it runs. */
+function trackedSendCommand(tabId, sessionId, method, params) {
+  return new Promise((resolve, reject) => {
+    let calls = pendingCdp.get(tabId);
+    if (!calls) { calls = new Set(); pendingCdp.set(tabId, calls); }
+    const call = { sessionId, done: false, fail: null };
+    const settle = (fn) => {
+      if (call.done) return;
+      call.done = true;
+      calls.delete(call);
+      if (calls.size === 0 && pendingCdp.get(tabId) === calls) pendingCdp.delete(tabId);
+      fn();
+    };
+    call.fail = (message) => settle(() => {
+      const e = new Error(message);
+      e.detach = true;
+      reject(e);
+    });
+    calls.add(call);
+    chrome.debugger.sendCommand({ tabId }, method, params || {}, (result) => {
+      const err = chrome.runtime.lastError;
+      settle(() => (err ? reject(new Error(err.message)) : resolve(result)));
+    });
+  });
+}
+
+// A service worker that restarted can find tabs still attached from before
+// it stopped, with Chrome's debugging bar still up, that nothing uses. Calls
+// reattach as they need to.
+try {
+  chrome.debugger.getTargets((targets) => {
+    for (const t of targets || []) {
+      if (!t.attached || t.tabId == null || t.type !== 'page') continue;
+      chrome.debugger.detach({ tabId: t.tabId }, () => { void chrome.runtime.lastError; });
+    }
+  });
+} catch {}
 
 function addSessionTab(sessionId, tabId) {
   if (!sessionId) return;
@@ -450,14 +606,38 @@ async function ensureAttached(tabId) {
   attachedTabs.add(tabId);
 }
 
-function cdpSendCommand(tabId, method, params) {
-  return new Promise((resolve, reject) => {
-    chrome.debugger.sendCommand({ tabId }, method, params || {}, (result) => {
-      const err = chrome.runtime.lastError;
-      if (err) reject(new Error(err.message));
-      else resolve(result);
-    });
-  });
+/** One CDP call for a session: attach if needed, run it, and turn a lost
+ *  debugger into an error that says what happened. */
+async function runCdpCall(sessionId, tabId, method, params) {
+  // A detach on this tab is still being sorted out: this call shares its fate.
+  const settling = detaching.get(tabId);
+  if (settling) {
+    countDetachFailure(settling, sessionId);
+    throw new Error((await settling.settled).message);
+  }
+  try {
+    await ensureAttached(tabId);
+  } catch (e) {
+    if (/no tab with given id/i.test(String(e?.message))) throw new Error(detachMessage('target_closed', true));
+    throw e;
+  }
+  addSessionTab(sessionId, tabId);
+  if (recentlyDetached.delete(tabId)) {
+    for (const sid of sessionsUsingTab(tabId)) postToSessionClient(sid, { type: '__debugger_attached', sessionId: sid, tabId });
+  }
+  try {
+    return await trackedSendCommand(tabId, sessionId, method, params);
+  } catch (e) {
+    if (e?.detach) throw e;
+    // "Detached while handling command." or, after a detach Chrome didn't
+    // announce, "Debugger is not attached to the tab with id: N."
+    if (/detached while handling|not attached/i.test(String(e?.message))) {
+      const d = beginDetach(tabId, null);
+      countDetachFailure(d, sessionId);
+      throw new Error((await d.settled).message);
+    }
+    throw e;
+  }
 }
 
 /** The tab a session acts on when it hasn't pinned one: the active tab of the
@@ -481,10 +661,13 @@ async function handleBridgeRequest(msg) {
   const reply = (ok, payload) => {
     const out = { type: 'tool.result', sessionId: msg.sessionId, callId: msg.callId, ok };
     if (ok) out.result = payload; else out.error = String(payload?.message || payload);
-    sendToHost(out);
+    postToHost(out);
   };
   try {
     if (msg.type === 'cdp.send') {
+      // The user clicked Cancel on Chrome's debugging bar during this task.
+      const canceled = canceledSessions.get(msg.sessionId);
+      if (canceled) throw new Error(canceled);
       // Resolution order:
       //   1. explicit msg.tabId (caller pinned the tab)
       //   2. session-bound inspected tab (sessionToTab)
@@ -497,9 +680,7 @@ async function handleBridgeRequest(msg) {
         if (!t) throw new Error('no active tab');
         tabId = t.id;
       }
-      await ensureAttached(tabId);
-      addSessionTab(msg.sessionId, tabId);
-      const result = await cdpSendCommand(tabId, msg.method, msg.params);
+      const result = await runCdpCall(msg.sessionId, tabId, msg.method, msg.params);
       reply(true, { tabId, result });
     } else if (msg.type === 'tab.new') {
       const opts = { url: msg.url || 'about:blank', active: msg.active !== false };
@@ -534,16 +715,22 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   const tabId = source.tabId;
   for (const [sessionId, tabs] of sessionTabs) {
     if (tabs.has(tabId)) {
-      sendToHost({ type: 'cdp.event', sessionId, tabId, method, params });
+      postToHost({ type: 'cdp.event', sessionId, tabId, method, params });
     }
   }
 });
 
-chrome.debugger.onDetach.addListener((source) => {
-  if (source.tabId != null) attachedTabs.delete(source.tabId);
+chrome.debugger.onDetach.addListener((source, reason) => {
+  if (source.tabId != null) beginDetach(source.tabId, reason || 'unknown');
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  // Chrome reports the tab gone before the debugger's detach. Start that
+  // report now, while the sessions using the tab are still on record.
+  if (attachedTabs.has(tabId) || pendingCdp.has(tabId) || detaching.has(tabId)) {
+    beginDetach(tabId, 'target_closed').tabGone = true;
+  }
+  recentlyDetached.delete(tabId);
   attachedTabs.delete(tabId);
   for (const tabs of sessionTabs.values()) tabs.delete(tabId);
   // If a panel's inspected tab is gone, drop the binding so the next
