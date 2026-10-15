@@ -21,6 +21,9 @@ let nativeServerVersion = null;
 /** Protocol the connected host reported in hello.ack. Clients compare it
  *  against their own minimum to decide whether to ask for a host update. */
 let nativeProtocol = null;
+/** Chrome said the host is missing or not allowed, or connectNative threw.
+ *  Retrying can't help until the user acts, so nothing retries by itself. */
+let hostGaveUp = false;
 
 /** Map of internal port name → chrome.runtime.Port (the panel/devtools client). */
 const clients = new Map();
@@ -56,6 +59,7 @@ function ensureNativeHost() {
     const forbidden  = /forbidden|not allowed/i.test(m);
     const notFound   = /not found|specified native messaging host/i.test(m) && !forbidden;
     const type = forbidden ? '__host_stale' : (notFound ? '__host_missing' : '__host_error');
+    hostGaveUp = true;
     broadcastToClients({ type, message: m });
     return null;
   }
@@ -83,6 +87,7 @@ function ensureNativeHost() {
     // Broadcast events (no sessionId): fan out to every client.
     if (msg.type === 'hello.ack') {
       nativeReady = true;
+      hostGaveUp = false;
       nativeServerVersion = msg.serverVersion;
       nativeProtocol = typeof msg.protocol === 'number' ? msg.protocol : 1;
       reconnectDelay = 1000; // reset backoff on successful handshake
@@ -107,6 +112,7 @@ function ensureNativeHost() {
     const forbidden = /forbidden|not allowed/i.test(msg);
     const notFound  = /not found|specified native messaging host/i.test(msg) && !forbidden;
     const stop = forbidden || notFound;
+    hostGaveUp = stop;
     const type  = forbidden ? '__host_stale'
                 : notFound  ? '__host_missing'
                 :             '__host_disconnected';
@@ -171,6 +177,15 @@ function postToHost(msg) {
   } catch {
     return false;
   }
+}
+
+/** A side panel's port was open but the host wasn't, and nothing was set to
+ *  reconnect, e.g. after the computer woke up. Runs on the minute alarm. */
+function healNativePort() {
+  if (nativePort || reconnectTimer || hostGaveUp || clients.size === 0) return;
+  console.warn('[browy] native host is down with panels open; reconnecting');
+  broadcastToClients({ type: '__host_pending' });
+  ensureNativeHost();
 }
 
 /** Replace the native host with a fresh process. Disconnecting our end closes
@@ -587,7 +602,10 @@ function releaseSessionTabs(sessionId) {
 try {
   chrome.alarms.create('browy-debugger-gc', { periodInMinutes: 1 });
   chrome.alarms.onAlarm.addListener((a) => {
-    if (a.name === 'browy-debugger-gc') gcDetachedDebuggers();
+    if (a.name === 'browy-debugger-gc') {
+      gcDetachedDebuggers();
+      healNativePort();
+    }
   });
 } catch {}
 
