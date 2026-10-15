@@ -230,6 +230,10 @@ export interface ChatToolCallEnd {
   durationMs?: number;
 }
 
+/** Why a turn ended early without the user pressing Stop: the computer went
+ *  to sleep, or the Copilot runtime quit. */
+export type InterruptReason = 'sleep' | 'copilot';
+
 export interface ChatDone {
   type: 'chat.done';
   sessionId: string;
@@ -237,6 +241,9 @@ export interface ChatDone {
   toolCalls: ToolCallRecord[];
   /** The user pressed Stop; `text` is what the agent had said by then. */
   stopped?: boolean;
+  /** Set with `stopped` when the turn was cut short for this reason. `text`
+   *  then ends with a note saying so, which older panels show as is. */
+  interrupted?: InterruptReason;
 }
 
 /** One agent serves every panel. A chat sent while another panel's chat is
@@ -343,6 +350,14 @@ export interface SdkReady {
   detail?: string;
 }
 
+/** Broadcast while the Copilot runtime is being restarted after it quit, and
+ *  once it is back. Panels show it as a status line; older ones ignore it. */
+export interface HostStatus {
+  type: 'host.status';
+  state: 'copilot_restarting' | 'copilot_ready' | 'copilot_failed';
+  detail?: string;
+}
+
 export interface ModelsList {
   type: 'models.list';
   models: ModelOption[];
@@ -423,6 +438,7 @@ export type ServerMessage =
   | ActivityEvent
   | AuthStatus
   | SdkReady
+  | HostStatus
   | ModelsList
   | CurrentModel
   | BrowsersStatusEvt

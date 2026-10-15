@@ -25,6 +25,7 @@ const load = async (entry) => {
 };
 const { ExtensionContext } = await load('src/agent/extension-context.ts');
 const { Runner } = await load('src/agent/runner.ts');
+const { WakeWatch } = await load('src/agent/wake-watch.ts');
 
 const failures = [];
 const check = (name, cond, detail = '') => { if (!cond) failures.push(`${name}${detail ? `\n    ${detail}` : ''}`); };
@@ -73,7 +74,7 @@ const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
 function fakeAgent({ stuck = false } = {}) {
   const a = {
-    chats: [], aborts: 0, current: null, resolvers: [], ctx: null,
+    chats: [], aborts: 0, interrupts: [], current: null, resolvers: [], ctx: null,
     setActivityCallback() {}, setBrowyProtocolSessionId() {}, setBrowserContextOverride(ctx) { a.ctx = ctx; },
     setDisabledTools() {}, setEnabledHostTools() {}, getModel: () => 'm', listModels: async () => [],
     chat(text) {
@@ -89,13 +90,19 @@ function fakeAgent({ stuck = false } = {}) {
       const r = a.current; a.current = null;
       if (r) r({ text: 'partial', toolCalls: [], stopped: true });
     },
+    async interrupt(reason) {
+      a.interrupts.push(reason);
+      if (stuck) return;
+      const r = a.current; a.current = null;
+      if (r) r({ text: 'partial', toolCalls: [], stopped: true, interrupted: reason });
+    },
   };
   return a;
 }
 
 function harness(opts = {}) {
   const agent = fakeAgent(opts);
-  const runner = new Runner(agent, { serverVersion: 'test', stopGraceMs: 30 });
+  const runner = new Runner(agent, { serverVersion: 'test', stopGraceMs: 30, wakeWatch: opts.wakeWatch ?? false });
   const out = [];
   let deliver;
   runner.attach({ id: 'native', send: (m) => out.push(m), onMessage: (cb) => { deliver = cb; }, onClose() {}, close() {} });
@@ -267,9 +274,70 @@ const failure = (p) => p.then(() => null, (e) => e);
   await tick();
 }
 
+// ── the computer sleeping (0.1.14) ─────────────────────────────────────────
+
+{
+  let now = 1_000_000;
+  const wake = new WakeWatch(5_000, 30_000, () => now);
+  const gaps = [];
+  wake.onWake((g) => gaps.push(g));
+  now += 5_200;
+  check('a timer that runs a little late is not a sleep', wake.check() === false && gaps.length === 0);
+  now += 45_000;
+  check('one that finds 45 s gone is', wake.check() === true && gaps[0] === 45_000, JSON.stringify(gaps));
+  check('and the sleep is reported once', wake.check() === false && gaps.length === 1);
+}
+
+{
+  let now = 1_000_000;
+  const wake = new WakeWatch(5_000, 30_000, () => now);
+  const h = harness({ wakeWatch: wake });
+  await h.send({ type: 'session.start', sessionId: 'sp-a', capabilities: [] });
+  await h.send({ type: 'session.start', sessionId: 'sp-b', capabilities: [] });
+  await h.send({ type: 'chat.send', sessionId: 'sp-a', text: 'post the form' });
+  await h.send({ type: 'chat.send', sessionId: 'sp-b', text: 'queued' });
+  now += 60_000;
+  wake.check();
+  await tick();
+  const done = h.of('sp-a', 'chat.done')[0];
+  check('a sleep stops the running turn the way Stop does', h.agent.interrupts.join() === 'sleep' && done?.stopped === true && done?.interrupted === 'sleep', JSON.stringify(done));
+  check('and says so in the chat, after what was said',
+    done?.text === 'partial\n\n_Your computer went to sleep during this task, so I stopped it. The chat is saved. Say continue to pick up where it left off._', JSON.stringify(done?.text));
+  const queued = h.of('sp-b', 'chat.done')[0];
+  check('a chat waiting its turn is stopped too, and never starts by itself',
+    queued?.interrupted === 'sleep' && /went to sleep before this task started/.test(queued?.text) && h.agent.chats.join() === 'post the form',
+    JSON.stringify({ queued, chats: h.agent.chats }));
+}
+
+{
+  // A turn stuck where the interrupt can't reach still frees the panel, with the note.
+  let now = 1_000_000;
+  const wake = new WakeWatch(5_000, 30_000, () => now);
+  const h = harness({ stuck: true, wakeWatch: wake });
+  await h.send({ type: 'session.start', sessionId: 'sp-a', capabilities: [] });
+  await h.send({ type: 'chat.send', sessionId: 'sp-a', text: 'first' });
+  now += 60_000;
+  wake.check();
+  await tick(80);
+  const done = h.of('sp-a', 'chat.done');
+  check('a stuck turn is freed after a sleep, with the sleep note', done.length === 1 && done[0].interrupted === 'sleep' && /went to sleep/.test(done[0].text), JSON.stringify(done));
+}
+
+{
+  // The agent ends a turn itself when Copilot quits under it.
+  const h = harness();
+  await h.send({ type: 'session.start', sessionId: 'sp-a', capabilities: [] });
+  await h.send({ type: 'chat.send', sessionId: 'sp-a', text: 'go' });
+  h.agent.current({ text: '', toolCalls: [], stopped: true, interrupted: 'copilot' });
+  await tick();
+  const done = h.of('sp-a', 'chat.done')[0];
+  check('a turn cut short by Copilot quitting says so',
+    done?.interrupted === 'copilot' && done?.text === '_Copilot quit unexpectedly, so this task stopped. The chat is saved. Send a message to carry on._', JSON.stringify(done));
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 if (failures.length) {
   console.error('FAIL:\n  - ' + failures.join('\n  - '));
   process.exit(1);
 }
-console.log('PASS: turn control (27 assertions)');
+console.log('PASS: turn control (35 assertions)');

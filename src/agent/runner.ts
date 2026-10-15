@@ -15,6 +15,7 @@
 
 import type { Agent } from './loop.js';
 import { ExtensionContext } from './extension-context.js';
+import { WakeWatch } from './wake-watch.js';
 import type {
   Transport,
   ClientMessage,
@@ -22,9 +23,23 @@ import type {
   Capability,
   SessionStart,
   CdpDetached,
+  InterruptReason,
 } from '../protocol.js';
 import { PROTOCOL_VERSION } from '../protocol.js';
 import type { WSMessage } from '../types.js';
+
+/** What the panel says when a turn is cut short. The text goes in chat.done,
+ *  so panels from before these notes existed show it too. */
+export const INTERRUPT_NOTES: Record<InterruptReason, string> = {
+  sleep: 'Your computer went to sleep during this task, so I stopped it. The chat is saved. Say continue to pick up where it left off.',
+  copilot: 'Copilot quit unexpectedly, so this task stopped. The chat is saved. Send a message to carry on.',
+};
+const SLEPT_IN_LINE_NOTE = "Your computer went to sleep before this task started, so it didn't run. Send it again when you're ready.";
+
+/** The turn's text with the note after it, in italics like the Stop note. */
+function withNote(text: string, note: string): string {
+  return `${text ? `${text}\n\n` : ''}_${note}_`;
+}
 
 interface SessionState {
   id: string;
@@ -34,6 +49,15 @@ interface SessionState {
   inFlight: boolean;
   /** Phase E: present when session declared cdp.activeTab. */
   extContext?: ExtensionContext;
+}
+
+/** The chat the agent is running. `released` means Stop freed its panel
+ *  before agent.chat() returned, so its eventual result is dropped. */
+interface CurrentTurn {
+  sessionId: string;
+  settled: boolean;
+  released: boolean;
+  interrupted?: InterruptReason;
 }
 
 export interface RunnerOptions {
@@ -46,6 +70,9 @@ export interface RunnerOptions {
   /** How long a turn may hold the panel after Stop before the runner frees
    *  it anyway. Default 3 s; tests shorten it. */
   stopGraceMs?: number;
+  /** Notices sleeps. Default: a 5 s timer that calls more than 30 s a
+   *  sleep. Tests pass their own, or false for none. */
+  wakeWatch?: WakeWatch | false;
 }
 
 export class Runner {
@@ -69,7 +96,7 @@ export class Runner {
 
   /** The chat the agent is running. `released` means Stop freed its panel
    *  before agent.chat() returned, so its eventual result is dropped. */
-  private currentTurn: { sessionId: string; settled: boolean; released: boolean } | null = null;
+  private currentTurn: CurrentTurn | null = null;
 
   /** Latched Copilot SDK readiness, replayed to clients that attach late. */
   private sdkReady: { ok: boolean; detail?: string } | null = null;
@@ -82,6 +109,12 @@ export class Runner {
     // session (chat-scoped events) AND broadcast to all sessions
     // (status/tabs/models — UI-wide concerns).
     this.agent.setActivityCallback((wsMsg) => this.onAgentEvent(wsMsg));
+
+    if (opts.wakeWatch !== false) {
+      const wake = opts.wakeWatch ?? new WakeWatch().start();
+      wake.onWake((gapMs) => this.onWake(gapMs));
+      this.agent.setWakeWatch?.(wake);
+    }
   }
 
   // ── Transport lifecycle ─────────────────────────────────────────────────
@@ -134,17 +167,52 @@ export class Runner {
 
   /** Free the panel of a turn that ignored Stop. Its result, if it ever
    *  comes, is dropped (see onChatSend). */
-  private releaseStuckTurn(turn: { sessionId: string; settled: boolean; released: boolean } | null): void {
+  private releaseStuckTurn(turn: CurrentTurn | null): void {
     if (!turn || turn.settled || turn.released || this.currentTurn !== turn) return;
     turn.released = true;
     console.log(`  ■ chat ${turn.sessionId}: still running ${(this.opts.stopGraceMs ?? 3000) / 1000} s after Stop; freeing the panel`);
     const s = this.sessions.get(turn.sessionId);
+    const note = turn.interrupted ? INTERRUPT_NOTES[turn.interrupted] : '';
     s?.transport.send({ type: 'event.activity', sessionId: turn.sessionId, event: 'status.idle' });
-    s?.transport.send({ type: 'chat.done', sessionId: turn.sessionId, text: '', toolCalls: [], stopped: true });
+    s?.transport.send({
+      type: 'chat.done', sessionId: turn.sessionId, text: note ? withNote('', note) : '', toolCalls: [], stopped: true,
+      ...(turn.interrupted ? { interrupted: turn.interrupted } : {}),
+    });
     if (s) s.inFlight = false;
     if (this.activeSessionId === turn.sessionId) this.activeSessionId = null;
     this.currentTurn = null;
     this.runNextWaiting();
+  }
+
+  /** End the running turn the way Stop does, for a reason the panel is told:
+   *  the computer slept, or the Copilot runtime quit. */
+  private interruptTurn(reason: InterruptReason): void {
+    const turn = this.currentTurn;
+    if (!turn || turn.settled || turn.released) return;
+    turn.interrupted ??= reason;
+    console.log(`  ■ chat ${turn.sessionId}: stopping it, ${reason === 'sleep' ? 'the computer slept' : 'Copilot quit'}`);
+    void this.agent.interrupt(reason).catch(() => {});
+    this.sessions.get(turn.sessionId)?.extContext?.cancelPending(INTERRUPT_NOTES[reason]);
+    setTimeout(() => this.releaseStuckTurn(turn), this.opts.stopGraceMs ?? 3000);
+  }
+
+  /** The computer slept (or this process was frozen) for `gapMs`. Whatever
+   *  was running stops, and nothing waiting starts by itself: a task left
+   *  mid-way may have been submitting or sending something, and repeating
+   *  that unasked could do it twice. */
+  private onWake(gapMs: number): void {
+    console.log(`  💤 ${Math.round(gapMs / 1000)} s went by without this process running: the computer slept or the process was paused`);
+    for (const w of this.waiting.splice(0)) {
+      const s = this.sessions.get(w.sessionId);
+      s?.transport.send({ type: 'event.activity', sessionId: w.sessionId, event: 'status.idle' });
+      s?.transport.send({
+        type: 'chat.done', sessionId: w.sessionId, text: withNote('', SLEPT_IN_LINE_NOTE), toolCalls: [], stopped: true, interrupted: 'sleep',
+      });
+    }
+    this.interruptTurn('sleep');
+    // Network connections rarely survive a sleep. Check the one to Copilot
+    // now rather than on the next message.
+    void this.agent.checkCopilot?.().catch(() => {});
   }
 
   // ── Inbound dispatch ─────────────────────────────────────────────────────
@@ -391,7 +459,7 @@ export class Runner {
     }
     session.inFlight = true;
     this.activeSessionId = sessionId;
-    const turn = { sessionId, settled: false, released: false };
+    const turn: CurrentTurn = { sessionId, settled: false, released: false };
     this.currentTurn = turn;
     const t0 = Date.now();
     console.log(`  ▶ chat ${sessionId}: started`);
@@ -408,10 +476,21 @@ export class Runner {
     }
     let outcome = 'done';
     try {
-      const { text: response, toolCalls, stopped } = await this.agent.chat(text);
+      const result = await this.agent.chat(text);
+      const { text: response, toolCalls, stopped } = result;
       turn.settled = true;
       // Stop already freed the panel; this late result belongs to nobody.
       if (turn.released) return;
+      const interrupted = result.interrupted ?? (stopped ? turn.interrupted : undefined);
+      if (interrupted) {
+        outcome = `stopped (${interrupted === 'sleep' ? 'the computer slept' : 'Copilot quit'})`;
+        // Browser calls the cut-short turn started have nobody to answer.
+        session.extContext?.cancelPending(INTERRUPT_NOTES[interrupted]);
+        session.transport.send({
+          type: 'chat.done', sessionId, text: withNote(response, INTERRUPT_NOTES[interrupted]), toolCalls, stopped: true, interrupted,
+        });
+        return;
+      }
       if (stopped) outcome = 'stopped';
       session.transport.send({ type: 'chat.done', sessionId, text: response, toolCalls, ...(stopped ? { stopped } : {}) });
     } catch (err) {
@@ -581,6 +660,9 @@ function translateWsToProtocol(
 
     case 'copilot_status':
       return { type: 'auth.status', state: ws.state, detail: ws.detail };
+
+    case 'host_status':
+      return { type: 'host.status', state: ws.state, ...(ws.detail ? { detail: ws.detail } : {}) };
 
     case 'response':
       // Agent's "final response" event. chat.done is emitted explicitly by
