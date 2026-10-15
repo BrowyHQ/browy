@@ -223,6 +223,16 @@ const STOPPED = Symbol('stopped');
  *  shortens it for tests. */
 const TOOL_DEADLINE_MS = Number(process.env.BROWY_TOOL_DEADLINE_MS) || 2 * 60 * 1000;
 
+/** What a tool call answers with: its text, or a result object for a failure. */
+type ToolAnswer = string | { textResultForLlm: string; resultType: 'failure' | 'timeout'; error: string };
+
+/** A failed tool call the model can read. A handler that throws reaches the
+ *  model only as "Tool execution failed" (Copilot SDK 1.0.21), so it retried
+ *  blind; a failure result carries the reason. */
+export function toolFailure(message: string, resultType: 'failure' | 'timeout' = 'failure'): ToolAnswer {
+  return { textResultForLlm: `Error: ${message}`, resultType, error: message };
+}
+
 export class Agent {
   private config: Config;
   /** All currently-connected browsers (Brave, Edge, Chrome, ...). */
@@ -281,7 +291,7 @@ export class Agent {
   private abandonedTools = new Set<string>();
   /** Browy's tool handlers by name, so chat() can run a request the SDK
    *  failed to dispatch. */
-  private toolHandlersByName = new Map<string, (args: Record<string, unknown>, invocation?: { requestId?: string }) => Promise<string>>();
+  private toolHandlersByName = new Map<string, (args: Record<string, unknown>, invocation?: { requestId?: string }) => Promise<ToolAnswer>>();
   /** Set when a turn stalled or the SDK dropped a request: the next turn
    *  detaches this session handle and opens a fresh one. */
   private sessionSuspect = false;
@@ -582,7 +592,7 @@ export class Agent {
     const self = this;
 
     return allTools.map(tool => {
-      const handler = async (args: Record<string, unknown>, invocation?: { requestId?: string }) => {
+      const handler = async (args: Record<string, unknown>, invocation?: { requestId?: string }): Promise<ToolAnswer> => {
         const freshCtx = self.getBrowserContext();
         // Stable id so UI can match start↔end of the same call
         const id = `${tool.def.name}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -596,6 +606,8 @@ export class Agent {
         const t0 = Date.now();
         let result = '';
         try {
+          // Test hook: make this tool fail, to check the model gets the reason.
+          if (process.env.BROWY_TEST_THROW_TOOL === tool.def.name) throw new Error('test failure ZEBRA-42 (BROWY_TEST_THROW_TOOL)');
           result = await tool.run(args, freshCtx);
           // The turn's deadline already answered and reported this call.
           if (requestId && self.abandonedTools.delete(requestId)) return result;
@@ -609,7 +621,7 @@ export class Agent {
           const errMsg = err instanceof Error ? err.message : String(err);
           self.emit({ type: 'tool_step', id, name: tool.def.name, status: 'error', result: errMsg, durationMs: dur });
           self.recordRecentAction(tool.def.name, args, errMsg, false, dur);
-          throw err;
+          return toolFailure(errMsg);
         } finally {
           if (requestId) self.toolSteps.delete(requestId);
         }
@@ -1009,7 +1021,7 @@ export class Agent {
           if (!stepId) this.emit({ type: 'tool_step', id: `${name}-${requestId}`, name, args: {}, status: 'start' });
           this.emit({ type: 'tool_step', id: stepId || `${name}-${requestId}`, name, status: 'error', result: message, durationMs: TOOL_DEADLINE_MS });
           this.recordRecentAction(name, {}, message, false, TOOL_DEADLINE_MS);
-          session.rpc.tools.handlePendingToolCall({ requestId, result: JSON.stringify({ error: message }) })
+          session.rpc.tools.handlePendingToolCall({ requestId, result: toolFailure(message, 'timeout') })
             .catch((e: unknown) => console.log(`  ⏱ could not answer ${name}: ${e instanceof Error ? e.message : String(e)}`));
         };
         const finish = (settle: () => void) => {
@@ -1137,7 +1149,7 @@ export class Agent {
     console.log(`  ↻ ${name}: the SDK did not dispatch request ${requestId} `
       + `(session handle ${session.disconnected ? 'disconnected' : 'connected'}); ${handler ? 'running it directly' : 'no handler, the deadline answers it'}`);
     if (!handler) return;
-    const answer = (payload: { result?: string; error?: string }) =>
+    const answer = (payload: { result?: ToolAnswer; error?: string }) =>
       Promise.resolve()
         .then(() => session.rpc.tools.handlePendingToolCall({ requestId, ...payload }))
         .catch((e: unknown) => console.log(`  ↻ could not answer ${name}: ${e instanceof Error ? e.message : String(e)}`));

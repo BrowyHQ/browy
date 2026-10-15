@@ -2,6 +2,12 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **When a tool fails, the model now hears why.** Up to 0.1.13 every failure reached the model as "Tool execution failed", so it guessed at the cause and tried again; in one long run on 15 October that happened 11 times. The model now gets the actual error, such as a page that navigated away mid-call. A call that runs past the two-minute limit comes back as a timeout, with the reason.
+
 ## [0.1.13]: Stop always works, and a dropped tool call gets run anyway
 *Released 2026-10-14*
 
