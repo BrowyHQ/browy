@@ -4,9 +4,22 @@ All notable changes to Browy will be documented in this file. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Chats come straight from their Copilot session.** The side panel used to keep its own HTML copy of every chat and show that. Each chat's Copilot session is now the only record, and the panel just draws it: your message as you typed it, without the page details Browy sends along, then Browy's reply with every tool call, its arguments, how long it took and the start of what it returned (click a step for more). When a reply finishes, the panel redraws it from the session, so a chat looks the same now as when you open it again next week.
+- **Long chats open on their newest turns.** One chat from 15 October has 977 tool calls in a 7.6 MB log. A chat now opens on its last ten turns, with "load earlier" at the top for the rest. The backend reads the chat's log directly instead of resuming its session, about a third of a second for the biggest chat on the test machine (16.8 MB).
+
 ### Fixed
 
 - **When a tool fails, the model now hears why.** Up to 0.1.13 every failure reached the model as "Tool execution failed", so it guessed at the cause and tried again; in one long run on 15 October that happened 11 times. The model now gets the actual error, such as a page that navigated away mid-call. A call that runs past the two-minute limit comes back as a timeout, with the reason.
+- **The chats list opens at once.** It waited for the backend to go through every Copilot session on the computer (3,327 on one machine, for 100 Browy chats) before it appeared. It now opens straight away with the list you saw last and refreshes it in the background, with a spinner while it does. The backend also finds Browy's chats about three times faster. Opening a chat shows its last view, or a placeholder, until the session answers. If the backend doesn't answer, you get a message and a retry button instead of an empty screen.
+- **Opened chats show their tool calls properly.** A chat opened from the list named every tool call "tool", with no result.
+- **Chats from 0.1.13 and earlier are kept.** A few older chats have no record left in Copilot, only the copy the side panel saved. They stay in the list as read-only saved copies, and a message sent from one starts a new chat.
+- **The DevTools panel no longer prints the side panel's chats list.** Every list and chat the side panel loaded was sent to every Browy panel, so the DevTools panel printed them too.
+
+### Upgrading
+
+Update both halves: run the install command again for the backend, and reload the extension. With a new extension and an old backend, the list still opens at once, but chats arrive whole rather than a page at a time and the backend lists them as slowly as before. With an old extension, the new backend answers the old way.
 
 ## [0.1.13]: Stop always works, and a dropped tool call gets run anyway
 *Released 2026-10-14*

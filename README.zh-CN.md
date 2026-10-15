@@ -104,8 +104,9 @@ curl -fsSL https://github.com/BrowyHQ/browy/releases/latest/download/install.sh 
 | `~/.browy/data/files/` | 沙箱化的临时磁盘，`save_file` / `read_file` 工具操作的就是这里 |
 | `~/.browy/data/notes.json` | 跨对话的持久化键值记忆 |
 | `~/.browseragent/native-host.log` | 单个 5 MB 循环诊断日志（轮转时保留一份 `.1` 副本） |
+| `~/.copilot/session-state/sp-*/` | 你的对话。每个对话都是一个 GitHub Copilot 会话，由 Copilot CLI 保存 |
 | 原生消息清单 | 注册到 Chrome、Edge、Brave，让扩展能和主机通信 |
-| Chrome 扩展存储 | 对话历史、模型选择、主题；永远不离开本地浏览器配置 |
+| Chrome 扩展存储 | 最近对话的一小份副本（让对话立刻打开）、模型选择、主题；永远不离开本地浏览器配置 |
 
 这个表里没有任何东西会离开你的机器。智能体读取的页面内容会发给 GitHub Copilot，和你在终端里跑
 `gh copilot` 是同一条通道。完整数据处理说明在 [browyhq.github.io/zh-cn/privacy/](https://browyhq.github.io/zh-cn/privacy/)。

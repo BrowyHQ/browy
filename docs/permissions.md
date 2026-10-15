@@ -18,7 +18,7 @@ Web Store listing's permission justification.
 | **`tabs`** | Read tab titles/URLs to populate the agent's context (`list_tabs`, `switch_tab`), open new tabs (`new_tab`, `navigate`), and route the agent to the correct tab when you ask it to operate on "this page". |
 | **`activeTab`** | Used in addition to `tabs` so the side panel can identify the currently focused tab without prompting on every action. |
 | **`scripting`** | Inject content scripts when the agent needs to evaluate JS in the page context (e.g. `evaluate_js` tool) or when extracting structured data the snapshot can't express. |
-| **`storage`** | Persist chat history, user settings (model, reasoning effort, theme), and last-used tab. All storage is local (`chrome.storage.local`); nothing is uploaded. |
+| **`storage`** | Keep a small copy of recent chats so they open at once, user settings (model, reasoning effort, theme), and last-used tab. All storage is local (`chrome.storage.local`); nothing is uploaded. |
 | **`nativeMessaging`** | Connect to the locally-installed Browy native host (`com.browy.host`), which runs the GitHub Copilot CLI on your machine. All LLM traffic flows through your own Copilot subscription, not a Browy server. |
 | **`notifications`** | Surface "host disconnected", "sign-in required", and other actionable status messages outside the side panel so you don't miss them while working in another tab. |
 | **`downloads`** | Save artifacts the agent produces (e.g. exported scrapes, generated files) to your Downloads folder via `chrome.downloads.download`. |
@@ -49,6 +49,6 @@ Web Store listing's permission justification.
 | Data | Where it goes |
 |---|---|
 | Page snapshots, screenshots, DOM extracts, console/network logs | Sent to GitHub Copilot via the local CLI to inform the next agent step. |
-| Chat history | `chrome.storage.local` on your machine. |
+| Chat history | Each chat is a GitHub Copilot session on your machine (`~/.copilot/session-state`). The side panel keeps a small copy of recent chats in `chrome.storage.local` so they open at once. |
 | Settings | `chrome.storage.local`. |
 | Native host log | `~/.browseragent/native-host.log`, rotated at 5 MB. |

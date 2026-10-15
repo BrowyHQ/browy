@@ -101,8 +101,9 @@ The installer is conservative; everything below survives reboots and updates in 
 | `~/.browy/data/files/` | Sandboxed scratch disk for the `save_file` / `read_file` agent tools |
 | `~/.browy/data/notes.json` | Persistent key-value memory across chats |
 | `~/.browseragent/native-host.log` | Single rotating 5 MB diagnostic log (one rotated copy kept as `.1`) |
+| `~/.copilot/session-state/sp-*/` | Your chats. Each one is a GitHub Copilot session, kept by the Copilot CLI |
 | Native messaging manifest | Registered with Chrome, Edge, and Brave so the extension can talk to the host |
-| Chrome extension storage | Chat history, model selection, theme; never leaves the local profile |
+| Chrome extension storage | A small copy of recent chats so they open at once, model selection, theme; never leaves the local profile |
 
 Nothing in this list leaves your machine. Page content the agent reads goes to GitHub Copilot, exactly as if you ran `gh copilot` from a terminal. Full data-handling summary at [browyhq.github.io/privacy/](https://browyhq.github.io/privacy/).
 
