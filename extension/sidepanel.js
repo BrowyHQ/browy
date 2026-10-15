@@ -1028,6 +1028,7 @@ const connStatus = (() => {
   const TEXT = {
     reconnecting: "Browy's backend restarted. Reconnecting…",
     copilot: 'Copilot quit, so Browy is restarting it…',
+    copilotStalled: 'Copilot stopped answering, so Browy is reconnecting…',
     copilotFailed: "Copilot couldn't restart. Send a message to try again.",
     slept: 'Your computer went to sleep, so the task stopped. Say continue to pick it up.',
     canceled: "You clicked Cancel on Chrome's debugging bar. Ask Browy to try again and it reattaches.",
@@ -1134,7 +1135,7 @@ const connStatus = (() => {
           else if (!sessionReady) startSession();
           return true;
         case 'host.status':
-          if (raw.state === 'copilot_restarting') set('copilot', TEXT.copilot);
+          if (raw.state === 'copilot_restarting') set('copilot', raw.cause === 'stall' ? TEXT.copilotStalled : TEXT.copilot);
           else if (raw.state === 'copilot_failed') set('copilot', TEXT.copilotFailed);
           else clear('copilot');
           return true;

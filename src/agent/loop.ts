@@ -270,6 +270,35 @@ const MODEL_NOTE_CAUTION = 'If you carry on with that task, check the page first
  *  shortens it for tests. */
 const TOOL_DEADLINE_MS = Number(process.env.BROWY_TOOL_DEADLINE_MS) || 2 * 60 * 1000;
 
+/** How long a turn may go without a single event from Copilot before Browy
+ *  treats it as stuck. The slowest of 5,035 healthy model calls measured in
+ *  October 2026 took 144 s (long tool arguments stream no events), so this
+ *  leaves room. BROWY_IDLE_MS shortens it for tests. */
+const IDLE_MS = Number(process.env.BROWY_IDLE_MS) || 5 * 60 * 1000;
+
+/** A span of time the way the user reads it. */
+function spanText(ms: number): string {
+  const n = ms >= 60_000 ? Math.round(ms / 60_000) : Math.round(ms / 1000);
+  const unit = ms >= 60_000 ? 'minute' : 'second';
+  return `${n} ${unit}${n === 1 ? '' : 's'}`;
+}
+
+/** The watchdog's verdict when no tool was running: the request to the model
+ *  never got an answer. On 15 and 16 Oct 2026 such requests hung on a
+ *  connection the Copilot CLI kept reusing, so chat() restarts Copilot and
+ *  carries on instead of stopping. `aborted` settles once the runtime has
+ *  been told to drop the request. */
+class ModelStall extends Error {
+  constructor(message: string, readonly aborted: Promise<unknown>) {
+    super(message);
+  }
+}
+
+/** Sent in place of a user message when a turn carries on after a stall. The
+ *  side panel shows no bubble for it (chat-items.ts). */
+const STALL_NOTE = `<browy_note>\nThe model's last answer never arrived: Copilot sent nothing for ${spanText(IDLE_MS)}, `
+  + `so Browy reconnected. Carry on with the user's request from where you left off. ${MODEL_NOTE_CAUTION}\n</browy_note>`;
+
 /** What a tool call answers with: its text, or a result object for a failure. */
 type ToolAnswer = string | { textResultForLlm: string; resultType: 'failure' | 'timeout'; error: string };
 
@@ -659,8 +688,9 @@ export class Agent {
 
   /** Start a fresh Copilot client in place of the lost one. After three
    *  losses in two minutes Browy stops restarting it by itself and leaves it
-   *  to the next message (`onDemand`). */
-  private restartCopilot(why: string, onDemand = false): Promise<void> {
+   *  to the next message (`onDemand`). `cause` says whether Copilot quit or
+   *  stopped answering, for the panel's status line. */
+  private restartCopilot(why: string, onDemand = false, cause: 'quit' | 'stall' = 'quit'): Promise<void> {
     if (this.copilotRestart) return this.copilotRestart;
     const now = Date.now();
     this.copilotLosses = this.copilotLosses.filter((t) => now - t < 120_000);
@@ -676,7 +706,7 @@ export class Agent {
       return Promise.resolve();
     }
     console.log('  ↻ restarting Copilot');
-    this.emit({ type: 'host_status', state: 'copilot_restarting', detail: why });
+    this.emit({ type: 'host_status', state: 'copilot_restarting', detail: why, ...(cause === 'stall' ? { cause } : {}) });
     const restart = (async () => {
       await stopOld();
       const client = new CopilotClient(copilotClientOptions());
@@ -1179,151 +1209,182 @@ export class Agent {
       // workflows. Instead we drive the session manually via session.on()
       // and resolve when we see session.idle. This also lets us stream
       // assistant.message_delta chunks to the UI in real time.
-      const session = this.copilotSession;
-      const client = this.copilotClient;
       const turn = new TurnText();
       turnText = turn;
 
-      const completion = new Promise<string>((resolve, reject) => {
-        let unsub: (() => void) | null = null;
-        let idleTimer: NodeJS.Timeout | undefined;
-        let settled = false;
-        // Tool calls the runtime has started and not finished, so the
-        // watchdog can say what it was waiting on.
-        const running = new Map<string, string>();
-        // Every tool request the runtime sends gets an answer within
-        // TOOL_DEADLINE_MS, whatever happens on our side. On 14 Oct a request
-        // reached the host, never reached Browy's tool, and the run sat
-        // silent until the five-minute watchdog ended it. The SDK drops a
-        // request without a trace when its session handle has no handler.
-        const toolTimers = new Map<string, NodeJS.Timeout>();
-        // Each request is handled once, even if the runtime delivers it again.
-        const seenRequests = new Set<string>();
-        const giveUpOnTool = (requestId: string, name: string) => {
-          // Coming out of a sleep, every deadline is overdue at once. The
-          // sleep stops the turn; the tool didn't time out.
-          if (this.wake?.check()) return;
-          toolTimers.delete(requestId);
-          const stepId = this.toolSteps.get(requestId);
-          const limit = TOOL_DEADLINE_MS >= 60_000 ? `${Math.round(TOOL_DEADLINE_MS / 60_000)} minutes` : `${Math.round(TOOL_DEADLINE_MS / 1000)} seconds`;
-          const message = `${name} got no answer within ${limit}, so Browy gave up on it. `
-            + 'The tab may be busy, frozen or showing a dialog. Try again, or switch to the tab first.';
-          console.log(`  ⏱ ${name} ${stepId ? 'was still running' : 'never reached its handler'} after ${TOOL_DEADLINE_MS / 1000} s `
-            + `(request ${requestId}, session handle ${session.disconnected ? 'disconnected' : 'connected'})`);
-          this.abandonedTools.add(requestId);
-          if (!stepId) this.emit({ type: 'tool_step', id: `${name}-${requestId}`, name, args: {}, status: 'start' });
-          this.emit({ type: 'tool_step', id: stepId || `${name}-${requestId}`, name, status: 'error', result: message, durationMs: TOOL_DEADLINE_MS });
-          this.recordRecentAction(name, {}, message, false, TOOL_DEADLINE_MS);
-          session.rpc.tools.handlePendingToolCall({ requestId, result: toolFailure(message, 'timeout') })
-            .catch((e: unknown) => console.log(`  ⏱ could not answer ${name}: ${e instanceof Error ? e.message : String(e)}`));
-        };
-        const finish = (settle: () => void) => {
-          if (settled) return;
-          settled = true;
-          try { unsub?.(); } catch {}
-          clearTimeout(idleTimer);
-          clearInterval(liveness);
-          for (const t of toolTimers.values()) clearTimeout(t);
-          toolTimers.clear();
-          this.abandonedTools.clear();
-          ctl.stop = null;
-          settle();
-        };
-        // The Stop button ends the turn here with whatever was said so far;
-        // abort() asks the SDK to stop the turn alongside.
-        ctl.stop = () => finish(() => resolve(turn.text));
-        // When the connection to Copilot closes, the SDK drops this listener
-        // without a word. The CLI exiting is caught by watchCopilot(); this
-        // catches the connection going on its own, within a second.
-        const liveness = setInterval(() => {
-          if (session.disconnected && this.copilotSession === session) this.copilotLost(client, 'the connection to Copilot closed');
-        }, 1_000);
-        // Last resort, reset by every SDK event. Tool calls are answered
-        // within two minutes, so five silent minutes means the runtime itself
-        // is stuck. Abort the SDK turn as well, or the next message queues
-        // behind it.
-        const IDLE_MS = 5 * 60 * 1000;
-        const armIdle = () => {
-          clearTimeout(idleTimer);
-          idleTimer = setTimeout(() => {
-            if (this.wake?.check()) return;
-            const waiting = [...new Set(running.values())].join(', ');
-            console.log(`  ⏱ watchdog: 5 min without SDK events (running: ${waiting || 'none'}, session handle ${session.disconnected ? 'disconnected' : 'connected'})`);
-            // Don't trust this handle for the next turn.
-            this.sessionSuspect = true;
-            session.abort().catch(() => {});
-            finish(() => reject(new Error(waiting
-              ? `No progress for 5 minutes while ${waiting} was still running, so Browy stopped. Send a message to carry on.`
-              : 'No reply from Copilot for 5 minutes, so Browy stopped. Send a message to carry on.')));
-          }, IDLE_MS);
-        };
-        armIdle();
-        unsub = session.on((ev: { type: string; data?: any }) => {
-          armIdle();
-          const d = ev.data || {};
-          // Sub-agent chatter belongs to a tool call, not to the reply.
-          if (d.parentToolCallId) return;
-          try {
-            switch (ev.type) {
-              case 'assistant.message_delta': {
-                const out = turn.delta(String(d.messageId ?? ''), d.deltaContent || '');
-                if (out) this.emit({ type: 'delta', text: out });
-                break;
-              }
-              case 'assistant.message': {
-                const out = turn.message(String(d.messageId ?? ''), d.content || '');
-                if (out) this.emit({ type: 'delta', text: out });
-                if (d.reasoningText) this.emit({ type: 'reasoning', text: d.reasoningText });
-                break;
-              }
-              case 'tool.execution_start':
-                if (d.toolCallId) running.set(d.toolCallId, d.toolName || 'a tool');
-                break;
-              case 'tool.execution_complete':
-                running.delete(d.toolCallId);
-                break;
-              case 'external_tool.requested': {
-                if (!d.requestId) break;
-                const requestId = String(d.requestId);
-                const name = String(d.toolName || 'a tool');
-                if (seenRequests.has(requestId)) break;
-                seenRequests.add(requestId);
-                toolTimers.set(requestId, setTimeout(() => giveUpOnTool(requestId, name), TOOL_DEADLINE_MS));
-                // The SDK starts a tool synchronously while it dispatches the
-                // request, before this listener runs, and the handler records
-                // itself first thing. Not recorded means the SDK dropped the
-                // request, which is what stalled the 14 Oct run: run it here.
-                if (!this.toolSteps.has(requestId)) this.runUndispatchedTool(session, requestId, name, d.arguments);
-                break;
-              }
-              case 'external_tool.completed':
-                clearTimeout(toolTimers.get(d.requestId));
-                toolTimers.delete(d.requestId);
-                break;
-              case 'abort':
-                ctl.stopped = true;
-                finish(() => resolve(turn.text));
-                break;
-              case 'session.idle':
-                if (d.aborted) ctl.stopped = true;
-                finish(() => resolve(turn.text));
-                break;
-              case 'session.error':
-                finish(() => reject(new Error(d.message || 'session error')));
-                break;
-            }
-          } catch (e) { finish(() => reject(e as Error)); }
-        });
-      });
+      // One message to the runtime, answered once the session goes idle.
+      // STOPPED if Stop was pressed before it went out.
+      const runTurn = async (prompt: string): Promise<string | typeof STOPPED> => {
+        const session = this.copilotSession;
+        const client = this.copilotClient;
 
-      // Stop pressed while the turn was still being set up.
-      if (ctl.stopped) {
-        ctl.stop?.();
-        return stoppedResult();
+        const completion = new Promise<string>((resolve, reject) => {
+          let unsub: (() => void) | null = null;
+          let idleTimer: NodeJS.Timeout | undefined;
+          let settled = false;
+          // Tool calls the runtime has started and not finished, so the
+          // watchdog can say what it was waiting on.
+          const running = new Map<string, string>();
+          // Every tool request the runtime sends gets an answer within
+          // TOOL_DEADLINE_MS, whatever happens on our side. On 14 Oct a request
+          // reached the host, never reached Browy's tool, and the run sat
+          // silent until the five-minute watchdog ended it. The SDK drops a
+          // request without a trace when its session handle has no handler.
+          const toolTimers = new Map<string, NodeJS.Timeout>();
+          // Each request is handled once, even if the runtime delivers it again.
+          const seenRequests = new Set<string>();
+          const giveUpOnTool = (requestId: string, name: string) => {
+            // Coming out of a sleep, every deadline is overdue at once. The
+            // sleep stops the turn; the tool didn't time out.
+            if (this.wake?.check()) return;
+            toolTimers.delete(requestId);
+            const stepId = this.toolSteps.get(requestId);
+            const limit = TOOL_DEADLINE_MS >= 60_000 ? `${Math.round(TOOL_DEADLINE_MS / 60_000)} minutes` : `${Math.round(TOOL_DEADLINE_MS / 1000)} seconds`;
+            const message = `${name} got no answer within ${limit}, so Browy gave up on it. `
+              + 'The tab may be busy, frozen or showing a dialog. Try again, or switch to the tab first.';
+            console.log(`  ⏱ ${name} ${stepId ? 'was still running' : 'never reached its handler'} after ${TOOL_DEADLINE_MS / 1000} s `
+              + `(request ${requestId}, session handle ${session.disconnected ? 'disconnected' : 'connected'})`);
+            this.abandonedTools.add(requestId);
+            if (!stepId) this.emit({ type: 'tool_step', id: `${name}-${requestId}`, name, args: {}, status: 'start' });
+            this.emit({ type: 'tool_step', id: stepId || `${name}-${requestId}`, name, status: 'error', result: message, durationMs: TOOL_DEADLINE_MS });
+            this.recordRecentAction(name, {}, message, false, TOOL_DEADLINE_MS);
+            session.rpc.tools.handlePendingToolCall({ requestId, result: toolFailure(message, 'timeout') })
+              .catch((e: unknown) => console.log(`  ⏱ could not answer ${name}: ${e instanceof Error ? e.message : String(e)}`));
+          };
+          const finish = (settle: () => void) => {
+            if (settled) return;
+            settled = true;
+            try { unsub?.(); } catch {}
+            clearTimeout(idleTimer);
+            clearInterval(liveness);
+            for (const t of toolTimers.values()) clearTimeout(t);
+            toolTimers.clear();
+            this.abandonedTools.clear();
+            ctl.stop = null;
+            settle();
+          };
+          // The Stop button ends the turn here with whatever was said so far;
+          // abort() asks the SDK to stop the turn alongside.
+          ctl.stop = () => finish(() => resolve(turn.text));
+          // When the connection to Copilot closes, the SDK drops this listener
+          // without a word. The CLI exiting is caught by watchCopilot(); this
+          // catches the connection going on its own, within a second.
+          const liveness = setInterval(() => {
+            if (session.disconnected && this.copilotSession === session) this.copilotLost(client, 'the connection to Copilot closed');
+          }, 1_000);
+          // Last resort, reset by every SDK event. Tool calls are answered
+          // within two minutes, so IDLE_MS without a word means the runtime
+          // itself is stuck. Abort the SDK turn as well, or the next message
+          // queues behind it. With no tool running, the model request is what
+          // hung, and chat() restarts Copilot and carries on (ModelStall).
+          const armIdle = () => {
+            clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => {
+              if (this.wake?.check()) return;
+              const waiting = [...new Set(running.values())].join(', ');
+              console.log(`  ⏱ watchdog: ${spanText(IDLE_MS)} without SDK events (running: ${waiting || 'none'}, session handle ${session.disconnected ? 'disconnected' : 'connected'})`);
+              // Don't trust this handle for the next turn.
+              this.sessionSuspect = true;
+              const aborted = Promise.resolve().then(() => session.abort()).catch(() => {});
+              finish(() => reject(waiting
+                ? new Error(`No progress for ${spanText(IDLE_MS)} while ${waiting} was still running, so Browy stopped. Send a message to carry on.`)
+                : new ModelStall(`No reply from Copilot for ${spanText(IDLE_MS)}, so Browy stopped. Send a message to carry on.`, aborted)));
+            }, IDLE_MS);
+          };
+          armIdle();
+          unsub = session.on((ev: { type: string; data?: any }) => {
+            armIdle();
+            const d = ev.data || {};
+            // Sub-agent chatter belongs to a tool call, not to the reply.
+            if (d.parentToolCallId) return;
+            try {
+              switch (ev.type) {
+                case 'assistant.message_delta': {
+                  const out = turn.delta(String(d.messageId ?? ''), d.deltaContent || '');
+                  if (out) this.emit({ type: 'delta', text: out });
+                  break;
+                }
+                case 'assistant.message': {
+                  const out = turn.message(String(d.messageId ?? ''), d.content || '');
+                  if (out) this.emit({ type: 'delta', text: out });
+                  if (d.reasoningText) this.emit({ type: 'reasoning', text: d.reasoningText });
+                  break;
+                }
+                case 'tool.execution_start':
+                  if (d.toolCallId) running.set(d.toolCallId, d.toolName || 'a tool');
+                  break;
+                case 'tool.execution_complete':
+                  running.delete(d.toolCallId);
+                  break;
+                case 'external_tool.requested': {
+                  if (!d.requestId) break;
+                  const requestId = String(d.requestId);
+                  const name = String(d.toolName || 'a tool');
+                  if (seenRequests.has(requestId)) break;
+                  seenRequests.add(requestId);
+                  toolTimers.set(requestId, setTimeout(() => giveUpOnTool(requestId, name), TOOL_DEADLINE_MS));
+                  // The SDK starts a tool synchronously while it dispatches the
+                  // request, before this listener runs, and the handler records
+                  // itself first thing. Not recorded means the SDK dropped the
+                  // request, which is what stalled the 14 Oct run: run it here.
+                  if (!this.toolSteps.has(requestId)) this.runUndispatchedTool(session, requestId, name, d.arguments);
+                  break;
+                }
+                case 'external_tool.completed':
+                  clearTimeout(toolTimers.get(d.requestId));
+                  toolTimers.delete(d.requestId);
+                  break;
+                case 'abort':
+                  ctl.stopped = true;
+                  finish(() => resolve(turn.text));
+                  break;
+                case 'session.idle':
+                  if (d.aborted) ctl.stopped = true;
+                  finish(() => resolve(turn.text));
+                  break;
+                case 'session.error':
+                  finish(() => reject(new Error(d.message || 'session error')));
+                  break;
+              }
+            } catch (e) { finish(() => reject(e as Error)); }
+          });
+        });
+        // If the send fails, nothing waits on this when it rejects later.
+        completion.catch(() => {});
+
+        // Stop pressed while the turn was still being set up.
+        if (ctl.stopped) {
+          ctl.stop?.();
+          return STOPPED;
+        }
+        // Raced with Stop: the send itself can hang if the runtime is wedged.
+        await Promise.race([session.send({ prompt }), halted]);
+        return completion;
+      };
+
+      // A model request that never answers costs a restart of Copilot, which
+      // drops the connection it hung on, and the turn carries on once. A
+      // second stall in the same turn stops it.
+      let out: string | typeof STOPPED = STOPPED;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          out = await runTurn(attempt === 0 ? prompt : STALL_NOTE);
+          break;
+        } catch (e) {
+          if (!(e instanceof ModelStall) || ctl.stopped) throw e;
+          await step('ending the request', e.aborted, 5_000, undefined);
+          const again = attempt === 0;
+          console.log(`  ↻ no reply from the model; restarting Copilot${again ? ' and carrying on' : ''}`);
+          this.sessionSuspect = false;
+          await step('restarting Copilot', this.restartCopilot(`no reply from Copilot for ${spanText(IDLE_MS)}`, false, 'stall').catch(() => {}), 60_000, undefined);
+          if (!again) throw new Error(`Copilot sent nothing for ${spanText(IDLE_MS)}, twice, so Browy stopped. The chat is saved. Send a message to carry on.`);
+          if (!this.copilotClient) throw new Error(`Copilot sent nothing for ${spanText(IDLE_MS)} and couldn't be restarted. The chat is saved. Send a message to try again.`);
+          const reopened = await step('reopening the chat', this.ensureSession().then(() => true), 60_000, false);
+          if (!reopened) throw new Error('Copilot did not reopen this chat within a minute. The chat is saved. Send a message to carry on.');
+        }
       }
-      // Raced with Stop: the send itself can hang if the runtime is wedged.
-      await Promise.race([session.send({ prompt }), halted]);
-      const text = await completion;
+      if (out === STOPPED) return stoppedResult();
+      const text = out;
       const dur = Date.now() - t0;
 
       this.emit({ type: 'activity', event: 'llm_call_end', durationMs: dur });

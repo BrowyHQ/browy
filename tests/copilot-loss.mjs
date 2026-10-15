@@ -1,10 +1,14 @@
-// Copilot quitting under a chat (0.1.14).
+// Copilot quitting or going silent under a chat (0.1.14).
 //
 // When the Copilot CLI exits or its connection closes, the SDK quietly drops
 // the session's listeners. Up to 0.1.13 the turn then sat there until the
 // five-minute watchdog, and the next message failed on the dead handle. The
 // agent now ends the turn at once, starts Copilot again, and resumes the chat
 // from disk on the next message.
+//
+// A model request can also hang with the CLI still up, on a connection that
+// died without closing. When the watchdog finds nothing running, the agent
+// restarts Copilot, which drops that connection, and the turn carries on once.
 //
 // This runs the real Agent from src/agent/loop.ts against a stand-in for the
 // Copilot SDK, swapped in where loop.ts requires it.
@@ -128,6 +132,7 @@ const until = async (what, cond, ms = 3000) => {
 };
 
 const agent = new Agent({ model: 'gpt-5-mini', cdpEndpoints: [] });
+let stalling = null;
 const statuses = [];
 agent.setActivityCallback((m) => { if (m.type === 'host_status') statuses.push(m.state); });
 const ready = () => statuses.filter((s) => s === 'copilot_ready').length;
@@ -202,10 +207,45 @@ try {
   clients[3].sessions[0].emit('session.idle');
   const r6 = await t6;
   check('the next message starts it again and carries on', r6.text === 'Yes.' && !r6.stopped && clients[3].resumes.length === 1, JSON.stringify(r6));
+
+  // The request to the model never answers, as on 15 and 16 Oct 2026 when it
+  // hung on a dead connection. A second copy of loop.ts reads a short limit.
+  process.env.BROWY_IDLE_MS = '600';
+  const { Agent: StallAgent } = await import(pathToFileURL(path.join(out, 'loop.mjs')).href + '?stall');
+  stalling = new StallAgent({ model: 'gpt-5-mini', cdpEndpoints: [] });
+  const said = [];
+  stalling.setActivityCallback((m) => { if (m.type === 'host_status') said.push(m.state + (m.cause ? `:${m.cause}` : '')); });
+  const base = clients.length;
+  await stalling.initCopilot();
+  stalling.setBrowyProtocolSessionId('sp-stall');
+  const t7 = stalling.chat('fill the form');
+  await until('the carry-on send', () => clients[base + 1]?.sessions[0]?.sent.length === 1);
+  const s7 = clients[base + 1].sessions[0];
+  check('a model request that never answers restarts Copilot', clients[base].stopped && said.join() === 'copilot_restarting:stall,copilot_ready', said.join());
+  check('and carries on in the same chat with only a note', s7.sessionId === 'sp-stall' && clients[base + 1].resumes.length === 1
+    && /^<browy_note>[\s\S]*Carry on with the user's request[\s\S]*<\/browy_note>$/.test(s7.sent[0]), s7.sent[0]);
+  s7.emit('assistant.message', { messageId: 'm7', content: 'Filled.' });
+  s7.emit('session.idle');
+  const r7 = await t7;
+  check('the turn then ends as usual', r7.text === 'Filled.' && !r7.stopped, JSON.stringify(r7));
+
+  // A tool that runs past the limit is not a stall: the turn stops, no restart.
+  const t8 = stalling.chat('run the script');
+  await until('the tool send', () => s7.sent.length === 2);
+  s7.emit('tool.execution_start', { toolCallId: 'x1', toolName: 'run_script' });
+  const r8 = await t8;
+  check('a tool still running at the limit stops the turn without a restart',
+    /No progress for 1 second while run_script was still running/.test(r8.text) && clients.length === base + 2, JSON.stringify(r8));
+
+  // Silent again after the restart: the turn stops.
+  const t9 = stalling.chat('try once more');
+  const r9 = await t9;
+  check('a second stall in the same turn stops it', /Copilot sent nothing for 1 second, twice/.test(r9.text) && clients[base + 2]?.sessions[0]?.sent.length === 1, JSON.stringify(r9));
 } catch (e) {
   check('no unexpected error', false, e?.stack || String(e));
 } finally {
   await agent.disconnect().catch(() => {});
+  await stalling?.disconnect().catch(() => {});
   fs.rmSync(out, { recursive: true, force: true });
 }
 
@@ -213,5 +253,5 @@ if (failures.length) {
   console.error('FAIL:\n  - ' + failures.join('\n  - '));
   process.exit(1);
 }
-console.log('PASS: Copilot quitting under a chat (11 assertions)');
+console.log('PASS: Copilot quitting or going silent under a chat (16 assertions)');
 process.exit(0);

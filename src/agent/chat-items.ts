@@ -155,8 +155,16 @@ export function eventsToTurns(events: readonly any[], opts: { live?: boolean } =
     const ts = tsOf(ev);
     switch (ev.type) {
       case 'user.message': {
-        const text = stripContext(typeof d.content === 'string' ? d.content : '');
-        if (!text) break;
+        const raw = typeof d.content === 'string' ? d.content : '';
+        const text = stripContext(raw);
+        if (!text) {
+          // Only Browy's note: the turn carried on after Copilot stopped
+          // answering (loop.ts, ModelStall), so the abort before it didn't
+          // end the turn.
+          const h = head();
+          if (h?.end === 'stopped' && raw.includes('<browy_note>')) delete h.end;
+          break;
+        }
         settle(cur);
         cur = null;
         const list = ensureTurn(ts);

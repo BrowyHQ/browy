@@ -373,11 +373,13 @@ export interface SdkReady {
 }
 
 /** Broadcast while the Copilot runtime is being restarted after it quit, and
- *  once it is back. Panels show it as a status line; older ones ignore it. */
+ *  once it is back. Panels show it as a status line; older ones ignore it.
+ *  `cause: 'stall'` means Copilot stopped answering rather than quit. */
 export interface HostStatus {
   type: 'host.status';
   state: 'copilot_restarting' | 'copilot_ready' | 'copilot_failed';
   detail?: string;
+  cause?: 'stall';
 }
 
 export interface ModelsList {

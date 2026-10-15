@@ -69,6 +69,23 @@ const events = [
   check('the running turn keeps its running call', live[2].find((i) => i.kind === 'tool').status === 'running');
 }
 
+{
+  // Copilot stopped answering mid-turn: Browy aborted the request, restarted
+  // Copilot and sent only a note to carry on (loop.ts, ModelStall).
+  const stalled = [
+    ev('user.message', { content: 'fill the form' + ctx }),
+    ev('assistant.turn_start', {}),
+    ev('abort', { reason: 'user_initiated' }),
+    ev('session.resume', {}),
+    ev('user.message', { content: '<browy_note>\nCopilot sent nothing, so Browy reconnected. Carry on.\n</browy_note>' }),
+    ev('assistant.message', { content: 'Filled it in.' }),
+  ];
+  const turns = eventsToTurns(stalled);
+  check('a turn that carried on after a stall stays one turn', turns.length === 1, `${turns.length} turns`);
+  check('it has no bubble for the note', turns[0].filter((i) => i.kind === 'user').map((i) => i.text).join('|') === 'fill the form');
+  check('it is not marked stopped', !turns[0][0].end && turns[0].some((i) => i.kind === 'assistant' && i.text === 'Filled it in.'), JSON.stringify(turns[0]));
+}
+
 // ── pages ──────────────────────────────────────────────────────────────────
 
 {

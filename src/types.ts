@@ -95,7 +95,7 @@ export type WSMessage =
   | { type: 'launch_result'; brand: string; ok: boolean; error?: string }
   | { type: 'copilot_signin' }
   | { type: 'copilot_status'; state: 'ready' | 'unauth' | 'unknown'; detail?: string }
-  | { type: 'host_status'; state: 'copilot_restarting' | 'copilot_ready' | 'copilot_failed'; detail?: string }
+  | { type: 'host_status'; state: 'copilot_restarting' | 'copilot_ready' | 'copilot_failed'; detail?: string; cause?: 'stall' }
   | { type: 'connected'; tabs: { id: number; title: string; url: string }[] };
 
 export interface BrowserStatus {

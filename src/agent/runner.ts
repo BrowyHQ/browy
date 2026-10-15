@@ -697,7 +697,7 @@ function translateWsToProtocol(
       return { type: 'auth.status', state: ws.state, detail: ws.detail };
 
     case 'host_status':
-      return { type: 'host.status', state: ws.state, ...(ws.detail ? { detail: ws.detail } : {}) };
+      return { type: 'host.status', state: ws.state, ...(ws.detail ? { detail: ws.detail } : {}), ...(ws.cause ? { cause: ws.cause } : {}) };
 
     case 'response':
       // Agent's "final response" event. chat.done is emitted explicitly by
