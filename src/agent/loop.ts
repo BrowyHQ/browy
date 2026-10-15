@@ -58,7 +58,7 @@ function withDeadline<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
  * The working directory is not a signal. Any `copilot` started in
  * ~/.browseragent/sessions gets it too: on the machine this was written on,
  * a Copilot CLI coding session ("Deploy TinyDetect Redesign") had it, and
- * pruneOldBrowySessions() uses this same test to decide what to delete. The
+ * up to 0.1.13 a startup prune used this same test to decide what to delete. The
  * old check read context.cwd, which SDK 1.x renamed to workingDirectory, so it
  * never matched anyway. */
 function isBrowySession(s: any): boolean {
@@ -602,11 +602,9 @@ export class Agent {
         this.config.model = preferred;
       }
     } catch { /* listModels can fail pre-auth — leave config as-is */ }
-    // One-shot prune of old Browy sessions on startup. Sessions accumulate
-    // forever otherwise (one per panel open) and slow down listSessions
-    // (which walks every session on disk). Keep the 100 most recent and
-    // delete anything older than 30 days. User-CLI sessions are untouched.
-    if (!process.env.BROWY_NO_PRUNE) this.pruneOldBrowySessions().catch(() => {});
+    // Browy never deletes chats on its own: a chat stays until the user deletes
+    // it, as the privacy page says. (Up to 0.1.13 every start pruned chats
+    // beyond the 100 newest that were over 30 days old.)
     console.log('  ✅ Copilot SDK ready');
   }
 
@@ -709,36 +707,6 @@ export class Agent {
     // chat(), listChats() and the rest wait for this before using the client.
     this.copilotReady = done;
     return done;
-  }
-
-  private async pruneOldBrowySessions() {
-    if (!this.copilotClient) return;
-    try {
-      const sessions = await this.copilotClient.listSessions();
-      if (!Array.isArray(sessions) || sessions.length === 0) return;
-      // Use the SAME predicate as listChats. Pruning previously matched only
-      // the sp-/dt- prefix while listing matched three signals, so legacy
-      // sessions were listed forever and never cleaned up. Every signal is
-      // Browy-specific (our id prefix, our workdir, or our own
-      // <browser_context> marker), so `copilot` CLI sessions can never match.
-      const ours = sessions
-        .filter((s: any) => isBrowySession(s))
-        .map((s: any) => ({
-          id: s.sessionId,
-          mod: s.modifiedTime instanceof Date ? s.modifiedTime.getTime() : Number(s.modifiedTime) || 0,
-        }))
-        .sort((a, b) => b.mod - a.mod);
-      const KEEP_RECENT = 100;
-      const MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-      const cutoff = Date.now() - MAX_AGE_MS;
-      const toDelete = ours.slice(KEEP_RECENT).filter(s => s.mod < cutoff);
-      if (toDelete.length === 0) return;
-      let removed = 0;
-      for (const s of toDelete) {
-        try { await this.copilotClient.deleteSession(s.id); removed++; } catch {}
-      }
-      if (removed > 0) console.log(`  🧹 Pruned ${removed} old Browy session${removed > 1 ? 's' : ''} (>30d, keeping ${KEEP_RECENT} most recent)`);
-    } catch { /* non-fatal */ }
   }
 
   private async cleanupOrphanSessions() {

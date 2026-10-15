@@ -220,7 +220,7 @@ This launches the agent on a local WS port, prints connection info, and accepts 
 ```
 
 - A chat is its Copilot session. The host reads the session's event log without resuming it (`sessions.readPersistedEvents`) and sends the side panel normalized items (`agent/chat-items.ts`), a page of turns at a time. The panel keeps only a small copy of each chat's newest turns, so it can paint at once.
-- Browy's chats have `sp-` (side panel) or `dt-` (DevTools panel) ids. `listChats` finds them by id, so the user's own `copilot` CLI sessions in the same store never show up in Browy's chats list and are never pruned.
+- Browy's chats have `sp-` (side panel) or `dt-` (DevTools panel) ids. `listChats` finds them by id, so the user's own `copilot` CLI sessions in the same store never show up in Browy's chats list. Browy never deletes a chat on its own; only the user's delete does.
 
 ---
 
