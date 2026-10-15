@@ -536,7 +536,7 @@ export class Agent {
     // forever otherwise (one per panel open) and slow down listSessions
     // (which walks every session on disk). Keep the 100 most recent and
     // delete anything older than 30 days. User-CLI sessions are untouched.
-    this.pruneOldBrowySessions().catch(() => {});
+    if (!process.env.BROWY_NO_PRUNE) this.pruneOldBrowySessions().catch(() => {});
     console.log('  ✅ Copilot SDK ready');
   }
 
