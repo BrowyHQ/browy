@@ -533,7 +533,9 @@ export async function capturePageSnapshot(cdp: CdpLike): Promise<PageSnapshot> {
       textChars,
     };
 
-    const isEmpty = totalElements < 10;
+    // A short page with real text on it isn't empty; an app shell still
+    // waiting for its script has next to none.
+    const isEmpty = totalElements < 10 && textChars < 20;
     const isPlaceholder = !isEmpty && totalElements > 30 && textChars < totalElements * 4;
 
     const info = {
