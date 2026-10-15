@@ -7,6 +7,7 @@ All notable changes to Browy will be documented in this file. The format follows
 ### Fixed
 
 - **When a tool fails, the model now hears why.** Up to 0.1.13 every failure reached the model as "Tool execution failed", so it guessed at the cause and tried again; in one long run on 15 October that happened 11 times. The model now gets the actual error, such as a page that navigated away mid-call. A call that runs past the two-minute limit comes back as a timeout, with the reason.
+- **The page snapshot reaches into shadow DOM.** Elements inside open shadow roots, like X's chat composer, never got an [N] index, so the model wrote its own `shadowRoot` code 27 times in that run. They're indexed now, and `click_index`, `type_index`, `focus_index`, `clear_index` and `upload_index` find them. Elements in same-origin iframes, which the snapshot was meant to include all along, get indexes too, and clicks on them land in the right place. `upload_index` also takes the upload button next to a hidden file input. And the page summary no longer calls almost every page a loading skeleton: it had been counting no text at all.
 
 ## [0.1.13]: Stop always works, and a dropped tool call gets run anyway
 *Released 2026-10-14*

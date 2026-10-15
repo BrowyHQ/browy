@@ -107,6 +107,47 @@ interface CdpLike {
   send: (method: string, params?: unknown) => Promise<unknown>;
 }
 
+/** In-page helpers, prepended to an expression: `__browyFind(n)` returns the
+ *  element the last snapshot indexed as [n], wherever it lives (the document,
+ *  an open shadow root or a same-origin iframe), or null. The snapshot keeps
+ *  a direct reference in window.__browyIdx; the attribute search is the
+ *  fallback. `__browyDeepActive()` is the focused element, looking through
+ *  shadow roots and same-origin iframes. */
+export const FIND_JS = `
+const __browyFind = (n) => {
+  const want = String(n);
+  const reg = window.__browyIdx;
+  const hit = reg && reg[n];
+  if (hit && hit.isConnected && hit.getAttribute('data-browy-id') === want) return hit;
+  const sel = '[data-browy-id="' + want + '"]';
+  const stack = [document];
+  while (stack.length) {
+    const root = stack.pop();
+    let found = null;
+    try { found = root.querySelector(sel); } catch (_) {}
+    if (found) return found;
+    let all = [];
+    try { all = root.querySelectorAll('*'); } catch (_) {}
+    for (const x of all) {
+      if (x.shadowRoot) stack.push(x.shadowRoot);
+      if (x.tagName === 'IFRAME' || x.tagName === 'FRAME') { try { if (x.contentDocument) stack.push(x.contentDocument); } catch (_) {} }
+    }
+  }
+  return null;
+};
+const __browyDeepActive = () => {
+  let a = document.activeElement;
+  for (let i = 0; a && i < 32; i++) {
+    let inner = null;
+    if (a.shadowRoot) inner = a.shadowRoot.activeElement;
+    else if (a.tagName === 'IFRAME' || a.tagName === 'FRAME') { try { inner = a.contentDocument && a.contentDocument.activeElement; } catch (_) {} }
+    if (!inner) break;
+    a = inner;
+  }
+  return a;
+};
+`;
+
 const SNAPSHOT_CACHE = new WeakMap<object, PageSnapshot>();
 
 /** Build a fresh page snapshot. Tags interactive elements with data-browy-id
@@ -216,7 +257,10 @@ export async function capturePageSnapshot(cdp: CdpLike): Promise<PageSnapshot> {
         const lb = el.getAttribute && el.getAttribute('aria-labelledby');
         if (lb) {
           const ids = lb.split(/\\s+/).filter(Boolean);
-          const txt = ids.map(id => (document.getElementById(id)?.textContent || '').trim()).filter(Boolean).join(' ');
+          // The ids live in the element's own tree: a shadow root has its own.
+          const root = el.getRootNode();
+          const byId = (id) => (root && root.getElementById ? root.getElementById(id) : null) || document.getElementById(id);
+          const txt = ids.map(id => (byId(id)?.textContent || '').trim()).filter(Boolean).join(' ');
           if (txt) return txt.slice(0, 120);
         }
         // 2) aria-label (cheap — already on raw attrs but include here for fallthrough)
@@ -251,7 +295,9 @@ export async function capturePageSnapshot(cdp: CdpLike): Promise<PageSnapshot> {
     }
 
     function isInteractive(el) {
-      if (!(el instanceof Element)) return false;
+      // nodeType, not instanceof Element: an element in a same-origin iframe
+      // comes from that frame's realm and fails the instanceof check.
+      if (!el || el.nodeType !== 1) return false;
       if (el.hasAttribute('disabled')) return false;
       const tag = el.tagName.toLowerCase();
       if (INTERACTIVE_TAGS.has(tag)) {
@@ -304,7 +350,12 @@ export async function capturePageSnapshot(cdp: CdpLike): Promise<PageSnapshot> {
     function walk(root) {
       if (!root) return;
       try { clearStale(root); } catch (_) {}
-      const stack = [root.documentElement || root];
+      // A document starts at <html>. A shadow root has no documentElement and
+      // isn't an element itself, so start from its children: up to 0.1.13
+      // the walk stopped right there and skipped every shadow tree.
+      const stack = [];
+      if (root.nodeType === 9) { if (root.documentElement) stack.push(root.documentElement); }
+      else if (root.children) { for (let i = root.children.length - 1; i >= 0; i--) stack.push(root.children[i]); }
       while (stack.length) {
         const node = stack.pop();
         if (!node) continue;
@@ -321,9 +372,13 @@ export async function capturePageSnapshot(cdp: CdpLike): Promise<PageSnapshot> {
             candidates.push(node);
           }
           if (node.shadowRoot) walk(node.shadowRoot);
+          // Text nodes aren't in .children, so count this element's own text here.
+          if (tag !== 'script' && tag !== 'style' && tag !== 'noscript' && tag !== 'template') {
+            for (let c = node.firstChild; c; c = c.nextSibling) {
+              if (c.nodeType === 3) textChars += (c.nodeValue || '').trim().length;
+            }
+          }
           for (let i = node.children.length - 1; i >= 0; i--) stack.push(node.children[i]);
-        } else if (node.nodeType === 3) {
-          textChars += (node.nodeValue || '').trim().length;
         }
       }
     }
@@ -340,7 +395,15 @@ export async function capturePageSnapshot(cdp: CdpLike): Promise<PageSnapshot> {
 
     // Containment filter: drop elements ≥99% contained inside another
     // already-indexed interactive element (e.g. an inner <span> inside an
-    // <a> tag). browser-use uses the same heuristic.
+    // <a> tag). browser-use uses the same heuristic. Text fields are always
+    // kept: a focusable wrapper (often a custom element hosting a composer in
+    // its shadow root) must not swallow the field the agent has to type in.
+    const isField = (el) => {
+      const t = el.tagName.toLowerCase();
+      if (t === 'input' || t === 'textarea' || t === 'select') return true;
+      const ce = el.getAttribute('contenteditable');
+      return ce != null && ce !== 'false';
+    };
     const kept = [];
     for (const el of candidates) {
       const r = el.getBoundingClientRect();
@@ -354,17 +417,27 @@ export async function capturePageSnapshot(cdp: CdpLike): Promise<PageSnapshot> {
           contained = true; break;
         }
       }
-      if (!contained) kept.push({ el, r });
+      if (!contained || isField(el)) kept.push({ el, r });
     }
 
     // Cap to a reasonable number to keep prompts bounded.
     const MAX_ELEMENTS = 150;
     const final = kept.slice(0, MAX_ELEMENTS);
 
+    // The focused element, looking through shadow roots (document.activeElement
+    // stops at the outermost shadow host).
+    let deepActive = document.activeElement;
+    while (deepActive && deepActive.shadowRoot && deepActive.shadowRoot.activeElement) deepActive = deepActive.shadowRoot.activeElement;
+
+    // Direct references, so the action tools find [N] without searching every
+    // shadow root and iframe again.
+    const registry = [];
+
     let links = 0, inputs = 0, buttons = 0;
     const items = final.map(({ el, r }, i) => {
       const idx = i + 1;
       el.setAttribute('data-browy-id', String(idx));
+      registry[idx] = el;
       const tag = el.tagName.toLowerCase();
       if (tag === 'a') links++;
       if (tag === 'input' || tag === 'textarea' || tag === 'select') inputs++;
@@ -401,7 +474,7 @@ export async function capturePageSnapshot(cdp: CdpLike): Promise<PageSnapshot> {
       }
 
       // Accessibility states — high-signal, what a screen reader would say.
-      const focused = (document.activeElement === el);
+      const focused = (deepActive === el);
       const expandedAttr = el.getAttribute('aria-expanded');
       const expanded = expandedAttr === 'true' ? true : expandedAttr === 'false' ? false : undefined;
       const pressedAttr = el.getAttribute('aria-pressed');
@@ -442,6 +515,9 @@ export async function capturePageSnapshot(cdp: CdpLike): Promise<PageSnapshot> {
         },
       };
     });
+    try {
+      Object.defineProperty(window, '__browyIdx', { value: registry, configurable: true, writable: true, enumerable: false });
+    } catch (_) {}
 
     const docHeight = Math.max(
       document.documentElement?.scrollHeight || 0,
@@ -669,39 +745,32 @@ export interface ResolvedElement {
 }
 
 export async function resolveIndex(cdp: CdpLike, index: number): Promise<ResolvedElement> {
+  const n = Math.floor(Number(index));
   const expr = `(() => {
-    const el = document.querySelector('[data-browy-id="${index}"]');
-    if (!el) {
-      // Search shadow roots and same-origin iframes.
-      const stack = [document];
-      while (stack.length) {
-        const root = stack.pop();
-        if (!root) continue;
-        const found = root.querySelector?.('[data-browy-id="${index}"]');
-        if (found) return resolve(found);
-        const all = root.querySelectorAll?.('*') || [];
-        for (const n of all) {
-          if (n.shadowRoot) stack.push(n.shadowRoot);
-          if (n.tagName === 'IFRAME' || n.tagName === 'FRAME') {
-            try { if (n.contentDocument) stack.push(n.contentDocument); } catch(_) {}
-          }
-        }
+    ${FIND_JS}
+    const el = __browyFind(${n});
+    if (!el) return JSON.stringify({ found: false, reason: 'no element [${n}]: the page changed since the last snapshot. Call inspect_page and use the new index.' });
+    try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch(_) {}
+    const r = el.getBoundingClientRect();
+    // An element in a same-origin iframe reports coordinates inside that
+    // frame; clicks need them in the top page.
+    let x = r.left, y = r.top;
+    try {
+      let w = el.ownerDocument.defaultView;
+      while (w && w.frameElement) {
+        const f = w.frameElement, fr = f.getBoundingClientRect();
+        x += fr.left + f.clientLeft; y += fr.top + f.clientTop;
+        w = w.parent;
       }
-      return JSON.stringify({ found: false, reason: 'no element with data-browy-id=${index} (snapshot may be stale — call inspect_page again)' });
-    }
-    return resolve(el);
-    function resolve(el) {
-      try { el.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); } catch(_) {}
-      const r = el.getBoundingClientRect();
-      const tag = el.tagName.toLowerCase();
-      const editable = tag === 'input' || tag === 'textarea' || (el.getAttribute('contenteditable') || 'false') !== 'false';
-      const isSelect = tag === 'select';
-      return JSON.stringify({
-        found: true,
-        rect: { x: r.left, y: r.top, w: r.width, h: r.height, cx: r.left + r.width/2, cy: r.top + r.height/2 },
-        tag, isEditable: editable, isSelect,
-      });
-    }
+    } catch (_) {}
+    const tag = el.tagName.toLowerCase();
+    const editable = tag === 'input' || tag === 'textarea' || !!el.isContentEditable;
+    const isSelect = tag === 'select';
+    return JSON.stringify({
+      found: true,
+      rect: { x, y, w: r.width, h: r.height, cx: x + r.width/2, cy: y + r.height/2 },
+      tag, isEditable: editable, isSelect,
+    });
   })()`;
   const { result } = await cdp.send('Runtime.evaluate', {
     expression: expr,

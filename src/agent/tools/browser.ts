@@ -1,7 +1,7 @@
 import type { ToolDef } from '../../types.js';
 import type { CDPSession, Browser, BrowserContext, Page } from 'playwright-core';
 import {
-  capturePageSnapshot, ensureSnapshot, resolveIndex, serializeSnapshot,
+  capturePageSnapshot, ensureSnapshot, resolveIndex, serializeSnapshot, FIND_JS,
   type ResolvedElement,
 } from '../page-snapshot.js';
 
@@ -53,6 +53,30 @@ export async function runTool(
   }
 }
 
+// ── Shared helpers ─────────────────────────────────────────────────────────
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+const newToken = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+/** A call that hasn't settled after `ms` is given up on. Calls to a tab in
+ *  the middle of a navigation can sit unanswered. */
+function within<T>(p: Promise<T>, ms: number): Promise<T> {
+  p.catch(() => {}); // the abandoned call may still fail later
+  return Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`no answer within ${ms} ms`)), ms))]);
+}
+
+/** Runtime.evaluate of an expression that returns JSON (or a plain value). */
+async function evalJson<T>(ctx: BrowserToolContext, expression: string, timeoutMs = 10_000): Promise<T> {
+  const r = await within(ctx.cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }), timeoutMs) as {
+    result?: { value?: unknown }; exceptionDetails?: { text?: string; exception?: { description?: string } };
+  };
+  if (r?.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text || 'page script failed');
+  const v = r?.result?.value;
+  return (typeof v === 'string' ? JSON.parse(v) : v) as T;
+}
+
 // ── Tools ──────────────────────────────────────────────────────────────────
 
 // ── Indexed-element interaction (the SeeAct/browser-use pattern) ──────────
@@ -89,6 +113,7 @@ interface ClickState {
 async function captureClickState(ctx: BrowserToolContext, idx?: number): Promise<ClickState> {
   const idxArg = idx == null ? 'null' : Number(idx);
   const expr = `(() => {
+    ${FIND_JS}
     function fnv1a(s) {
       let h = 0x811c9dc5;
       for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0; }
@@ -101,7 +126,7 @@ async function captureClickState(ctx: BrowserToolContext, idx?: number): Promise
     let elState = null;
     const i = ${idxArg};
     if (i != null) {
-      const el = document.querySelector('[data-browy-id="' + i + '"]');
+      const el = __browyFind(i);
       if (el) {
         elState = {
           pressed: el.getAttribute('aria-pressed') || undefined,
@@ -266,8 +291,9 @@ register({
     if (!Number.isFinite(idx) || idx < 1) return JSON.stringify({ error: 'index must be a positive integer' });
     const cdp = ctx.cdp as unknown as { send: (m: string, p?: unknown) => Promise<unknown> };
     const expr = `(() => {
-      const el = document.querySelector('[data-browy-id="${idx}"]');
-      if (!el) return JSON.stringify({ error: 'index ${idx} not found — call inspect_page' });
+      ${FIND_JS}
+      const el = __browyFind(${idx});
+      if (!el) return JSON.stringify({ error: 'index ${idx} not found: call inspect_page' });
       if (el.tagName !== 'SELECT') return JSON.stringify({ error: 'not a <select>; for custom dropdowns use click_index' });
       const want = ${JSON.stringify(value)};
       let chosen = null;
@@ -276,7 +302,7 @@ register({
       }
       if (!chosen) return JSON.stringify({ error: 'no matching option', options: Array.from(el.options).slice(0, 50).map(o => ({ value: o.value, label: o.text })) });
       el.value = chosen.value;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return JSON.stringify({ success: true, value: chosen.value, label: chosen.text });
     })()`;
@@ -331,8 +357,9 @@ register({
     const cdp = ctx.cdp as unknown as { send: (m: string, p?: unknown) => Promise<unknown> };
     const want = args.checked == null ? 'null' : (String(args.checked) === 'true' ? 'true' : 'false');
     const expr = `(() => {
-      const el = document.querySelector('[data-browy-id="${idx}"]');
-      if (!el) return JSON.stringify({ error: 'index ${idx} not found — call inspect_page' });
+      ${FIND_JS}
+      const el = __browyFind(${idx});
+      if (!el) return JSON.stringify({ error: 'index ${idx} not found: call inspect_page' });
       const tag = el.tagName.toLowerCase();
       const type = (el.getAttribute('type') || '').toLowerCase();
       const isCheck = tag === 'input' && (type === 'checkbox' || type === 'radio');
@@ -343,7 +370,7 @@ register({
       // Use the React-friendly setter so framework state updates.
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set;
       if (setter) setter.call(el, next); else el.checked = next;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
       // Click is what radio groups need to trigger group bookkeeping.
       if (type === 'radio' && next) try { el.click(); } catch(_) {}
@@ -379,6 +406,7 @@ register({
     const cdp = ctx.cdp as unknown as { send: (m: string, p?: unknown) => Promise<unknown> };
     const idxArg = args.index == null ? 'null' : Number(args.index);
     const expr = `(() => {
+      ${FIND_JS}
       function labelFor(el) {
         if (el.id) {
           const lab = document.querySelector('label[for=' + JSON.stringify(el.id) + ']');
@@ -431,8 +459,8 @@ register({
       let form = null;
       const startIdx = ${idxArg};
       if (startIdx != null) {
-        const start = document.querySelector('[data-browy-id="' + startIdx + '"]');
-        if (!start) return JSON.stringify({ error: 'index ' + startIdx + ' not found — call inspect_page' });
+        const start = __browyFind(startIdx);
+        if (!start) return JSON.stringify({ error: 'index ' + startIdx + ' not found: call inspect_page' });
         form = start.closest('form') || start.closest('[role="form"]');
       }
       if (!form) {
@@ -502,10 +530,11 @@ register({
     const cdp = ctx.cdp as unknown as { send: (m: string, p?: unknown) => Promise<unknown> };
     // Run all fills in a single CDP eval to minimise round-trips.
     const expr = `(() => {
+      ${FIND_JS}
       const fields = ${JSON.stringify(parsed)};
       const results = [];
       for (const f of fields) {
-        const el = document.querySelector('[data-browy-id="' + f.index + '"]');
+        const el = __browyFind(f.index);
         if (!el) { results.push({ index: f.index, ok: false, error: 'not found' }); continue; }
         const tag = el.tagName.toLowerCase();
         const type = (el.getAttribute('type') || '').toLowerCase();
@@ -533,7 +562,7 @@ register({
             const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
             if (setter) setter.call(el, String(f.value)); else el.value = String(f.value);
           }
-          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
           el.dispatchEvent(new Event('change', { bubbles: true }));
           results.push({ index: f.index, ok: true, action });
         } catch (e) {
@@ -561,10 +590,11 @@ register({
     const before = await captureUrlTitle(ctx);
     const idxArg = args.index == null ? 'null' : Number(args.index);
     const expr = `(() => {
+      ${FIND_JS}
       let form = null;
       const startIdx = ${idxArg};
       if (startIdx != null) {
-        const start = document.querySelector('[data-browy-id="' + startIdx + '"]');
+        const start = __browyFind(startIdx);
         if (start) form = start.closest('form');
       }
       if (!form) {
@@ -592,12 +622,35 @@ register({
   },
 });
 
+/** In-page (needs FIND_JS): the file input behind an indexed element. Sites
+ *  usually hide the real <input type=file> and show a button or label, and
+ *  the snapshot only indexes what's visible. */
+const FILE_INPUT_JS = `
+const __browyFileInput = (el) => {
+  const isFile = (x) => !!x && x.localName === 'input' && (x.getAttribute('type') || '').toLowerCase() === 'file';
+  if (isFile(el)) return el;
+  if (el.localName === 'label' && isFile(el.control)) return el.control;
+  const q = 'input[type="file" i]';
+  const inside = el.querySelector(q) || (el.shadowRoot && el.shadowRoot.querySelector(q));
+  if (inside) return inside;
+  let p = el;
+  for (let i = 0; i < 4 && p; i++) {
+    const up = p.parentNode;
+    p = up && up.nodeType === 11 ? up.host : up;
+    if (!p || p.nodeType !== 1) break;
+    const all = p.querySelectorAll(q);
+    if (all.length === 1) return all[0];
+    if (all.length > 1) break;
+  }
+  return null;
+};`;
+
 register({
   def: {
     type: 'function', name: 'upload_index',
-    description: 'Attach a local file to a <input type="file"> at index [N]. Bypasses the OS file-picker dialog entirely (uses CDP DOM.setFileInputFiles). Use absolute path. For multiple files on a multi-attach input, pass paths as a JSON array string.',
+    description: 'Attach local files to the file input at index [N], with no file-picker dialog. [N] can also be the upload button or label next to a hidden file input, including inside shadow DOM. Use absolute paths; for several files on a multi-file input, pass a JSON array string.',
     parameters: { type: 'object', properties: {
-      index: { type: 'number', description: 'The [N] index of the file input.' },
+      index: { type: 'number', description: 'The [N] index of the file input, or of its upload button or label.' },
       path: { type: 'string', description: 'Absolute local file path, OR a JSON array of paths for multi-file inputs.' },
     }, required: ['index', 'path'] },
   },
@@ -615,13 +668,33 @@ register({
     for (const p of paths) {
       if (!fs.existsSync(p)) return JSON.stringify({ error: `File not found: ${p}` });
     }
-    // Look up the backendNodeId via the data-browy-id attribute selector,
-    // then DOM.setFileInputFiles. Avoids needing a full DOM tree fetch.
-    const cdp = ctx.cdp as unknown as { send: (m: string, p?: unknown) => Promise<unknown> };
-    const doc: any = await cdp.send('DOM.getDocument', { depth: -1 });
-    const found: any = await cdp.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: `[data-browy-id="${idx}"]` });
-    if (!found?.nodeId) return JSON.stringify({ error: `index ${idx} not found in DOM — call inspect_page` });
-    await cdp.send('DOM.setFileInputFiles', { files: paths, nodeId: found.nodeId });
+    // A handle to the input itself (it may sit in a shadow root, where
+    // DOM.querySelector on the document can't see it), then DOM.setFileInputFiles.
+    const r = await ctx.cdp.send('Runtime.evaluate', {
+      expression: `(() => { ${FIND_JS} ${FILE_INPUT_JS}
+        const el = __browyFind(${Math.floor(idx)});
+        if (!el) return 'gone';
+        return __browyFileInput(el) || el.localName;
+      })()`,
+      objectGroup: 'browy-upload',
+    }) as { result?: { type?: string; value?: string; objectId?: string; subtype?: string } };
+    try {
+      const res = r?.result;
+      if (res?.value === 'gone') throw new Error(`No element [${idx}]: the page changed since the last snapshot. Call inspect_page and use the new index.`);
+      if (!res?.objectId || res.subtype !== 'node') {
+        throw new Error(`[${idx}] is a <${res?.value || '?'}> with no file input in or next to it. Find the file input or its upload button in inspect_page.`);
+      }
+      try {
+        await ctx.cdp.send('DOM.setFileInputFiles', { files: paths, objectId: res.objectId });
+      } catch (e) {
+        if (/not allowed/i.test(errText(e))) {
+          throw new Error('Chrome refused to attach the file ("Not allowed"), which usually means Browy has no file access. Turn on "Allow access to file URLs" for Browy on the extensions page (chrome://extensions, or brave://extensions in Brave), then try again.');
+        }
+        throw e;
+      }
+    } finally {
+      ctx.cdp.send('Runtime.releaseObjectGroup', { objectGroup: 'browy-upload' }).catch(() => {});
+    }
     return JSON.stringify({ success: true, index: idx, files: paths });
   },
 });
