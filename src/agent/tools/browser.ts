@@ -1233,6 +1233,72 @@ register({
   },
 });
 
+/** In-page text helpers. `__browyText(root, max)` is the rendered text of a
+ *  document or element, like innerText, but also inside open shadow roots
+ *  (innerText skips them), in reading order with slotted content in place.
+ *  `__browyQueryAll(sel)` matches a selector in the document and in every open
+ *  shadow root. */
+const TEXT_JS = `
+const __browyText = (root, max) => {
+  const hosts = [];
+  const scan = (r) => {
+    let all = [];
+    try { all = r.querySelectorAll('*'); } catch (_) {}
+    for (const x of all) if (x.shadowRoot) { hosts.push(x); scan(x.shadowRoot); }
+  };
+  const top = root.nodeType === 9 ? (root.body || root.documentElement) : root;
+  if (!top) return '';
+  if (top.shadowRoot) { hosts.push(top); scan(top.shadowRoot); }
+  scan(top);
+  if (!hosts.length) return top.innerText || '';
+  // Elements with a shadow host below them are walked by hand; everything
+  // else is a plain subtree whose innerText is right as it is.
+  const path = new Set();
+  for (const h of hosts) {
+    for (let p = h; p && !path.has(p); ) {
+      path.add(p);
+      if (p === top) break;
+      const up = p.parentNode;
+      p = up && up.nodeType === 11 ? up.host : up;
+    }
+  }
+  const SKIP = new Set(['script', 'style', 'noscript', 'template', 'head', 'svg']);
+  const out = [];
+  let size = 0;
+  const add = (s) => { if (s) { out.push(s); size += s.length; } };
+  const walk = (node) => {
+    if (size > max) return;
+    if (node.nodeType === 3) { add(node.data.replace(/\\s+/g, ' ')); return; }
+    if (node.nodeType === 11) { for (let c = node.firstChild; c; c = c.nextSibling) walk(c); return; }
+    if (node.nodeType !== 1 || SKIP.has(node.localName)) return;
+    if (node.localName === 'slot') {
+      const a = node.assignedNodes({ flatten: true });
+      if (a.length) { for (const c of a) walk(c); } else { for (let c = node.firstChild; c; c = c.nextSibling) walk(c); }
+      return;
+    }
+    const d = getComputedStyle(node).display;
+    if (d === 'none') return;
+    const block = !(d.startsWith('inline') || d === 'contents');
+    if (block) add('\\n');
+    if (!path.has(node) && d !== 'contents') add(node.innerText);
+    else if (node.shadowRoot) walk(node.shadowRoot);
+    else for (let c = node.firstChild; c; c = c.nextSibling) walk(c);
+    if (block) add('\\n');
+  };
+  walk(top);
+  return out.join('').replace(/[ \\t]+\\n/g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim();
+};
+const __browyQueryAll = (sel) => {
+  const found = [];
+  const visit = (r) => {
+    for (const el of r.querySelectorAll(sel)) found.push(el);
+    for (const x of r.querySelectorAll('*')) if (x.shadowRoot) visit(x.shadowRoot);
+  };
+  visit(document);
+  return found;
+};
+`;
+
 register({
   def: {
     type: 'function', name: 'get_page_info', description: 'Get URL, title, meta description, and visible text preview (first 2000 chars) of the current page.',
@@ -1240,12 +1306,17 @@ register({
   },
   async run(_args, ctx) {
     const { result } = await ctx.cdp.send('Runtime.evaluate', {
-      expression: `JSON.stringify({
-        url: location.href,
-        title: document.title,
-        meta: document.querySelector('meta[name="description"]')?.content || '',
-        text: document.body?.innerText?.slice(0, 2000) || ''
-      })`,
+      expression: `(() => {
+        ${TEXT_JS}
+        let text = '';
+        try { text = __browyText(document, 2500); } catch (_) { text = document.body?.innerText || ''; }
+        return JSON.stringify({
+          url: location.href,
+          title: document.title,
+          meta: document.querySelector('meta[name="description"]')?.content || '',
+          text: text.slice(0, 2000)
+        });
+      })()`,
       returnByValue: true,
     });
     return result.value as string;
@@ -1325,18 +1396,78 @@ register({
   },
 });
 
+const EXTRACT_DEFAULT_CHARS = 20_000;
+const EXTRACT_MAX_CHARS = 100_000;
+
 register({
   def: {
-    type: 'function', name: 'extract_text', description: 'Extract visible text from page or element (max 4000 chars).',
-    parameters: { type: 'object', properties: { selector: { type: 'string', description: 'Optional CSS selector' } }, required: [] },
+    type: 'function', name: 'extract_text',
+    description: 'Read the text of the page, or of each element matching a CSS selector, including text inside open shadow roots. Returns up to 20000 characters by default (max_chars up to 100000); a truncated result says where to continue (next_start). A selector is matched in the page and inside every open shadow root and gives one item per match, so "li" or "article" reads a list item by item; it waits up to 3 s for a match to appear.',
+    parameters: { type: 'object', properties: {
+      selector: { type: 'string', description: 'Optional CSS selector. Each match is one item.' },
+      max_chars: { type: 'number', description: 'Most characters to return (default 20000, up to 100000).' },
+      start: { type: 'number', description: 'Where to continue a truncated result: a character offset into the page text, or with a selector, how many matches to skip.' },
+    }, required: [] },
   },
   async run(args, ctx) {
-    const sel = args.selector ? String(args.selector).replace(/'/g, "\\'") : '';
-    const expr = sel
-      ? `JSON.stringify({ text: (document.querySelector('${sel}')?.innerText || 'Not found').slice(0, 4000) })`
-      : `JSON.stringify({ text: document.body?.innerText?.slice(0, 4000) || '' })`;
-    const { result } = await ctx.cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
-    return result.value as string;
+    const sel = typeof args.selector === 'string' ? args.selector.trim() : '';
+    const askedMax = Math.floor(Number(args.max_chars));
+    const max = Math.min(EXTRACT_MAX_CHARS, askedMax > 0 ? askedMax : EXTRACT_DEFAULT_CHARS);
+    const start = Math.max(0, Math.floor(Number(args.start) || 0));
+    if (!sel) {
+      const r = await evalJson<{ url: string; title: string; text: string }>(ctx, `(() => {
+        ${TEXT_JS}
+        let text = '';
+        try { text = __browyText(document, ${start + max + 1000}); } catch (_) { text = document.body ? document.body.innerText : ''; }
+        return JSON.stringify({ url: location.href, title: document.title, text });
+      })()`, 20_000);
+      const all = String(r.text || '');
+      const text = all.slice(start, start + max);
+      const more = all.length > start + max;
+      return JSON.stringify({ url: r.url, title: r.title, text, ...(more ? { truncated: true, next_start: start + max } : {}) });
+    }
+    const expr = `(() => {
+      ${TEXT_JS}
+      let els;
+      try { els = __browyQueryAll(${JSON.stringify(sel)}); }
+      catch (e) { return JSON.stringify({ bad: String((e && e.message) || e) }); }
+      const items = [];
+      let size = 0;
+      for (let i = ${start}; i < els.length && size < ${max}; i++) {
+        let t = '';
+        try { t = __browyText(els[i], ${max} - size + 200); } catch (_) { t = els[i].innerText || els[i].textContent || ''; }
+        t = String(t).trim();
+        items.push(t);
+        size += t.length;
+      }
+      return JSON.stringify({ url: location.href, title: document.title, matches: els.length, items });
+    })()`;
+    type Found = { bad?: string; url: string; title: string; matches: number; items: string[] };
+    let r = await evalJson<Found>(ctx, expr, 20_000);
+    // Single-page apps render after load: give the selector a moment.
+    for (const t0 = Date.now(); !r.bad && r.matches === 0 && Date.now() - t0 < 3000; ) {
+      await sleep(300);
+      r = await evalJson<Found>(ctx, expr, 20_000);
+    }
+    if (r.bad) throw new Error(`"${sel}" isn't a valid CSS selector (${r.bad}).`);
+    if (r.matches === 0) throw new Error(`Nothing matches "${sel}" in the page or its open shadow roots, after waiting 3 s. Check the selector, or call extract_text without one to read the whole page.`);
+    const items: string[] = [];
+    let size = 0;
+    let cut = false;
+    for (const t of r.items) {
+      if (size + t.length > max) { items.push(t.slice(0, Math.max(0, max - size))); cut = true; break; }
+      items.push(t);
+      size += t.length;
+    }
+    const shownUpTo = start + items.length;
+    const nextStart = cut ? (items.length > 1 ? shownUpTo - 1 : undefined) : (shownUpTo < r.matches ? shownUpTo : undefined);
+    return JSON.stringify({
+      url: r.url, title: r.title, selector: sel, matches: r.matches,
+      ...(start ? { start } : {}),
+      items,
+      ...(cut || nextStart != null ? { truncated: true } : {}),
+      ...(nextStart != null ? { next_start: nextStart } : {}),
+    });
   },
 });
 

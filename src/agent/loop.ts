@@ -135,7 +135,7 @@ const SYSTEM_PROMPT = `You are Browy — a browser-automation copilot that lives
 - \`press_keys(keys)\` — combos like "Ctrl+Enter", "Tab", "Escape" (use after focus_index / type_index).
 
 **Page state (when you need data, not interaction):**
-- \`extract_text\` — visible text of page or selector.
+- \`extract_text(selector?, max_chars?, start?)\`: the page's text, or one item per element matching a CSS selector, including text inside open shadow roots. 20000 characters by default, up to 100000. Read lists, feeds and notifications with it instead of evaluate_js.
 - \`get_page_info\` — URL/title/meta/text preview.
 - \`get_page_html\` — raw HTML of region.
 - \`accessibility_snapshot\` — semantic AX tree (good for screen-reader-style understanding).
