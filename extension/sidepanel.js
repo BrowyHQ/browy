@@ -163,19 +163,29 @@ function setLive(on) { dot.classList.toggle('live', on); }
 
 // Stable session id (persisted in chrome.storage.local) so reloading the
 // side panel resumes the same conversation on disk instead of starting fresh.
-// We also persist the rendered chat HTML so the visible bubbles come back.
 //
-// Multi-chat model:
-//   browy.sessionId       — current chat id
-//   browy.chat.<id>       — rendered HTML for that chat
-//   browy.chatMeta.<id>   — { id, title, updated, preview }
-//   browy.chatIndex       — ordered list of ids (newest first)
+// The chat itself lives in its Copilot session; the panel renders what the
+// host reads from it (see "Chat history" below) and keeps no transcript of
+// its own:
+//   browy.sessionId       current chat id
+//   browy.view.<id>       the newest turns last shown, for an instant first
+//                         paint; replaced as soon as the session answers
+//   browy.viewIndex       ids with a cached view, newest first
+//   browy.chatList        the last full chats list, for the overlay
+// Up to 0.1.13 the panel stored each chat's HTML as the record:
+//   browy.chat.<id>       rendered HTML for that chat
+//   browy.chatMeta.<id>   { id, title, updated, preview }
+//   browy.chatIndex       ordered list of ids (newest first)
+// Those are only read now, for chats whose session has no event log any
+// more: they show as read-only saved copies.
 let BROWY_SESSION_ID = null;
 const SID_KEY    = 'browy.sessionId';
-const CHAT_KEY   = 'browy.chatHtml';            // legacy single-chat store (migrated on boot)
 const CHAT_PREFIX = 'browy.chat.';
 const META_PREFIX = 'browy.chatMeta.';
 const INDEX_KEY  = 'browy.chatIndex';
+const VIEW_PREFIX = 'browy.view.';
+const VIEW_INDEX_KEY = 'browy.viewIndex';
+const LIST_CACHE_KEY = 'browy.chatList';
 
 function newSessionId() {
   return 'sp-' + Math.random().toString(36).slice(2, 10);
@@ -208,17 +218,13 @@ async function loadStoredSessionId() {
   return fresh;
 }
 
-async function loadStoredChatHtml() {
-  if (!BROWY_SESSION_ID) return null;
+/** The HTML copy 0.1.13 and earlier kept of a chat, if any. */
+async function loadLegacyChatHtml(id) {
+  if (!id) return null;
   try {
-    const r = await chrome.storage.local.get([CHAT_PREFIX + BROWY_SESSION_ID]);
-    const v = r && r[CHAT_PREFIX + BROWY_SESSION_ID];
-    if (typeof v === 'string') return v;
-  } catch {}
-  // Fall back to legacy single-chat key the first time around.
-  try {
-    const r = await chrome.storage.local.get([CHAT_KEY]);
-    if (r && typeof r[CHAT_KEY] === 'string') return r[CHAT_KEY];
+    const r = await chrome.storage.local.get([CHAT_PREFIX + id]);
+    const v = r && r[CHAT_PREFIX + id];
+    if (typeof v === 'string' && v.trim() && v.indexOf('class="empty"') === -1) return v;
   } catch {}
   return null;
 }
@@ -231,22 +237,16 @@ async function loadChatIndex() {
   return [];
 }
 
-async function loadChatMeta(id) {
-  try {
-    const r = await chrome.storage.local.get([META_PREFIX + id]);
-    return r?.[META_PREFIX + id] || null;
-  } catch { return null; }
-}
-
-async function saveChatMeta(id, meta) {
-  try { await chrome.storage.local.set({ [META_PREFIX + id]: meta }); } catch {}
-}
-
 async function deleteChatStorage(id) {
-  try { await chrome.storage.local.remove([CHAT_PREFIX + id, META_PREFIX + id]); } catch {}
+  try { await chrome.storage.local.remove([CHAT_PREFIX + id, META_PREFIX + id, VIEW_PREFIX + id]); } catch {}
   const idx = await loadChatIndex();
   const next = idx.filter(x => x !== id);
   try { await chrome.storage.local.set({ [INDEX_KEY]: next }); } catch {}
+  try {
+    const r = await chrome.storage.local.get([VIEW_INDEX_KEY]);
+    const v = Array.isArray(r?.[VIEW_INDEX_KEY]) ? r[VIEW_INDEX_KEY] : [];
+    if (v.includes(id)) await chrome.storage.local.set({ [VIEW_INDEX_KEY]: v.filter(x => x !== id) });
+  } catch {}
 }
 
 function deriveChatTitle(htmlOrText) {
@@ -259,14 +259,6 @@ function deriveChatTitle(htmlOrText) {
     if (text) return text.slice(0, 60);
   } catch {}
   return 'Untitled chat';
-}
-
-function chatPreview(html) {
-  try {
-    const tmp = document.createElement('div');
-    tmp.innerHTML = html || '';
-    return (tmp.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 100);
-  } catch { return ''; }
 }
 
 // Export the current chat as a Markdown file. Walks the rendered bubbles
@@ -361,31 +353,6 @@ function flash(text, ms = 1600) {
   } catch {}
 }
 
-let _persistTimer = null;
-function persistChatSoon() {
-  if (_persistTimer) return;
-  _persistTimer = setTimeout(async () => {
-    _persistTimer = null;
-    if (!BROWY_SESSION_ID) return;
-    const html = msgs.innerHTML;
-    if (!html || html.indexOf('class="empty"') !== -1) return;
-    const title = deriveChatTitle(html);
-    const meta = { id: BROWY_SESSION_ID, title, updated: Date.now(), preview: chatPreview(html) };
-    try {
-      await chrome.storage.local.set({
-        [CHAT_PREFIX + BROWY_SESSION_ID]: html,
-        [META_PREFIX + BROWY_SESSION_ID]: meta,
-      });
-      // Maintain index — current chat to the front, dedupe.
-      const idx = await loadChatIndex();
-      const reordered = [BROWY_SESSION_ID, ...idx.filter(x => x !== BROWY_SESSION_ID)];
-      await chrome.storage.local.set({ [INDEX_KEY]: reordered });
-      // Reflect title in the titlebar tag.
-      if (modeTag) modeTag.textContent = '// ' + title;
-    } catch {}
-  }, 250);
-}
-
 // Each panel instance gets its own port name. This used to be the constant
 // string 'sidepanel', which meant two side panels in two windows both landed
 // on the same key in the background's `clients` map: the second overwrote the
@@ -475,16 +442,9 @@ function browyTranslate(msg) {
       // settings UI / future consumers can listen if they want.
       return { type: 'copilot_status', state: msg.state, detail: msg.detail, _fromProbe: true };
     case 'chat.list.result':
-      pendingChatListResolvers.splice(0).forEach(fn => fn(msg.chats || []));
+    case 'chat.history.result':
+      onRpcReply(msg);
       return null;
-    case 'chat.history.result': {
-      const list = pendingChatHistoryResolvers.get(msg.id);
-      if (list) {
-        pendingChatHistoryResolvers.delete(msg.id);
-        list.forEach(fn => fn(msg.messages || []));
-      }
-      return null;
-    }
     case 'chat.delete.result': {
       const list = pendingChatDeleteResolvers.get(msg.id);
       if (list) {
@@ -498,47 +458,98 @@ function browyTranslate(msg) {
   }
 }
 
-// One-shot RPCs for chat list/history. The host answers each request with a
-// single result message; we resolve all in-flight callers when it arrives.
+// Requests for the chats list and chat history. Each carries a request id the
+// host echoes back, and names this panel's session once the host has
+// confirmed it, so the reply comes to this panel alone. A host before 0.1.14
+// echoes nothing and sends every reply to every panel; its replies are taken
+// in order of asking.
 //
-// Timeout matters: on a cold host the Copilot SDK needs several seconds
-// AFTER session.ready before chat.list can answer — measured anywhere from
-// 7.7s to 40s depending on machine load. The old 4s timeout resolved with an
-// empty array, which rendered identically to "you have no chats" — this is
-// what made users think their history had been wiped. The host answers as
-// soon as it can (listChats awaits whenCopilotReady internally), so we use a
-// generous ceiling and let the honest "loading…" UI carry the wait.
-const pendingChatListResolvers = [];
-const pendingChatHistoryResolvers = new Map();
-/** Dedupe concurrent chat.list requests — sdk.ready and an already-open
- *  overlay both trigger a render, and listSessions() is expensive. */
-let chatListInFlight = null;
-function requestChats(timeoutMs = 120000) {
-  if (chatListInFlight) return chatListInFlight;
-  const p = new Promise((resolve) => {
-    let done = false;
-    const fin = (v) => {
-      if (done) return;
-      done = true;
-      chatListInFlight = null;
+// Timeouts end every wait with a message. On a cold host the Copilot SDK can
+// take 8 to 40 s after session.ready before it answers, and an empty answer
+// then looked exactly like "you have no chats", so the wait is longer until
+// sdk.ready has arrived.
+let LIST_TIMEOUT_MS = 20_000;
+let HISTORY_TIMEOUT_MS = 20_000;
+const COLD_TIMEOUT_MS = 90_000;
+const pendingRpcs = new Map();
+let rpcSeq = 0;
+/** Set once a reply carried our request id: the host routes and echoes. */
+let hostEchoesReqId = false;
+/** The session the host last confirmed with session.ready for this panel. */
+let routedSid = null;
+const routeWaiters = [];
+
+function rpcTimeout(warm) { return sdkReady ? warm : COLD_TIMEOUT_MS; }
+
+/** Send a chat.list / chat.history request. Resolves with { msg } or with
+ *  { timedOut }, { offline } or { stale } (the panel moved to another chat). */
+function hostRpc(kind, payload, { timeoutMs, onPartial } = {}) {
+  return new Promise((resolve) => {
+    const reqId = 'q' + (++rpcSeq) + Math.random().toString(36).slice(2, 6);
+    const entry = { kind, id: payload.id, onPartial, timer: null, done: null };
+    entry.done = (v) => {
+      if (pendingRpcs.get(reqId) !== entry) return;
+      clearTimeout(entry.timer);
+      pendingRpcs.delete(reqId);
       resolve(v);
     };
-    pendingChatListResolvers.push((chats) => fin({ chats, timedOut: false }));
-    browyPost({ type: 'chat.list' });
-    setTimeout(() => fin({ chats: [], timedOut: true }), timeoutMs);
+    pendingRpcs.set(reqId, entry);
+    entry.timer = setTimeout(() => entry.done({ timedOut: true }), timeoutMs);
+    if (!bgPort) { entry.done({ offline: true }); return; }
+    const route = routedSid && routedSid === BROWY_SESSION_ID ? { sessionId: routedSid } : {};
+    browyPost({ ...payload, reqId, ...route });
   });
-  chatListInFlight = p;
-  return p;
 }
-function requestChatMessages(id, timeoutMs = 20000) {
+
+function onRpcReply(msg) {
+  const kind = msg.type === 'chat.list.result' ? 'list' : 'history';
+  if (msg.reqId) {
+    hostEchoesReqId = true;
+    const entry = pendingRpcs.get(msg.reqId);
+    if (!entry) return;
+    if (kind === 'list' && msg.complete === false) { try { entry.onPartial?.(msg); } catch {} return; }
+    entry.done({ msg });
+    return;
+  }
+  // No request id: an older host, or the DevTools panel's request.
+  if (hostEchoesReqId) return;
+  for (const entry of [...pendingRpcs.values()]) {
+    if (entry.kind !== kind || (kind === 'history' && entry.id !== msg.id)) continue;
+    entry.done({ msg });
+  }
+}
+
+/** Requests in flight were for the chat that was on screen. */
+function dropPendingRpcs(why = 'stale') {
+  for (const entry of [...pendingRpcs.values()]) entry.done({ [why]: true });
+}
+
+/** Resolves 'ready' once the host confirms `sid`, so replies can be routed;
+ *  'conflict' if another window holds it; 'timeout' otherwise. */
+function waitRoute(sid, ms) {
+  if (routedSid === sid) return Promise.resolve('ready');
   return new Promise((resolve) => {
-    let done = false;
-    const fin = (v) => { if (!done) { done = true; resolve(v); } };
-    if (!pendingChatHistoryResolvers.has(id)) pendingChatHistoryResolvers.set(id, []);
-    pendingChatHistoryResolvers.get(id).push(fin);
-    browyPost({ type: 'chat.history', id });
-    setTimeout(() => fin([]), timeoutMs);
+    const w = { sid, resolve: null };
+    const timer = setTimeout(() => finish('timeout'), ms);
+    function finish(v) {
+      clearTimeout(timer);
+      const i = routeWaiters.indexOf(w);
+      if (i >= 0) routeWaiters.splice(i, 1);
+      resolve(v);
+    }
+    w.resolve = finish;
+    routeWaiters.push(w);
   });
+}
+
+function onRouteReady(sid) {
+  routedSid = sid || null;
+  for (const w of [...routeWaiters]) if (w.sid === sid) w.resolve('ready');
+}
+
+function onRouteLost(why) {
+  routedSid = null;
+  for (const w of [...routeWaiters]) w.resolve(why);
 }
 
 /** Delete a chat on disk. Resolves true only when the host confirms. */
@@ -1094,6 +1105,8 @@ function connect() {
       // Another window already owns this session id. Take a fresh one rather
       // than fighting over the routing, and keep whatever is on screen: the
       // conversation the user can see has not been sent anywhere yet.
+      onRouteLost('conflict');
+      onHistoryConflict();
       (async () => {
         BROWY_SESSION_ID = newSessionId();
         try { await chrome.storage.local.set({ [SID_KEY]: BROWY_SESSION_ID }); } catch {}
@@ -1104,6 +1117,7 @@ function connect() {
     if (raw.type === 'session.ready') {
       sessionReady = true;
       restartingHost = false;
+      onRouteReady(raw.sessionId);
       // Safety net: any real message from the host proves it's alive, so
       // make sure the online controls reflect that even if __host_ready
       // was somehow missed during a fast SW restart.
@@ -1115,6 +1129,8 @@ function connect() {
         resendOnReady = null;
         browyPost({ type: 'chat.send', sessionId: BROWY_SESSION_ID, text });
       }
+      // A chat painted from the panel's cache at boot gets the session's version.
+      onHistorySessionReady();
       // If the chats overlay was opened while the host was still booting,
       // it'll be stuck on the "connecting…" placeholder. Re-render now
       // so the SDK-backed history pops in without the user having to
@@ -1247,7 +1263,7 @@ function handle(m) {
   if (m.type === 'status') {
     if (m.status === 'thinking') { setBusy(true); ensureLiveBubble(); }
     if (m.status === 'idle')     { setBusy(false); currentAction = null; setTtl(); /* finalization deferred to response handler to avoid duplicate bubbles */ }
-    if (m.status === 'error')    { setBusy(false); setError(true); finalizeLiveBubble(); currentAction = null; setTtl(); }
+    if (m.status === 'error')    { setBusy(false); setError(true); finalizeLiveBubble(); endLiveTurn(); currentAction = null; setTtl(); }
   }
   if (m.type === 'delta') {
     appendDelta(m.text);
@@ -1287,18 +1303,20 @@ function handle(m) {
     }
   }
   if (m.type === 'response') {
+    // The turn's container, before finalizing lets go of it.
+    const turnEl = liveTurn;
     if (m.stopped) {
       markStopped();
-      reconcileFinal((m.text ? m.text + '\n\n' : '') + '_Stopped. Send a message to pick up where it left off._');
+      reconcileFinal((m.text ? m.text + '\n\n' : '') + STOPPED_NOTE);
       pose('idle', 400);
-      persistChatSoon();
+      finishLiveTurn(turnEl, { stopped: true });
       return;
     }
     // Final canonical text — reconcile in case streaming missed any chunks
     reconcileFinal(m.text || '');
     react('bounce'); sndRecv();
     pose('happy', 1100);
-    persistChatSoon();
+    finishLiveTurn(turnEl, { stopped: false });
     clearAuthBannerOnSuccess();
   }
   if (m.type === 'queued') {
@@ -1345,11 +1363,23 @@ settingsBtn?.addEventListener('click', () => {
 });
 
 // ── Live assistant bubble (streaming target) ─────────────────────
+let liveTurn = null;      // <div class="turn live">: the turn being run
 let liveBub = null;       // current assistant <div>
 let liveText = '';        // accumulated streamed text
 let liveBody = null;      // <div> inside liveBub for markdown text
 let liveSteps = null;     // <div class="tool-steps"> inside liveBub
 const stepNodes = new Map(); // id -> <div class="tool-step">
+
+/** The container for the turn being run. History renders each turn the
+ *  same way, so the finished turn can be swapped for the session's copy. */
+function ensureLiveTurn() {
+  if (liveTurn && msgs.contains(liveTurn)) return liveTurn;
+  empty?.remove();
+  liveTurn = document.createElement('div');
+  liveTurn.className = 'turn live';
+  msgs.appendChild(liveTurn);
+  return liveTurn;
+}
 
 function ensureLiveBubble() {
   // Idempotent per-part: if any of liveBub/liveBody/liveSteps got nulled
@@ -1366,7 +1396,7 @@ function ensureLiveBubble() {
   if (!liveBub) {
     const d = document.createElement('div');
     d.className = 'bub a';
-    msgs.appendChild(d);
+    ensureLiveTurn().appendChild(d);
     liveBub = d;
     liveText = '';
   }
@@ -1415,25 +1445,7 @@ function finalizeLiveBubble() {
   // If we have a final answer AND at least one tool step, collapse the
   // tool-list into a single summary line that the user can click to expand.
   if (liveSteps && liveSteps.children.length > 0 && liveText.trim().length > 0) {
-    const stepsEl = liveSteps;
-    const stepCount = stepsEl.querySelectorAll('.tool-step').length;
-    let totalMs = 0;
-    stepsEl.querySelectorAll('.tool-step .ms').forEach(el => {
-      const m = /(\d+)ms/.exec(el.textContent || '');
-      if (m) totalMs += parseInt(m[1], 10);
-    });
-    const summary = document.createElement('div');
-    summary.className = 'tools-summary';
-    summary.innerHTML =
-      `<span class="glyph"></span>` +
-      `<span class="arrow"></span>` +
-      `<span class="lbl">used ${stepCount} tool${stepCount === 1 ? '' : 's'}` +
-      (totalMs ? ` · ${totalMs}ms` : '') + `</span>`;
-    stepsEl.appendChild(summary);
-    stepsEl.classList.add('collapsed');
-    summary.addEventListener('click', () => {
-      stepsEl.classList.toggle('expanded-back');
-    });
+    collapseToolSteps(liveSteps);
   } else if (liveSteps && liveSteps.children.length === 0) {
     liveSteps.remove();
   }
@@ -1442,16 +1454,29 @@ function finalizeLiveBubble() {
   stepNodes.clear();
 }
 
+/** The turn ended on an error: it stays as it was rendered live. */
+function endLiveTurn() {
+  if (liveTurn) liveTurn.classList.remove('live');
+  liveTurn = null;
+}
+
+function resetLive() {
+  liveBub = null; liveBody = null; liveSteps = null; liveText = ''; stepNodes.clear();
+  liveTurn = null;
+}
+
+/** Tool arguments on one short line: the values, in order. Same rules as
+ *  shortArgs in src/agent/chat-items.ts, so a live step reads like the copy
+ *  the session keeps. */
 function summarizeArgs(args) {
-  if (!args) return '';
-  const vals = Object.values(args).map(v => {
+  if (args == null) return '';
+  const vals = (typeof args === 'object' && !Array.isArray(args) ? Object.values(args) : [args]).map(v => {
     if (typeof v === 'string') return v;
     if (v == null) return '';
     try { return JSON.stringify(v); } catch { return String(v); }
   }).filter(Boolean);
-  let s = vals.join(', ');
-  if (s.length > 80) s = s.slice(0, 79) + '…';
-  return s;
+  const s = vals.join(', ').replace(/\s+/g, ' ').trim();
+  return s.length > 120 ? s.slice(0, 119) + '…' : s;
 }
 
 function summarizeResult(result, status) {
@@ -1462,14 +1487,77 @@ function summarizeResult(result, status) {
   return oneline;
 }
 
+function fmtDur(ms) {
+  const n = Math.max(0, Math.round(Number(ms) || 0));
+  if (n < 1000) return n + 'ms';
+  if (n < 60_000) return (n / 1000).toFixed(n < 10_000 ? 1 : 0) + 's';
+  const m = Math.floor(n / 60_000);
+  const s = Math.floor((n % 60_000) / 1000);
+  return m + 'm' + (s ? ' ' + s + 's' : '');
+}
+
+// One tool call, live or from history: { name, args, status, result, durationMs }
+// with status 'running' | 'ok' | 'error' | 'stopped'. Click to see the result
+// the host kept (up to 600 characters) instead of the one-line preview.
+const STEP_CLASS = { running: 'running', ok: 'done', error: 'error', stopped: 'stopped' };
+function toolStepNode(t) {
+  const node = document.createElement('div');
+  node.className = 'tool-step';
+  node.innerHTML =
+    `<span class="glyph"></span>` +
+    `<span class="head"><span class="name"></span><span class="paren">(</span><span class="args"></span><span class="paren">)</span></span>` +
+    `<span class="ms"></span>` +
+    `<div class="out"><span class="arc"></span><span class="preview"></span></div>`;
+  node.querySelector('.name').textContent = t.name || 'tool';
+  node.querySelector('.args').textContent = t.args || '';
+  node.addEventListener('click', () => {
+    node.classList.toggle('expanded');
+    showStepPreview(node);
+  });
+  setToolStepState(node, t);
+  return node;
+}
+
+function setToolStepState(node, t) {
+  for (const c of Object.values(STEP_CLASS)) node.classList.remove(c);
+  node.classList.add(STEP_CLASS[t.status] || 'done');
+  if (t.durationMs != null) {
+    node.dataset.ms = String(t.durationMs);
+    node.querySelector('.ms').textContent = fmtDur(t.durationMs);
+  }
+  node._status = t.status;
+  node._result = t.result ? String(t.result) : '';
+  showStepPreview(node);
+}
+
+function showStepPreview(node) {
+  const preview = node.querySelector('.preview');
+  if (node._status === 'running') preview.textContent = 'running…';
+  else if (node._status === 'stopped') preview.textContent = 'stopped';
+  else if (node.classList.contains('expanded') && node._result) preview.textContent = node._result;
+  else preview.textContent = summarizeResult(node._result, node._status === 'error' ? 'error' : 'done');
+}
+
+/** Fold a turn's tool calls into one "used N tools" line, as at the end of a turn. */
+function collapseToolSteps(wrap, extra = 0) {
+  const nodes = wrap.querySelectorAll('.tool-step');
+  const n = nodes.length + extra;
+  let totalMs = 0;
+  nodes.forEach((el) => { totalMs += Number(el.dataset.ms) || 0; });
+  const summary = document.createElement('div');
+  summary.className = 'tools-summary';
+  summary.innerHTML = `<span class="glyph"></span><span class="arrow"></span><span class="lbl"></span>`;
+  summary.querySelector('.lbl').textContent = `used ${n} tool${n === 1 ? '' : 's'}` + (totalMs ? ` · ${fmtDur(totalMs)}` : '');
+  summary.addEventListener('click', () => wrap.classList.toggle('expanded-back'));
+  wrap.appendChild(summary);
+  wrap.classList.add('collapsed');
+}
+
 // After Stop, calls still marked running will never report back.
 function markStopped() {
   if (!liveSteps) return;
   liveSteps.querySelectorAll('.tool-step.running').forEach((node) => {
-    node.classList.remove('running');
-    node.classList.add('stopped');
-    const preview = node.querySelector('.preview');
-    if (preview) preview.textContent = 'stopped';
+    setToolStepState(node, { status: 'stopped' });
   });
 }
 
@@ -1477,31 +1565,12 @@ function renderToolStep(m) {
   ensureLiveBubble();
   let node = stepNodes.get(m.id);
   if (!node) {
-    node = document.createElement('div');
-    node.className = 'tool-step running';
-    node.innerHTML =
-      `<span class="glyph"></span>` +
-      `<span class="head"><span class="name"></span><span class="paren">(</span><span class="args"></span><span class="paren">)</span></span>` +
-      `<span class="ms"></span>` +
-      `<div class="out"><span class="arc"></span><span class="preview">running…</span></div>`;
-    node.querySelector('.name').textContent = m.name;
-    node.querySelector('.args').textContent = summarizeArgs(m.args);
-    node.addEventListener('click', () => node.classList.toggle('expanded'));
+    node = toolStepNode({ name: m.name, args: summarizeArgs(m.args), status: 'running' });
     liveSteps.appendChild(node);
     stepNodes.set(m.id, node);
   }
-  if (m.status === 'end') {
-    node.classList.remove('running');
-    node.classList.add('done');
-    if (m.durationMs != null) node.querySelector('.ms').textContent = m.durationMs + 'ms';
-    node.querySelector('.preview').textContent = summarizeResult(m.result, 'done');
-    if (m.result) node.querySelector('.preview').dataset.full = m.result;
-  }
-  if (m.status === 'error') {
-    node.classList.remove('running');
-    node.classList.add('error');
-    if (m.durationMs != null) node.querySelector('.ms').textContent = m.durationMs + 'ms';
-    node.querySelector('.preview').textContent = summarizeResult(m.result, 'error');
+  if (m.status === 'end' || m.status === 'error') {
+    setToolStepState(node, { status: m.status === 'end' ? 'ok' : 'error', result: m.result, durationMs: m.durationMs });
   }
   msgs.scrollTop = msgs.scrollHeight;
 }
@@ -1520,39 +1589,544 @@ function addReasoning(text) {
   r.textContent = text;
 }
 
-// ── Bubbles ─────────────────────────────────────────────────────
-/** Rebuild the collapsed tool-call block for a chat restored from the SDK
- *  transcript. Mirrors the markup finalizeLive() produces so restored chats
- *  look like the live ones. Transcript rows carry no args/duration, so those
- *  slots stay empty rather than being faked. */
-function renderRestoredToolSteps(bub, steps) {
-  if (!bub || !steps || !steps.length) return;
-  const wrap = document.createElement('div');
-  wrap.className = 'tool-steps collapsed';
-  for (const s of steps) {
-    const node = document.createElement('div');
-    node.className = 'tool-step ' + (s.ok ? 'done' : 'error');
-    node.innerHTML =
-      `<span class="glyph"></span>` +
-      `<span class="head"><span class="name"></span><span class="paren">(</span><span class="args"></span><span class="paren">)</span></span>` +
-      `<span class="ms"></span>` +
-      `<div class="out"><span class="arc"></span><span class="preview"></span></div>`;
-    node.querySelector('.name').textContent = s.name || 'tool';
-    node.querySelector('.preview').textContent = summarizeResult(s.summary, s.ok ? 'done' : 'error');
-    node.addEventListener('click', () => node.classList.toggle('expanded'));
-    wrap.appendChild(node);
-  }
-  const summary = document.createElement('div');
-  summary.className = 'tools-summary';
-  const n = steps.length;
-  summary.innerHTML =
-    `<span class="glyph"></span><span class="arrow"></span>` +
-    `<span class="lbl">used ${n} tool${n === 1 ? '' : 's'}</span>`;
-  summary.addEventListener('click', () => wrap.classList.toggle('expanded-back'));
-  wrap.appendChild(summary);
-  bub.insertBefore(wrap, bub.firstChild);
+// ── Chat history: rendered from the Copilot session ──────────────────────
+// The host reads the chat's session and sends items (src/agent/chat-items.ts):
+//   { kind: 'turn', turn, ts?, end?: 'stopped' | 'error', error?, clipped? }
+//   { kind: 'user', turn, text }        what the user typed, no page context
+//   { kind: 'assistant', turn, text }   one message from the model
+//   { kind: 'tool', turn, id, name, args, status, result?, durationMs? }
+// Live turns render the same way, and when one finishes it is swapped for the
+// session's copy of that turn. Long chats come a page of turns at a time.
+const STOPPED_NOTE = '_Stopped. Send a message to pick up where it left off._';
+const SAVED_NOTE = "// saved copy. browy no longer has this chat's session, so it's read-only. sending a message starts a new chat.";
+const CONFLICT_NOTE = '// this chat is open in another window, so messages sent here start a new chat.';
+let HISTORY_PAGE_TURNS = 10;
+const VIEW_CACHE_MAX = 40;
+const VIEW_CACHE_BYTES = 48_000;
+
+// What the chat area shows.
+//   mode: 'empty'   new chat
+//         'loading' skeleton until the session answers
+//         'cached'  this panel's last view (or a 0.1.13 HTML copy), until the session answers
+//         'session' rendered from the session
+//         'saved'   read-only: the session has no event log, the copy is all there is
+//         'failed'  the session didn't answer
+let view = newView(null, 'empty');
+let loadToken = 0;
+
+function newView(id, mode, paged = null) {
+  return { id, mode, start: 0, total: null, items: [], older: [], paged, needsLoad: false, loading: false, legacyHtml: null };
 }
 
+function userBubble(text) {
+  const d = document.createElement('div');
+  d.className = 'bub u';
+  d.textContent = text;
+  return d;
+}
+
+/** Items in order → turns: { turn, head, user, texts, tools }. */
+function groupTurns(items) {
+  const turns = [];
+  let cur = null;
+  for (const it of items || []) {
+    if (!it || typeof it !== 'object') continue;
+    if (!cur || it.turn !== cur.turn) {
+      cur = { turn: it.turn, head: null, user: null, texts: [], tools: [] };
+      turns.push(cur);
+    }
+    if (it.kind === 'turn') cur.head = it;
+    else if (it.kind === 'user') cur.user = it;
+    else if (it.kind === 'assistant') cur.texts.push(it.text || '');
+    else if (it.kind === 'tool') cur.tools.push(it);
+  }
+  return turns;
+}
+
+/** One turn, as a live turn ends up: the user's bubble, then Browy's with
+ *  the tool calls folded above the reply. */
+function renderTurn(t) {
+  const wrap = document.createElement('div');
+  wrap.className = 'turn';
+  wrap.dataset.turn = String(t.turn);
+  if (t.user) wrap.appendChild(userBubble(t.user.text));
+  let text = t.texts.filter((s) => s.trim()).join('\n\n');
+  if (t.head?.end === 'stopped') text = (text ? text + '\n\n' : '') + STOPPED_NOTE;
+  const clipped = Number(t.head?.clipped) || 0;
+  const failed = t.head?.end === 'error' ? (t.head.error || 'this turn ended on an error') : '';
+  if (!text && !t.tools.length && !clipped && !failed) return wrap;
+  const bub = document.createElement('div');
+  bub.className = 'bub a';
+  if (t.tools.length || clipped) {
+    const steps = document.createElement('div');
+    steps.className = 'tool-steps';
+    if (clipped) {
+      const note = document.createElement('div');
+      note.className = 'steps-clipped';
+      note.textContent = `${clipped} earlier step${clipped === 1 ? '' : 's'} not shown`;
+      steps.appendChild(note);
+    }
+    for (const tool of t.tools) steps.appendChild(toolStepNode(tool));
+    if (text) collapseToolSteps(steps, clipped);
+    bub.appendChild(steps);
+  }
+  const body = document.createElement('div');
+  body.className = 'body';
+  body.innerHTML = renderMd(text);
+  if (failed) {
+    const note = document.createElement('div');
+    note.className = 'note err';
+    note.textContent = '⚠ ' + failed;
+    body.appendChild(note);
+  }
+  bub.appendChild(body);
+  wrap.appendChild(bub);
+  return wrap;
+}
+
+function renderTurns(items) {
+  const frag = document.createDocumentFragment();
+  for (const t of groupTurns(items)) frag.appendChild(renderTurn(t));
+  return frag;
+}
+
+function firstUserText(items) {
+  return (items || []).find((it) => it.kind === 'user')?.text || '';
+}
+
+function setChatTitle(text) {
+  if (!modeTag) return;
+  const t = String(text || '').replace(/\s+/g, ' ').trim();
+  modeTag.textContent = '// ' + (t ? t.slice(0, 60) : 'browser agent');
+}
+
+/** The chat's title: its summary from the chats list, else its first message shown. */
+function chatTitle(id, items) {
+  const c = (chatsCache || []).find((x) => x.id === id);
+  return (c?.summary && c.summary !== '(no summary)' ? c.summary : '') || firstUserText(items);
+}
+
+// The bar at the top of the chat: loading, errors, the saved-copy label and
+// "load earlier". opts: { kind: 'loading' | 'error' | 'saved' | 'note', note, retry, earlier }
+function histBar() {
+  let bar = document.getElementById('histTop');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'histTop';
+    bar.className = 'hist-top';
+  }
+  if (msgs.firstChild !== bar) msgs.insertBefore(bar, msgs.firstChild);
+  return bar;
+}
+
+function setHistBar(opts) {
+  const bar = histBar();
+  bar.className = 'hist-top' + (opts?.kind ? ' ' + opts.kind : '');
+  bar.innerHTML = '';
+  if (!opts) return;
+  if (opts.earlier > 0) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'load-earlier';
+    b.textContent = `↑ load earlier · ${opts.earlier} more turn${opts.earlier === 1 ? '' : 's'}`;
+    b.addEventListener('click', () => loadEarlier());
+    bar.appendChild(b);
+  }
+  if (opts.note) {
+    const n = document.createElement('span');
+    n.className = 'hist-note';
+    if (opts.kind === 'loading') {
+      const s = document.createElement('span');
+      s.className = 'spin';
+      s.setAttribute('aria-hidden', 'true');
+      n.appendChild(s);
+    }
+    n.appendChild(document.createTextNode(opts.note));
+    bar.appendChild(n);
+  }
+  if (opts.retry) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = 'retry';
+    b.addEventListener('click', () => opts.retry());
+    bar.appendChild(b);
+  }
+}
+
+/** The bar's resting state: "load earlier" when there is more, else nothing. */
+function settleHistBar() {
+  if (view.mode === 'saved') setHistBar({ kind: 'saved', note: SAVED_NOTE });
+  else if (view.conflict) setHistBar({ kind: 'note', note: CONFLICT_NOTE, earlier: view.start });
+  else setHistBar(view.start > 0 ? { earlier: view.start } : null);
+}
+
+/** Replace the chat area with these turns. Turns run in this panel that the
+ *  page doesn't have yet (the live one, or one newer than `total`) stay at
+ *  the end. */
+function paintTurns(items, total) {
+  const keep = [...msgs.querySelectorAll('.turn')].filter((el) =>
+    el === liveTurn || (el.dataset.ran === '1' && Number(el.dataset.turn) >= (total ?? Infinity)));
+  msgs.innerHTML = '';
+  histBar();
+  if (items && items.length) msgs.appendChild(renderTurns(items));
+  else if (!keep.length) msgs.appendChild(empty);
+  for (const el of keep) msgs.appendChild(el);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function paintEmpty() {
+  msgs.innerHTML = '';
+  msgs.appendChild(empty);
+}
+
+/** A 0.1.13 HTML copy. Its click handlers didn't survive storage. */
+function paintLegacy(html) {
+  msgs.innerHTML = html;
+  msgs.querySelectorAll('.cursor').forEach((n) => n.remove());
+  msgs.querySelectorAll('.tool-step').forEach((n) => n.addEventListener('click', () => n.classList.toggle('expanded')));
+  msgs.querySelectorAll('.tools-summary').forEach((s) => s.addEventListener('click', () => s.parentElement?.classList.toggle('expanded-back')));
+  histBar();
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function paintSkeleton() {
+  msgs.innerHTML = '';
+  histBar();
+  for (let i = 0; i < 2; i++) {
+    const u = document.createElement('div');
+    u.className = 'skel-bub u';
+    u.innerHTML = '<i></i>';
+    const a = document.createElement('div');
+    a.className = 'skel-bub a';
+    a.innerHTML = '<i></i><i></i><i></i>';
+    msgs.appendChild(u);
+    msgs.appendChild(a);
+  }
+}
+
+function paintFailed(id) {
+  msgs.innerHTML = '';
+  histBar();
+  const box = document.createElement('div');
+  box.className = 'hist-fail';
+  const t = document.createElement('div');
+  t.textContent = "// couldn't load this chat. it's safe on disk.";
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'chats-retry';
+  b.textContent = 'retry';
+  b.addEventListener('click', () => { if (view.id === id) { view.mode = 'loading'; paintSkeleton(); loadChat(id); } });
+  box.appendChild(t);
+  box.appendChild(b);
+  msgs.appendChild(box);
+}
+
+// ── the small per-chat view cache ──
+async function loadView(id) {
+  try {
+    const r = await chrome.storage.local.get([VIEW_PREFIX + id]);
+    const v = r?.[VIEW_PREFIX + id];
+    if (v && Array.isArray(v.items) && v.items.length) return v;
+  } catch {}
+  return null;
+}
+
+/** The newest turns on screen, trimmed to a few dozen KB. */
+function compactView(items) {
+  const turns = [];
+  for (const it of items || []) {
+    const last = turns[turns.length - 1];
+    if (last && last[0].turn === it.turn) last.push(it); else turns.push([it]);
+  }
+  const out = [];
+  let size = 0;
+  for (let i = turns.length - 1; i >= 0 && out.length < 4; i--) {
+    let t = turns[i].map((it) => {
+      if (it.kind === 'tool' && it.result && it.result.length > 160) return { ...it, result: it.result.slice(0, 159) + '…' };
+      if (it.kind === 'assistant' && it.text.length > 8000) return { ...it, text: it.text.slice(0, 7999) + '…' };
+      return it;
+    });
+    const tools = t.filter((it) => it.kind === 'tool');
+    if (tools.length > 60) {
+      const drop = new Set(tools.slice(0, tools.length - 60));
+      t = t.filter((it) => !drop.has(it)).map((it) => (it.kind === 'turn' ? { ...it, clipped: (Number(it.clipped) || 0) + drop.size } : it));
+    }
+    const n = JSON.stringify(t).length;
+    if (out.length && size + n > VIEW_CACHE_BYTES) break;
+    out.unshift(t);
+    size += n;
+  }
+  return out.flat();
+}
+
+let viewSaveTimer = null;
+function saveViewSoon() {
+  clearTimeout(viewSaveTimer);
+  viewSaveTimer = setTimeout(saveView, 300);
+}
+
+async function saveView() {
+  const id = view.id;
+  if (!id || id !== BROWY_SESSION_ID || view.mode !== 'session' || !view.items.length) return;
+  const items = compactView(view.items);
+  const first = items.find((it) => it.kind === 'turn');
+  const entry = { v: 1, items, start: first ? first.turn : 0, total: view.total, title: chatTitle(id, view.items), at: Date.now() };
+  try {
+    const r = await chrome.storage.local.get([VIEW_INDEX_KEY]);
+    const idx = [id, ...(Array.isArray(r?.[VIEW_INDEX_KEY]) ? r[VIEW_INDEX_KEY] : []).filter((x) => x !== id)];
+    const evict = idx.slice(VIEW_CACHE_MAX);
+    await chrome.storage.local.set({ [VIEW_PREFIX + id]: entry, [VIEW_INDEX_KEY]: idx.slice(0, VIEW_CACHE_MAX) });
+    if (evict.length) await chrome.storage.local.remove(evict.map((x) => VIEW_PREFIX + x));
+  } catch {}
+}
+
+/** First paint of chat `id`, before the session answers: this panel's last
+ *  view of it, else its 0.1.13 HTML copy, else a skeleton if it has history. */
+async function paintFromCache(id) {
+  view = newView(id, 'empty', view.paged);
+  const cached = await loadView(id);
+  if (view.id !== id) return;
+  if (cached) {
+    view.mode = 'cached';
+    view.items = cached.items;
+    view.start = Number(cached.start) || 0;
+    view.total = Number.isFinite(cached.total) ? cached.total : null;
+    paintTurns(cached.items);
+    setChatTitle(cached.title || firstUserText(cached.items));
+    return;
+  }
+  const html = await loadLegacyChatHtml(id);
+  if (view.id !== id) return;
+  if (html) {
+    view.mode = 'cached';
+    view.legacyHtml = html;
+    paintLegacy(html);
+    setChatTitle(deriveChatTitle(html));
+    return;
+  }
+  if (await chatHasHistory(id)) {
+    if (view.id !== id) return;
+    view.mode = 'loading';
+    paintSkeleton();
+    setChatTitle(chatTitle(id, []));
+    return;
+  }
+  paintEmpty();
+  setChatTitle('');
+}
+
+async function chatHasHistory(id) {
+  if (chatsCache) return chatsCache.some((c) => c.id === id);
+  const c = await loadListCache();
+  return !!c && c.chats.some((x) => x.id === id);
+}
+
+/** Older hosts send the whole transcript as { role, ... } messages. */
+function legacyToItems(messages) {
+  const items = [];
+  let turn = -1;
+  const open = () => { turn++; items.push({ kind: 'turn', turn }); };
+  for (const m of messages || []) {
+    if (!m) continue;
+    if (m.role === 'user') { open(); items.push({ kind: 'user', turn, text: String(m.text || '') }); continue; }
+    if (turn < 0) open();
+    if (m.role === 'assistant') items.push({ kind: 'assistant', turn, text: String(m.text || '') });
+    else if (m.role === 'tool') items.push({ kind: 'tool', turn, id: '', name: m.name || 'tool', args: '', status: m.ok === false ? 'error' : 'ok', result: m.summary || '' });
+  }
+  return items;
+}
+
+/** Render chat `id` from its session: the newest page of turns. */
+async function loadChat(id) {
+  const token = ++loadToken;
+  view.loading = true;
+  view.needsLoad = false;
+  if (view.mode === 'cached') setHistBar({ kind: 'loading', note: 'syncing with the backend…' });
+  else if (view.mode === 'loading') setHistBar({ kind: 'loading', note: 'loading this chat…' });
+  const deadline = Date.now() + rpcTimeout(HISTORY_TIMEOUT_MS);
+  // Wait until the host has this panel's session, so the reply is routed here.
+  await waitRoute(BROWY_SESSION_ID, Math.max(0, deadline - Date.now()));
+  if (token !== loadToken) return;
+  const r = await hostRpc('history', { type: 'chat.history', id, items: true, limit: HISTORY_PAGE_TURNS },
+    { timeoutMs: Math.max(5000, deadline - Date.now()) });
+  if (token !== loadToken || r.stale) return;
+  view.loading = false;
+  const msg = r.msg;
+  if (!msg || msg.error) return historyFailed(id);
+  let items, start, total;
+  if (Array.isArray(msg.items)) {
+    view.paged = true;
+    if (msg.missing) return historyMissing(id);
+    items = msg.items;
+    start = Number(msg.start) || 0;
+    total = Number(msg.total) || 0;
+  } else {
+    view.paged = false;
+    const all = legacyToItems(msg.messages);
+    // An older host says nothing about a missing session. Keep showing the
+    // 0.1.13 copy as before, and let the chat carry on.
+    if (!all.length) {
+      if (view.mode === 'cached' || view.mode === 'saved') { settleHistBar(); return; }
+      return historyMissing(id);
+    }
+    const turns = groupTurns(all);
+    total = turns.length;
+    start = Math.max(0, total - HISTORY_PAGE_TURNS);
+    view.older = all.filter((it) => it.turn < start);
+    items = all.filter((it) => it.turn >= start);
+  }
+  if (!items.length) return historyMissing(id);
+  view.mode = 'session';
+  view.items = items;
+  view.start = start;
+  view.total = total;
+  view.legacyHtml = null;
+  paintTurns(items, total);
+  settleHistBar();
+  setChatTitle(chatTitle(id, items));
+  saveViewSoon();
+}
+
+/** The session has no event log: a new chat, or one older than events.jsonl. */
+async function historyMissing(id) {
+  // A turn has run here since the request went out, so the session exists now.
+  if (msgs.querySelector('.turn.live, .turn[data-ran="1"]')) {
+    if (view.mode !== 'saved') view.mode = 'session';
+    view.total = null;
+    settleHistBar();
+    return;
+  }
+  const html = view.legacyHtml || await loadLegacyChatHtml(id);
+  if (view.id !== id) return;
+  view.total = 0;
+  if (html) {
+    if (view.legacyHtml !== html || view.mode !== 'cached') paintLegacy(html);
+    view.legacyHtml = html;
+    view.mode = 'saved';
+    setChatTitle(deriveChatTitle(html));
+  } else if (view.mode === 'cached' && view.items.length) {
+    // Deleted or pruned since this panel last showed it.
+    view.mode = 'saved';
+  } else {
+    view.mode = 'empty';
+    view.items = [];
+    if (!(liveTurn && msgs.contains(liveTurn))) paintEmpty();
+    setChatTitle('');
+    return;
+  }
+  settleHistBar();
+  if (inp && !inp.disabled) inp.placeholder = 'read-only copy. sending starts a new chat';
+}
+
+function historyFailed(id) {
+  if (view.id !== id) return;
+  view.loading = false;
+  // The next session.ready tries again by itself.
+  view.needsLoad = true;
+  const retry = () => { if (view.id === id) loadChat(id); };
+  if (view.mode === 'empty' && !msgs.querySelector('.turn')) {
+    // A new chat has nothing to load; the next session.ready checks again.
+  } else if (view.mode === 'loading' && !msgs.querySelector('.turn')) {
+    view.mode = 'failed';
+    paintFailed(id);
+  } else if (view.mode === 'cached' || view.mode === 'saved') {
+    setHistBar({ kind: 'error', note: "couldn't reach the backend, so this is the copy this panel saved.", retry });
+  } else {
+    setHistBar({ kind: 'error', note: "couldn't load this chat's history.", retry });
+  }
+}
+
+async function loadEarlier() {
+  if (view.loadingEarlier || view.start <= 0) return;
+  const id = view.id;
+  const token = loadToken;
+  const keep = msgs.scrollHeight - msgs.scrollTop;
+  const prepend = (items) => {
+    const bar = histBar();
+    bar.after(renderTurns(items));
+    msgs.scrollTop = msgs.scrollHeight - keep;
+  };
+  if (view.paged === false) {
+    // An older host sent everything already.
+    const from = Math.max(0, view.start - HISTORY_PAGE_TURNS);
+    const items = view.older.filter((it) => it.turn >= from);
+    view.older = view.older.filter((it) => it.turn < from);
+    prepend(items);
+    view.start = from;
+    view.items = items.concat(view.items);
+    settleHistBar();
+    return;
+  }
+  view.loadingEarlier = true;
+  setHistBar({ kind: 'loading', note: 'loading earlier turns…' });
+  const r = await hostRpc('history', { type: 'chat.history', id, items: true, limit: HISTORY_PAGE_TURNS, before: view.start },
+    { timeoutMs: rpcTimeout(HISTORY_TIMEOUT_MS) });
+  view.loadingEarlier = false;
+  if (token !== loadToken || view.id !== id || r.stale) return;
+  const msg = r.msg;
+  if (!msg || msg.error || !Array.isArray(msg.items) || msg.missing) {
+    setHistBar({ kind: 'error', note: "couldn't load earlier turns.", retry: loadEarlier, earlier: view.start });
+    return;
+  }
+  prepend(msg.items);
+  view.start = Number(msg.start) || 0;
+  view.items = msg.items.concat(view.items);
+  settleHistBar();
+}
+
+/** A live turn ended: swap it for the session's copy of the same turn, so
+ *  what the panel shows is always what the session holds. */
+function finishLiveTurn(turnEl, { stopped }) {
+  liveTurn = null;
+  if (!turnEl) return;
+  turnEl.classList.remove('live');
+  const text = turnEl.dataset.text || '';
+  const id = BROWY_SESSION_ID;
+  // Stop answers at once; the runtime records the abort a moment later.
+  setTimeout(() => rerenderTurn(turnEl, { id, text, stopped }), stopped ? 1500 : 0);
+}
+
+const normText = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+
+async function rerenderTurn(turnEl, { id, text, stopped }) {
+  // An older host has no pages; the live render stays.
+  if (view.paged === false || !text) return;
+  if (id !== BROWY_SESSION_ID || view.id !== id || !msgs.contains(turnEl)) return;
+  const token = loadToken;
+  const r = await hostRpc('history', { type: 'chat.history', id, items: true, limit: 1 }, { timeoutMs: rpcTimeout(HISTORY_TIMEOUT_MS) });
+  if (token !== loadToken || r.stale || !msgs.contains(turnEl)) return;
+  const msg = r.msg;
+  if (!msg || msg.error || msg.missing) return;
+  if (!Array.isArray(msg.items)) { view.paged = false; return; }
+  view.paged = true;
+  const t = groupTurns(msg.items).pop();
+  // Only this very turn: the session's newest, with the text that was sent.
+  if (!t || !t.user || normText(t.user.text) !== normText(text)) return;
+  const expected = view.total == null ? null : view.total + 1;
+  view.total = Number(msg.total) || view.total;
+  if (expected != null && msg.total !== expected) return;
+  if (stopped && t.head && !t.head.end) t.head.end = 'stopped';
+  const fresh = renderTurn(t);
+  fresh.dataset.ran = '1';
+  turnEl.replaceWith(fresh);
+  view.items = view.items.filter((it) => it.turn !== t.turn).concat(msg.items);
+  if (view.mode === 'empty' || view.mode === 'cached') { view.mode = 'session'; settleHistBar(); }
+  saveViewSoon();
+}
+
+/** session.ready: a chat painted from cache, or that failed to load, loads now. */
+function onHistorySessionReady() {
+  if (view.needsLoad && !view.loading && view.id && view.id === BROWY_SESSION_ID) loadChat(view.id);
+}
+
+/** Another window has this chat open, so this panel moves to a new session. */
+function onHistoryConflict() {
+  view.total = null;
+  view.conflict = true;
+  if (!view.loading) settleHistBar();
+}
+
+// ── Bubbles ─────────────────────────────────────────────────────
 function addBub(role, text) {
   empty?.remove();
   const d = document.createElement('div');
@@ -1600,14 +2174,25 @@ function addAuthErrorBubble(detail) {
 function send() {
   const t = inp.value.trim();
   if (!t || busy || !ws || ws.readyState !== 1) return;
+  // A read-only saved copy can't carry on: the message starts a new chat.
+  if (view.mode === 'saved') {
+    inp.value = ''; autoSize();
+    startNewChat().then(() => { inp.value = t; send(); });
+    return;
+  }
   ws.send(JSON.stringify({ type: 'chat', text: t }));
-  addBub('u', t);
+  // Placeholders for a chat still loading make way for the message.
+  msgs.querySelectorAll('.skel-bub, .hist-fail').forEach((n) => n.remove());
+  endLiveTurn();
+  const turn = ensureLiveTurn();
+  turn.dataset.text = t;
+  turn.appendChild(userBubble(t));
+  msgs.scrollTop = msgs.scrollHeight;
   markFirstSendDone();
   inp.value = ''; autoSize();
   goBtn.disabled = true;
   setBusy(true);
   react('nod'); sndSend();
-  persistChatSoon();
   // Queued while the host cold-starts — make the wait explicit rather than
   // leaving an indefinite "thinking" state with nothing happening.
   if (!sessionReady) {
@@ -1635,24 +2220,10 @@ function stop() {
   }, 10_000);
 }
 
-// Start a brand new chat. The current chat is left intact in storage (it'll
-// reappear under "chats" in the history overlay). Backend session keeps the
-// same id-on-disk model so the new SID gets a fresh on-disk SDK session.
+// Start a brand new chat. The current chat stays in its Copilot session and
+// shows up under "chats" in the history overlay. The new id gets its own
+// session on disk with the first message.
 async function startNewChat() {
-  // Persist any in-flight current chat synchronously before we swap.
-  if (msgs.innerHTML && msgs.innerHTML.indexOf('class="empty"') === -1) {
-    const html = msgs.innerHTML;
-    const title = deriveChatTitle(html);
-    try {
-      await chrome.storage.local.set({
-        [CHAT_PREFIX + BROWY_SESSION_ID]: html,
-        [META_PREFIX + BROWY_SESSION_ID]: { id: BROWY_SESSION_ID, title, updated: Date.now(), preview: chatPreview(html) },
-      });
-      const idx = await loadChatIndex();
-      const reordered = [BROWY_SESSION_ID, ...idx.filter(x => x !== BROWY_SESSION_ID)];
-      await chrome.storage.local.set({ [INDEX_KEY]: reordered });
-    } catch {}
-  }
   // Tell the host to forget the active SDK handle WITHOUT deleting it on disk
   // (so the previous chat is preserved in the chats overlay). The new SID's
   // SDK session is created lazily on the next chat.send via
@@ -1665,102 +2236,157 @@ async function startNewChat() {
   const previousId = BROWY_SESSION_ID;
   // Mint a new SID and rebind.
   BROWY_SESSION_ID = newSessionId();
+  loadToken++;
+  dropPendingRpcs();
   if (previousId && previousId !== BROWY_SESSION_ID) {
     browyPost({ type: 'session.end', sessionId: previousId });
   }
   try { await chrome.storage.local.set({ [SID_KEY]: BROWY_SESSION_ID }); } catch {}
-  msgs.innerHTML = '';
-  msgs.appendChild(empty);
-  liveBub = null; liveBody = null; liveSteps = null; liveText = ''; stepNodes.clear();
+  resetLive();
+  view = newView(BROWY_SESSION_ID, 'empty', view.paged);
+  view.total = 0;
+  paintEmpty();
   // The old chat's last events are filtered out once the id changes, so its
   // idle never arrives here. The new chat starts free.
   if (busy) setBusy(false);
-  if (modeTag) modeTag.textContent = '// browser agent';
+  setChatTitle('');
+  try { setControlsState(hostState); } catch {}
   // Tell the host to start the new session.
   startSession();
 }
 
-// Switch to a previously-saved chat. Source of truth is the SDK transcript
-// (chat.history). We still keep a local HTML cache for instant re-render of
-// the CURRENT chat on side-panel reload, but for past chats we always fetch
-// fresh so the list stays in sync with disk.
+// Open a chat from the history overlay. Its Copilot session is the record:
+// the panel paints its last view of the chat at once (or a skeleton), then
+// renders the session's newest turns.
 async function switchToChat(id) {
   if (!id || id === BROWY_SESSION_ID) { closeChatsOverlay(); return; }
-  // Persist current first (so side-panel reload re-renders fast).
-  if (msgs.innerHTML && msgs.innerHTML.indexOf('class="empty"') === -1) {
-    const html = msgs.innerHTML;
-    try {
-      await chrome.storage.local.set({
-        [CHAT_PREFIX + BROWY_SESSION_ID]: html,
-      });
-    } catch {}
-  }
-  // End host-side session for the current id (host can resume the new one on demand).
+  // Stop whatever the outgoing chat was doing; the new one resumes on demand.
   if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'stop' }));
   const previousId = BROWY_SESSION_ID;
   BROWY_SESSION_ID = id;
+  loadToken++;
+  dropPendingRpcs();
   if (previousId && previousId !== id) {
     browyPost({ type: 'session.end', sessionId: previousId });
   }
   try { await chrome.storage.local.set({ [SID_KEY]: id }); } catch {}
-  msgs.innerHTML = '';
-  liveBub = null; liveBody = null; liveSteps = null; liveText = ''; stepNodes.clear();
+  resetLive();
   if (busy) setBusy(false);
-  // Render from the SDK transcript.
-  const transcript = await requestChatMessages(id);
-  if (transcript && transcript.length) {
-    // Replay tool activity too. mapEventsToMessages already returns role:'tool'
-    // rows; dropping them made a restored chat look materially different from
-    // the live one (no evidence the agent had done anything).
-    let pendingTools = [];
-    const flushTools = () => {
-      if (!pendingTools.length) return;
-      const steps = pendingTools.slice();
-      pendingTools = [];
-      return steps;
-    };
-    for (const m of transcript) {
-      if (m.role === 'user') {
-        pendingTools = [];
-        addBub('u', m.text);
-      } else if (m.role === 'tool') {
-        pendingTools.push(m);
-      } else if (m.role === 'assistant') {
-        const bub = addBub('a', m.text);
-        const steps = flushTools();
-        if (steps && steps.length && bub) renderRestoredToolSteps(bub, steps);
-      }
-    }
-    if (modeTag) {
-      const firstUser = transcript.find(x => x.role === 'user');
-      modeTag.textContent = '// ' + (firstUser?.text?.slice(0, 60) || 'browser agent');
-    }
-  } else {
-    msgs.appendChild(empty);
-    if (modeTag) modeTag.textContent = '// browser agent';
-  }
-  msgs.scrollTop = msgs.scrollHeight;
-  // Resume / start the SDK session for the new id on the host side.
-  startSession();
+  try { setControlsState(hostState); } catch {}
   closeChatsOverlay();
+  await paintFromCache(id);
+  if (BROWY_SESSION_ID !== id) return;
+  // Register the chat with the host first, so the history reply is routed
+  // to this panel and the chat is ready to resume.
+  startSession();
+  loadChat(id);
 }
 
-/** Last successful chat.list payload, so typing in the search box filters
- *  locally instead of re-scanning every session on disk per keystroke. */
-let chatsCache = null;
-// ── Chats overlay rendering ───────────────────────────────────────────────
+// ── Chats overlay ───────────────────────────────────────────────────────
+// Opens at once with the last list this panel saw (kept in storage), then
+// refreshes from the host with a spinner in the header. The host's first
+// reply lists Browy's own chats by id within a few hundred ms; a second adds
+// old chats only a full scan of every session finds. Chats from 0.1.13 and
+// earlier whose session has no event log any more still have their HTML
+// copy in storage: they are listed as read-only saved copies.
+let chatsCache = null;        // [{ id, summary, startTime, modifiedTime }]
+let chatsComplete = false;    // chatsCache includes the full scan
+let chatsState = 'idle';      // 'idle' | 'loading' | 'connecting' | 'failed'
+let chatsLoad = null;
+let savedCopies = null;       // [{ id, title, updated }]
+const chatsSync = document.getElementById('chatsSync');
+
+async function loadListCache() {
+  try {
+    const r = await chrome.storage.local.get([LIST_CACHE_KEY]);
+    const c = r?.[LIST_CACHE_KEY];
+    if (c && Array.isArray(c.chats)) return c;
+  } catch {}
+  return null;
+}
+
+function saveListCache(chats) {
+  const slim = chats.map((c) => ({ id: c.id, summary: c.summary, startTime: c.startTime, modifiedTime: c.modifiedTime }));
+  chrome.storage.local.set({ [LIST_CACHE_KEY]: { at: Date.now(), chats: slim } }).catch(() => {});
+}
+
+/** 0.1.13's HTML copies, from its index and metadata. */
+async function loadSavedCopies() {
+  try {
+    const idx = await loadChatIndex();
+    if (!idx.length) return [];
+    const r = await chrome.storage.local.get(idx.map((id) => META_PREFIX + id));
+    return idx.map((id) => {
+      const m = r?.[META_PREFIX + id] || {};
+      return { id, title: m.title || '', updated: Number(m.updated) || 0 };
+    });
+  } catch { return []; }
+}
+
 async function openChatsOverlay() {
-  chatsCache = null; // always fetch fresh when the overlay is opened
-  await renderChatsList();
   chatsOverlay.classList.add('open');
   chatsOverlay.setAttribute('aria-hidden', 'false');
   setTimeout(() => chatsSearch?.focus(), 50);
+  renderChatRows();
+  if (!chatsCache) {
+    const c = await loadListCache();
+    if (c && !chatsCache) { chatsCache = c.chats; chatsComplete = true; }
+  }
+  if (!savedCopies) savedCopies = await loadSavedCopies();
+  renderChatRows();
+  refreshChatList();
 }
+
 function closeChatsOverlay() {
   chatsOverlay.classList.remove('open');
   chatsOverlay.setAttribute('aria-hidden', 'true');
   if (chatsSearch) chatsSearch.value = '';
 }
+
+/** Ask the host for the list; the rows update as replies come in. */
+function refreshChatList() {
+  if (chatsLoad) return chatsLoad;
+  if (!sessionReady) {
+    // session.ready calls renderChatsList, which asks again.
+    chatsState = 'connecting';
+    renderChatRows();
+    return null;
+  }
+  chatsState = 'loading';
+  renderChatRows();
+  chatsLoad = (async () => {
+    const r = await hostRpc('list', { type: 'chat.list', progressive: true }, {
+      timeoutMs: rpcTimeout(LIST_TIMEOUT_MS),
+      onPartial: (msg) => {
+        chatsCache = Array.isArray(msg.chats) ? msg.chats : chatsCache;
+        chatsComplete = false;
+        renderChatRows();
+      },
+    });
+    chatsLoad = null;
+    if (r.stale) { chatsState = 'idle'; return; }
+    const msg = r.msg;
+    if (!msg || msg.error || !Array.isArray(msg.chats)) {
+      chatsState = 'failed';
+      renderChatRows();
+      return;
+    }
+    chatsCache = msg.chats;
+    chatsComplete = msg.complete !== false;
+    chatsState = 'idle';
+    saveListCache(msg.chats);
+    renderChatRows();
+  })();
+  return chatsLoad;
+}
+
+// Called when the backend comes up (session.ready, sdk.ready) while the
+// overlay may be open: show what we have and ask again.
+function renderChatsList() {
+  renderChatRows();
+  if (chatsOverlay.classList.contains('open')) refreshChatList();
+}
+
 /** Label for a chat the SDK never recorded a summary for. A date beats
  *  eight identical rows all reading "Untitled chat". */
 function describeUndatedChat(ts) {
@@ -1783,70 +2409,91 @@ function fmtRelTime(ts) {
   if (diff < 7 * 86_400_000) return Math.floor(diff / 86_400_000) + 'd ago';
   return new Date(ts).toLocaleDateString();
 }
-async function renderChatsList(filter = '', opts = {}) {
-  // Source of truth: Copilot SDK sessions tagged with our workdir.
-  //
-  // There are THREE non-success states here and they used to all render as
-  // "no past chats yet", which is indistinguishable from real data loss:
-  //   1. host not connected yet          → connecting
-  //   2. host up but SDK still booting   → loading history (the common one)
-  //   3. request timed out / SDK failed  → error + retry
-  const renderNotice = (hint, text, withRetry) => {
-    chatsHint.textContent = hint;
+
+/** The header's status: a spinner while loading, a retry when it failed. */
+function renderChatsSync() {
+  if (!chatsSync) return;
+  chatsSync.className = 'chats-sync';
+  chatsSync.innerHTML = '';
+  let text = '';
+  if (chatsState === 'connecting') text = 'connecting';
+  else if (chatsState === 'loading') text = !sdkReady ? 'backend starting' : chatsCache ? 'refreshing' : 'loading';
+  else if (chatsState === 'failed') text = chatsCache ? "couldn't refresh" : '';
+  if (!text) return;
+  chatsSync.classList.add('show');
+  if (chatsState === 'failed') {
+    chatsSync.classList.add('err');
+    chatsSync.appendChild(document.createTextNode(text + ' · '));
+    const a = document.createElement('a');
+    a.textContent = 'retry';
+    a.addEventListener('click', () => refreshChatList());
+    chatsSync.appendChild(a);
+    return;
+  }
+  const s = document.createElement('span');
+  s.className = 'spin';
+  s.setAttribute('aria-hidden', 'true');
+  chatsSync.appendChild(s);
+  chatsSync.appendChild(document.createTextNode(text));
+}
+
+function chatsNotice(text, withRetry) {
+  chatsList.innerHTML = '';
+  const emp = document.createElement('div');
+  emp.className = 'chats-empty';
+  emp.textContent = text;
+  chatsList.appendChild(emp);
+  if (withRetry) {
+    const btn = document.createElement('button');
+    btn.className = 'chats-retry';
+    btn.textContent = 'retry';
+    btn.addEventListener('click', () => refreshChatList());
+    chatsList.appendChild(btn);
+  }
+}
+
+function renderChatRows() {
+  renderChatsSync();
+  if (!chatsCache) {
+    // Nothing to show yet. Never render that as "no chats": an empty list
+    // used to look exactly like the history had been wiped.
+    if (sdkFailedDetail) { chatsHint.textContent = 'error'; chatsNotice('// backend failed to start: ' + sdkFailedDetail, true); return; }
+    if (chatsState === 'failed') { chatsHint.textContent = 'not loaded'; chatsNotice("// couldn't load your chats. they're safe on disk.", true); return; }
+    chatsHint.textContent = chatsState === 'connecting' ? 'connecting…' : 'loading…';
     chatsList.innerHTML = '';
-    const emp = document.createElement('div');
-    emp.className = 'chats-empty';
-    emp.textContent = text;
-    chatsList.appendChild(emp);
-    if (withRetry) {
-      const btn = document.createElement('button');
-      btn.className = 'chats-retry';
-      btn.textContent = 'retry';
-      btn.addEventListener('click', () => renderChatsList(chatsSearch?.value || ''));
-      chatsList.appendChild(btn);
+    for (let i = 0; i < 6; i++) {
+      const row = document.createElement('div');
+      row.className = 'chat-row skel';
+      row.setAttribute('aria-hidden', 'true');
+      row.innerHTML = '<div class="chat-body"><i class="skel-line"></i><i class="skel-line short"></i></div>';
+      chatsList.appendChild(row);
     }
-  };
-
-  if (!sessionReady) {
-    renderNotice('connecting…', '// waiting for the browy backend to come online', false);
     return;
   }
-  if (sdkFailedDetail) {
-    renderNotice('error', '// backend failed to start: ' + sdkFailedDetail, true);
-    return;
-  }
-  if (!sdkReady) {
-    // Don't lie about emptiness while the SDK subprocess is still warming.
-    renderNotice('loading…', '// loading your chat history — the backend is still starting', false);
-    // Fall through to the request anyway: it resolves as soon as the SDK is
-    // up, and sdk.ready will re-render us too.
-  }
-
-  const { chats: sdkChats, timedOut } = chatsCache && opts.useCache
-    ? { chats: chatsCache, timedOut: false }
-    : await requestChats();
-  if (timedOut) {
-    renderNotice('timed out', '// could not load chat history — your chats are safe on disk', true);
-    return;
-  }
-  chatsCache = sdkChats;
-  const rows = sdkChats.map(c => ({
+  const rows = chatsCache.map((c) => ({
     id: c.id,
     // "Untitled chat" ×N is useless for picking a chat out of a list. When the
     // SDK has no usable summary, fall back to when the chat happened.
     title: (c.summary || '').trim() || describeUndatedChat(c.startTime || c.modifiedTime),
     updated: c.modifiedTime || c.startTime || 0,
-    preview: '', // SDK doesn't surface a snippet; the title (summary) is enough
   }));
+  // Saved copies only once the list is complete: until then a chat missing
+  // from it may simply not have been listed yet.
+  if (chatsComplete && savedCopies) {
+    const listed = new Set(rows.map((r) => r.id));
+    for (const s of savedCopies) {
+      if (listed.has(s.id)) continue;
+      rows.push({ id: s.id, title: s.title || describeUndatedChat(s.updated), updated: s.updated, saved: true });
+    }
+    rows.sort((a, b) => (b.updated || 0) - (a.updated || 0));
+  }
   // Make sure the current SID is visible even if the SDK hasn't recorded
   // a summary for it yet (brand-new chat with no turns).
-  if (BROWY_SESSION_ID && !rows.some(r => r.id === BROWY_SESSION_ID)) {
-    rows.unshift({ id: BROWY_SESSION_ID, title: 'New chat', updated: Date.now(), preview: '' });
+  if (BROWY_SESSION_ID && !rows.some((r) => r.id === BROWY_SESSION_ID)) {
+    rows.unshift({ id: BROWY_SESSION_ID, title: 'New chat', updated: Date.now() });
   }
-  const q = filter.trim().toLowerCase();
-  const filtered = q
-    ? rows.filter(r => (r.title || '').toLowerCase().includes(q))
-    : rows;
+  const q = (chatsSearch?.value || '').trim().toLowerCase();
+  const filtered = q ? rows.filter((r) => (r.title || '').toLowerCase().includes(q)) : rows;
   chatsHint.textContent = filtered.length === 1 ? '1 chat' : filtered.length + ' chats';
   chatsList.innerHTML = '';
   if (!filtered.length) {
@@ -1856,50 +2503,57 @@ async function renderChatsList(filter = '', opts = {}) {
     chatsList.appendChild(emp);
     return;
   }
-  for (const meta of filtered) {
-    const id = meta.id;
-    const row = document.createElement('div');
-    row.className = 'chat-row' + (id === BROWY_SESSION_ID ? ' current' : '');
-    row.dataset.id = id;
-    const body = document.createElement('div');
-    body.className = 'chat-body';
-    const title = document.createElement('div');
-    title.className = 'chat-title';
-    title.textContent = meta.title || 'Untitled chat';
-    const m = document.createElement('div');
-    m.className = 'chat-meta';
-    const dot = id === BROWY_SESSION_ID ? '<span class="dot">● current</span> · ' : '';
-    m.innerHTML = dot + escapeHtml(fmtRelTime(meta.updated));
-    body.appendChild(title); body.appendChild(m);
-    row.appendChild(body);
-    const del = document.createElement('button');
-    del.className = 'chat-del'; del.title = 'Delete this chat';
-    del.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 4h10M6 4V2h4v2M5 4l1 10h4l1-10"/></svg>';
-    del.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      if (!confirm('Delete this chat? This cannot be undone.')) return;
-      // Delete on disk FIRST and only drop the row once the host confirms.
-      // The old path posted history.clear, which the host applied to whatever
-      // session happened to be loaded — so deleting a past chat deleted
-      // nothing at all and the row reappeared on the next refresh.
-      del.disabled = true;
-      const ok = await requestChatDelete(id);
-      if (!ok) {
-        del.disabled = false;
-        flash('could not delete that chat');
-        return;
-      }
-      await deleteChatStorage(id);
-      chatsCache = null;
-      if (id === BROWY_SESSION_ID) {
-        await startNewChat();
-      }
-      await renderChatsList(chatsSearch?.value || '');
-    });
-    row.appendChild(del);
-    row.addEventListener('click', () => switchToChat(id));
-    chatsList.appendChild(row);
-  }
+  for (const meta of filtered) chatsList.appendChild(chatRow(meta));
+}
+
+function chatRow(meta) {
+  const id = meta.id;
+  const row = document.createElement('div');
+  row.className = 'chat-row' + (id === BROWY_SESSION_ID ? ' current' : '') + (meta.saved ? ' saved' : '');
+  row.dataset.id = id;
+  const body = document.createElement('div');
+  body.className = 'chat-body';
+  const title = document.createElement('div');
+  title.className = 'chat-title';
+  title.textContent = meta.title || 'Untitled chat';
+  const m = document.createElement('div');
+  m.className = 'chat-meta';
+  const dot = id === BROWY_SESSION_ID ? '<span class="dot">● current</span> · ' : '';
+  const saved = meta.saved ? '<span class="saved">saved copy · read-only</span> · ' : '';
+  m.innerHTML = dot + saved + escapeHtml(fmtRelTime(meta.updated));
+  body.appendChild(title); body.appendChild(m);
+  row.appendChild(body);
+  const del = document.createElement('button');
+  del.className = 'chat-del'; del.title = 'Delete this chat';
+  del.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 4h10M6 4V2h4v2M5 4l1 10h4l1-10"/></svg>';
+  del.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    if (!confirm('Delete this chat? This cannot be undone.')) return;
+    // Delete on disk FIRST and only drop the row once the host confirms.
+    // The old path posted history.clear, which the host applied to whatever
+    // session happened to be loaded, so deleting a past chat deleted
+    // nothing at all and the row reappeared on the next refresh.
+    del.disabled = true;
+    row.classList.add('busy');
+    m.textContent = 'deleting…';
+    const ok = await requestChatDelete(id);
+    // A saved copy may have no session left to delete; its copy goes anyway.
+    if (!ok && !meta.saved) {
+      del.disabled = false;
+      row.classList.remove('busy');
+      m.innerHTML = dot + saved + escapeHtml(fmtRelTime(meta.updated));
+      flash('could not delete that chat');
+      return;
+    }
+    await deleteChatStorage(id);
+    if (chatsCache) chatsCache = chatsCache.filter((c) => c.id !== id);
+    if (savedCopies) savedCopies = savedCopies.filter((c) => c.id !== id);
+    if (id === BROWY_SESSION_ID) await startNewChat();
+    renderChatRows();
+  });
+  row.appendChild(del);
+  row.addEventListener('click', () => switchToChat(id));
+  return row;
 }
 function escapeHtml(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1924,7 +2578,7 @@ chatsBtn?.addEventListener('click', () => { openChatsOverlay(); });
 exportBtn?.addEventListener('click', () => { exportChat(); });
 chatsCloseBtn?.addEventListener('click', () => { closeChatsOverlay(); });
 chatsNewBtn?.addEventListener('click', () => { closeChatsOverlay(); startNewChat(); });
-chatsSearch?.addEventListener('input', () => { renderChatsList(chatsSearch.value, { useCache: true }); });
+chatsSearch?.addEventListener('input', () => { renderChatRows(); });
 
 // First-run screen controls.
 document.getElementById('obCopy')?.addEventListener('click', async () => {
@@ -2075,15 +2729,9 @@ connect = (function (orig) { return orig; })(connect);
   detectOs();
   BROWY_SESSION_ID = await loadStoredSessionId();
   firstSendDone = await loadFirstSendFlag();
-  const savedHtml = await loadStoredChatHtml();
-  if (savedHtml && savedHtml.trim() && savedHtml.indexOf('class="empty"') === -1) {
-    msgs.innerHTML = savedHtml;
-    // Strip any leftover streaming cursor from a prior session.
-    msgs.querySelectorAll('.cursor').forEach(n => n.remove());
-    msgs.scrollTop = msgs.scrollHeight;
-    // Reflect the chat title in the titlebar tag.
-    if (modeTag) modeTag.textContent = '// ' + deriveChatTitle(savedHtml);
-  }
+  // Paint this panel's last view of the chat at once; the session's own
+  // version replaces it as soon as the backend answers.
+  await paintFromCache(BROWY_SESSION_ID);
   // Populate the active-tab title immediately so the titlebar doesn't sit
   // on "connecting…" while the native host warms up.
   refreshActiveTab();
@@ -2092,6 +2740,8 @@ connect = (function (orig) { return orig; })(connect);
   // flashed "install the browy backend" at users who already have it.
   try { setControlsState('booting'); updateTrySuggestions(); } catch {}
   connect();
+  // Waits for the backend, then renders the chat from its session.
+  loadChat(BROWY_SESSION_ID);
 })();
 startIdleLoop();
 inp.focus();
