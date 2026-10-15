@@ -1,7 +1,7 @@
 import type { ToolDef } from '../../types.js';
 import type { CDPSession, Browser, BrowserContext, Page } from 'playwright-core';
 import {
-  capturePageSnapshot, ensureSnapshot, resolveIndex, serializeSnapshot,
+  capturePageSnapshot, ensureSnapshot, resolveIndex, serializeSnapshot, FIND_JS,
   type ResolvedElement,
 } from '../page-snapshot.js';
 
@@ -27,8 +27,24 @@ export interface ToolHandler {
 
 const tools: ToolHandler[] = [];
 
-function register(handler: ToolHandler) {
-  tools.push(handler);
+/** Adds a tool. A failure that comes from Chrome refusing to let an extension
+ *  near the page (chrome:// pages, the Web Store) is rewritten into a reason
+ *  the model can pass on to the user. `serial` tools use focus or the mouse
+ *  and run one at a time (see serialInput). */
+function register(handler: ToolHandler & { serial?: boolean }) {
+  const run = handler.run;
+  tools.push({
+    def: handler.def,
+    run: async (args, ctx) => {
+      try {
+        return await (handler.serial ? serialInput(ctx, () => run(args, ctx)) : run(args, ctx));
+      } catch (err) {
+        const raw = errText(err);
+        const why = explainBrowserError(raw);
+        throw why ? new Error(`${why} (Chrome said: ${raw})`) : err;
+      }
+    },
+  });
 }
 
 export function getAllTools(): ToolHandler[] {
@@ -51,6 +67,198 @@ export async function runTool(
   } catch (err) {
     return JSON.stringify({ error: String(err) });
   }
+}
+
+// ── Shared helpers ─────────────────────────────────────────────────────────
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+const clip = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+const newToken = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+/** A call that hasn't settled after `ms` is given up on. Calls to a tab in
+ *  the middle of a navigation can sit unanswered. */
+function within<T>(p: Promise<T>, ms: number): Promise<T> {
+  p.catch(() => {}); // the abandoned call may still fail later
+  return Promise.race([p, new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`no answer within ${ms} ms`)), ms))]);
+}
+
+/** Runtime.evaluate of an expression that returns JSON (or a plain value). */
+async function evalJson<T>(ctx: BrowserToolContext, expression: string, timeoutMs = 10_000): Promise<T> {
+  const r = await within(ctx.cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true }), timeoutMs) as {
+    result?: { value?: unknown }; exceptionDetails?: { text?: string; exception?: { description?: string } };
+  };
+  if (r?.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text || 'page script failed');
+  const v = r?.result?.value;
+  return (typeof v === 'string' ? JSON.parse(v) : v) as T;
+}
+
+const inputQueues = new WeakMap<object, Promise<unknown>>();
+
+/** Run input that depends on focus or the mouse (typing, keys, clicks) one
+ *  call at a time per tab connection. The model often sends several tool
+ *  calls at once, and two type_index calls that interleave both type into
+ *  whichever field took focus last. */
+function serialInput<T>(ctx: BrowserToolContext, fn: () => Promise<T>): Promise<T> {
+  const key = ctx.cdp as unknown as object;
+  const prev = inputQueues.get(key) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  inputQueues.set(key, next.catch(() => {}));
+  return next;
+}
+
+// ── Pages Chrome keeps extensions away from ────────────────────────────────
+
+const INTERNAL_SCHEMES: Record<string, string> = {
+  chrome: 'Chrome', 'chrome-untrusted': 'Chrome', 'chrome-search': 'Chrome', devtools: 'Chrome',
+  edge: 'Edge', brave: 'Brave', opera: 'Opera', vivaldi: 'Vivaldi',
+};
+
+function blockedMessage(browser: string, what: string, readable: boolean, here = false): string {
+  // `here`: the tab is already on that page, rather than Browy trying to open it.
+  return `${browser} doesn't let extensions open or control ${what} pages, so Browy can't work there. `
+    + (here ? 'Do this part yourself, or switch to a regular web page' : 'Open it yourself')
+    + (readable ? ', or ask me to read it with web_fetch (switch it on in Settings first).' : '.');
+}
+
+const FILE_ACCESS_HINT = 'Chrome only lets extensions control file:// pages after you turn on "Allow access to file URLs" for Browy on the extensions page (chrome://extensions, or brave://extensions in Brave).';
+
+/** Why Browy can't open or drive this URL, or null when it can. Chrome keeps
+ *  extensions off its own pages and the Web Store: chrome.debugger won't
+ *  attach there, Page.navigate to the store is refused, and a tab navigated
+ *  to a chrome:// page drops the debugger, leaving the agent stranded. */
+export function blockedPageReason(raw: string): string | null {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  let u: URL;
+  try { u = new URL(s); } catch {
+    try { u = new URL('https://' + s); } catch { return null; }
+  }
+  const scheme = u.protocol.replace(/:$/, '').toLowerCase();
+  if (INTERNAL_SCHEMES[scheme]) return blockedMessage(INTERNAL_SCHEMES[scheme], `${scheme}://`, false);
+  if (scheme === 'about' && !/^(blank|srcdoc)$/i.test(u.pathname)) return blockedMessage('Chrome', 'about:', false);
+  if (scheme === 'http' || scheme === 'https') {
+    const host = u.hostname.toLowerCase();
+    if (host === 'chromewebstore.google.com') return blockedMessage('Chrome', host, true);
+    if (host === 'chrome.google.com' && /^\/webstore(\/|$)/i.test(u.pathname)) return blockedMessage('Chrome', 'chrome.google.com/webstore', true);
+  }
+  return null;
+}
+
+/** The reason behind chrome.debugger refusing to attach to a tab (the tab is
+ *  on a page extensions can't control), or null. */
+export function explainBlockedError(message: string): string | null {
+  if (/extensions gallery cannot be scripted/i.test(message)) return blockedMessage('Chrome', 'chromewebstore.google.com', true, true);
+  const m = /Cannot access a ([a-z][a-z0-9+.-]*):\/\/ URL/i.exec(message);
+  if (!m) return null;
+  const scheme = m[1].toLowerCase();
+  if (scheme === 'file') return FILE_ACCESS_HINT;
+  if (scheme === 'chrome-extension') return blockedMessage('Chrome', "other extensions'", false, true);
+  return blockedMessage(INTERNAL_SCHEMES[scheme] || 'Chrome', `${scheme}://`, false, true);
+}
+
+function explainBrowserError(message: string): string | null {
+  const blocked = explainBlockedError(message);
+  if (blocked) return blocked;
+  if (/Detached while handling command/i.test(message)) {
+    return 'Chrome cut Browy off from the tab during the call, usually because the tab went to a page extensions can\'t control (a chrome:// page or the Chrome Web Store), or the debugging bar was closed. Check the tab, then try again.';
+  }
+  return null;
+}
+
+// ── Waiting for a page to load ─────────────────────────────────────────────
+
+/** In-page: `__browyArm(token)` marks the current document, so a new document
+ *  can be told apart even at the same URL, and records the next cross-document
+ *  navigation this document starts (Navigation API) in window.__browyNav. */
+const ARM_JS = `
+const __browyArm = (token) => {
+  const def = (k, v) => { try { Object.defineProperty(window, k, { value: v, configurable: true, writable: true, enumerable: false }); } catch (_) {} };
+  def('__browyDocMark', token);
+  def('__browyNav', null);
+  try {
+    if (window.navigation && !window.__browyNavHook) {
+      def('__browyNavHook', true);
+      navigation.addEventListener('navigate', (e) => {
+        try {
+          if (e.destination.sameDocument) return;
+          const rec = { url: e.destination.url, type: e.navigationType, start: location.href };
+          window.__browyNav = rec;
+          queueMicrotask(() => { if (e.defaultPrevented) rec.failed = true; });
+        } catch (_) {}
+      });
+      navigation.addEventListener('navigateerror', () => { if (window.__browyNav) window.__browyNav.failed = true; });
+    }
+  } catch (_) {}
+};`;
+
+/** Errors a CDP call gets when the page navigates or closes under it. */
+const NAV_ERROR_RE = /Execution context was destroyed|Inspected target navigated or closed|Cannot find context with specified id|Promise was collected|Detached while handling command|Target closed|Session closed|has been closed/i;
+
+interface DocState {
+  /** Still the document marked with the token. */
+  same: boolean;
+  url: string;
+  title: string;
+  readyState: string;
+  nav: { url: string; type?: string; start?: string; failed?: boolean } | null;
+  /** The page's router intercepted the navigation: same document, new URL. */
+  intercepted: boolean;
+}
+
+interface WaitResult {
+  state?: DocState;
+  /** Why Browy can't reach the page the tab went to. */
+  blocked?: string;
+  /** The navigation started but didn't replace the page (204, download, cancelled). */
+  cancelled?: boolean;
+  timedOut?: boolean;
+  error?: string;
+}
+
+/** Wait until the tab shows a loaded document: a new one when `token` marks
+ *  the old document, or just a loaded one without it. Polls with
+ *  Runtime.evaluate, which works the same over chrome.debugger and Playwright
+ *  and needs no CDP events. */
+async function waitForDocument(ctx: BrowserToolContext, opts: { token?: string; timeoutMs: number }): Promise<WaitResult> {
+  const t0 = Date.now();
+  const token = JSON.stringify(opts.token ?? '');
+  const expr = `(() => {
+    const n = window.__browyNav || null;
+    let busy = false;
+    try { busy = !!(window.navigation && navigation.transition); } catch (_) {}
+    const same = ${opts.token ? `window.__browyDocMark === ${token}` : 'false'};
+    const intercepted = !!(same && n && !n.failed && n.type !== 'reload' && !busy && location.href === n.url && n.url !== n.start);
+    return JSON.stringify({ same, url: location.href, title: document.title, readyState: document.readyState, nav: n, intercepted });
+  })()`;
+  let last: DocState | undefined;
+  let lastError = '';
+  let interactiveSince = 0;
+  while (Date.now() - t0 < opts.timeoutMs) {
+    try {
+      const s = await evalJson<DocState>(ctx, expr, 3000);
+      last = s;
+      lastError = '';
+      if (!s.same) {
+        if (s.readyState === 'complete') return { state: s };
+        if (s.readyState === 'interactive') {
+          // Loaded enough to read; don't wait forever on a slow image or ad.
+          if (!interactiveSince) interactiveSince = Date.now();
+          else if (Date.now() - interactiveSince > 3000) return { state: s };
+        }
+      } else if (s.nav?.failed) {
+        return { state: s, cancelled: true };
+      } else if (s.intercepted) {
+        return { state: s };
+      }
+    } catch (e) {
+      lastError = errText(e);
+      const blocked = explainBlockedError(lastError);
+      if (blocked) return { blocked, error: lastError };
+    }
+    await sleep(150);
+  }
+  return { state: last, timedOut: true, error: lastError || undefined };
 }
 
 // ── Tools ──────────────────────────────────────────────────────────────────
@@ -89,6 +297,7 @@ interface ClickState {
 async function captureClickState(ctx: BrowserToolContext, idx?: number): Promise<ClickState> {
   const idxArg = idx == null ? 'null' : Number(idx);
   const expr = `(() => {
+    ${FIND_JS}
     function fnv1a(s) {
       let h = 0x811c9dc5;
       for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0; }
@@ -101,7 +310,7 @@ async function captureClickState(ctx: BrowserToolContext, idx?: number): Promise
     let elState = null;
     const i = ${idxArg};
     if (i != null) {
-      const el = document.querySelector('[data-browy-id="' + i + '"]');
+      const el = __browyFind(i);
       if (el) {
         elState = {
           pressed: el.getAttribute('aria-pressed') || undefined,
@@ -157,6 +366,7 @@ register({
 });
 
 register({
+  serial: true,
   def: {
     type: 'function', name: 'click_index',
     description: 'Click the element with the given index [N] from the page snapshot. Auto-scrolls into view. Returns urlChanged/titleChanged/domChanged/modalAppeared/modalClosed/elementStateChanged so you can verify the click had an effect. If all are false, the click had no observable effect — read the hint and try a different approach. PREFER this over click_element when the element appears in the snapshot.',
@@ -214,40 +424,216 @@ register({
   },
 });
 
+// ── Typing: inputs, textareas and rich-text editors ───────────────────────
+//
+// Text goes in the way a person's typing does: focus the field, select what's
+// there (select-all, then Delete) when replacing it, then one CDP
+// Input.insertText. That fires real beforeinput/input events, which cross
+// shadow-DOM boundaries and which editors like Draft.js, Lexical or
+// ProseMirror handle themselves. Afterwards the field is read back: the text
+// must be there exactly once, or the tool fails and says what the field shows.
+// Up to 0.1.13 type_index set .value with a setter, which threw on a
+// contenteditable editor, so the model typed with execCommand and synthetic
+// events instead, and on X the reply box got the text twice.
+
+/** In-page helpers (need FIND_JS): the text field or editor behind [n], its
+ *  kind, its text, and selecting all of it or putting the caret at the end. */
+const FIELD_JS = `
+const __browyTextTypes = new Set(['', 'text', 'search', 'email', 'url', 'tel', 'password', 'number']);
+const __browyValueTypes = new Set(['date', 'time', 'datetime-local', 'month', 'week', 'color', 'range']);
+const __browyKind = (el) => {
+  if (!el || el.nodeType !== 1) return null;
+  if (el.localName === 'textarea') return 'text';
+  if (el.localName === 'input') {
+    const t = (el.getAttribute('type') || '').toLowerCase();
+    return __browyTextTypes.has(t) ? 'text' : __browyValueTypes.has(t) ? 'value' : null;
+  }
+  return el.isContentEditable ? 'rich' : null;
+};
+const __browyField = (n) => {
+  const el0 = __browyFind(n);
+  if (!el0) return { gone: true };
+  let el = el0;
+  if (!__browyKind(el)) {
+    const q = 'textarea, input:not([type]), input[type="text" i], input[type="search" i], input[type="email" i], input[type="url" i], input[type="tel" i], input[type="password" i], input[type="number" i], [contenteditable]:not([contenteditable="false"])';
+    el = el0.querySelector(q) || (el0.shadowRoot && el0.shadowRoot.querySelector(q)) || el0;
+  }
+  // A rich-text editor is edited as a whole: work on its editing host.
+  if (__browyKind(el) === 'rich') { while (el.parentElement && el.parentElement.isContentEditable) el = el.parentElement; }
+  return { el, kind: __browyKind(el), tag: el0.localName };
+};
+const __browyFieldText = (el, kind) => kind === 'rich' ? (el.innerText || el.textContent || '') : String(el.value == null ? '' : el.value);
+const __browySelect = (el, kind, all) => {
+  if (kind === 'rich') {
+    const doc = el.ownerDocument, sel = doc.defaultView.getSelection(), r = doc.createRange();
+    r.selectNodeContents(el);
+    if (!all) r.collapse(false);
+    sel.removeAllRanges();
+    sel.addRange(r);
+    return;
+  }
+  const len = String(el.value || '').length;
+  try { if (all) el.select(); else el.setSelectionRange(len, len); } catch (_) {}
+};
+`;
+
+interface FieldPrep { kind: 'text' | 'rich' | 'value'; focused?: boolean; text: string; cx?: number; cy?: number; done?: boolean }
+
+/** Find the field behind [N], focus it, and select its text (`all`) or put the
+ *  caret at the end. A date, color or range input just gets `value`. */
+async function prepareField(ctx: BrowserToolContext, idx: number, all: boolean, value: string): Promise<FieldPrep> {
+  const r = await evalJson<FieldPrep & { error?: string; tag?: string }>(ctx, `(() => {
+    ${FIND_JS}
+    ${FIELD_JS}
+    const f = __browyField(${idx});
+    if (f.gone) return JSON.stringify({ error: 'gone' });
+    if (!f.kind) return JSON.stringify({ error: 'not_editable', tag: f.tag });
+    const el = f.el;
+    if (el.disabled || el.readOnly) return JSON.stringify({ error: 'readonly', tag: el.localName });
+    try { Object.defineProperty(window, '__browyTyping', { value: { el, kind: f.kind }, configurable: true, writable: true, enumerable: false }); } catch (_) {}
+    try { el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); } catch (_) {}
+    if (f.kind === 'value') {
+      const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      set.call(el, ${JSON.stringify(value)});
+      el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return JSON.stringify({ kind: 'value', done: true, text: String(el.value) });
+    }
+    try { el.focus({ preventScroll: true }); } catch (_) {}
+    __browySelect(el, f.kind, ${all});
+    const a = __browyDeepActive();
+    const focused = a === el || (!!a && el.contains(a));
+    const b = el.getBoundingClientRect();
+    let x = b.left + b.width / 2, y = b.top + Math.min(b.height / 2, 20);
+    try {
+      for (let w = el.ownerDocument.defaultView; w && w.frameElement; w = w.parent) {
+        const fe = w.frameElement, fr = fe.getBoundingClientRect();
+        x += fr.left + fe.clientLeft; y += fr.top + fe.clientTop;
+      }
+    } catch (_) {}
+    return JSON.stringify({ kind: f.kind, focused, text: __browyFieldText(el, f.kind), cx: x, cy: y });
+  })()`);
+  if (r.error === 'gone') throw new Error(`No element [${idx}]: the page changed since the last snapshot. Call inspect_page and use the new index.`);
+  if (r.error === 'not_editable') throw new Error(`[${idx}] is a <${r.tag}>, not a text field or editor. Use the index of an input, textarea or contenteditable element.`);
+  if (r.error === 'readonly') throw new Error(`[${idx}] (<${r.tag}>) is disabled or read-only.`);
+  return r;
+}
+
+/** Read back the field being typed into (or, if the editor replaced it, the
+ *  field that has focus now). `commit` fires change on inputs and textareas,
+ *  as leaving the field would. */
+async function readField(ctx: BrowserToolContext, idx: number, commit: boolean): Promise<string> {
+  const r = await evalJson<{ text: string }>(ctx, `(() => {
+    ${FIND_JS}
+    ${FIELD_JS}
+    const t = window.__browyTyping;
+    let el = t && t.el && t.el.isConnected ? t.el : null, kind = t && t.kind;
+    if (!el) { const f = __browyField(${idx}); if (!f.gone && f.kind) { el = f.el; kind = f.kind; } }
+    if (!el) { const a = __browyDeepActive(); if (__browyKind(a)) { el = a; kind = __browyKind(a); } }
+    if (!el) return JSON.stringify({ text: '' });
+    if (${commit} && kind === 'text') el.dispatchEvent(new Event('change', { bubbles: true }));
+    return JSON.stringify({ text: __browyFieldText(el, kind) });
+  })()`);
+  return String(r?.text ?? '');
+}
+
+const normText = (s: string) => s.replace(/[\u200b\u200c\u200d\ufeff]/g, '').replace(/\s+/g, ' ').trim();
+const looseText = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+
+/** How many times `needle` occurs in `hay`, ignoring whitespace differences
+ *  (editors turn spaces into &nbsp; and lines into blocks). */
+function occurrences(hay: string, needle: string, norm: (s: string) => string = normText): number {
+  const h = norm(hay), n = norm(needle);
+  if (!n) return 0;
+  let count = 0;
+  for (let i = h.indexOf(n); i !== -1; i = h.indexOf(n, i + n.length)) count++;
+  return count;
+}
+
+interface KeySpec { key: string; code: string; keyCode: number; text?: string }
+
+/** One key press. A key that types (has text) sends keyDown with that text,
+ *  which Chrome turns into keydown + keypress; a separate char event on top
+ *  types the character a second time. */
+async function pressKey(ctx: BrowserToolContext, k: KeySpec, modifiers = 0): Promise<void> {
+  const types = !!k.text && !(modifiers & (1 | 2 | 4)); // no Alt, Ctrl or Meta
+  const base = { key: k.key, code: k.code, windowsVirtualKeyCode: k.keyCode, nativeVirtualKeyCode: k.keyCode, modifiers };
+  await ctx.cdp.send('Input.dispatchKeyEvent', types
+    ? { type: 'keyDown', ...base, text: k.text, unmodifiedText: k.text }
+    : { type: 'rawKeyDown', ...base });
+  await ctx.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+}
+
+const DELETE_KEY: KeySpec = { key: 'Delete', code: 'Delete', keyCode: 46 };
+
+/** type_index and clear_index: focus [N], clear it if asked, insert `text`
+ *  once, and check the result. */
+async function typeIntoIndex(ctx: BrowserToolContext, idx: number, text: string, clear: boolean): Promise<string> {
+  let prep = await prepareField(ctx, idx, clear, text);
+  if (prep.kind === 'value') {
+    const ok = !text || prep.text.toLowerCase() === text.trim().toLowerCase();
+    if (!ok) throw new Error(`[${idx}] didn't take "${clip(text, 60)}"; it shows "${clip(prep.text, 60)}". Check the format the field expects.`);
+    return JSON.stringify({ success: true, index: idx, kind: 'value', value: clip(prep.text, 200) });
+  }
+  if (!prep.focused && prep.cx != null && prep.cy != null) {
+    // Some editors only take focus from a real click.
+    await dispatchClick(ctx, prep.cx, prep.cy);
+    await sleep(100);
+    prep = await prepareField(ctx, idx, clear, text);
+  }
+  if (!prep.focused) throw new Error(`Couldn't put the cursor in [${idx}]: the page keeps focus elsewhere. Try click_index on it, then type_index again.`);
+  const before = clear ? 0 : occurrences(prep.text, text);
+  if (clear && normText(prep.text) !== '') {
+    await pressKey(ctx, DELETE_KEY);
+    await sleep(30);
+  }
+  if (text) await ctx.cdp.send('Input.insertText', { text });
+
+  // Read it back. Editors may re-render a moment later, so give a missing
+  // text up to a second to show up; text that's there twice won't go away.
+  let shown = await readField(ctx, idx, true);
+  const want = before + (text ? 1 : 0);
+  let count = occurrences(shown, text);
+  for (let i = 0; text && count < want && i < 10; i++) {
+    await sleep(100);
+    shown = await readField(ctx, idx, false);
+    count = occurrences(shown, text);
+  }
+  const kindWord = prep.kind === 'rich' ? 'editor' : 'field';
+  if (!text) {
+    if (normText(shown) !== '') throw new Error(`[${idx}] still shows "${clip(normText(shown), 120)}" after select-all and Delete; this ${kindWord} didn't clear.`);
+    return JSON.stringify({ success: true, index: idx, kind: prep.kind, cleared: true });
+  }
+  const result = { success: true, index: idx, kind: prep.kind, value: clip(shown, 200) };
+  if (count === want) {
+    const extra = clear && normText(shown) !== normText(text);
+    return JSON.stringify(extra ? { ...result, note: `The ${kindWord} also holds other text; check it reads as intended.` } : result);
+  }
+  if (count < want && occurrences(shown, text, looseText) === want) {
+    return JSON.stringify({ ...result, note: `The ${kindWord} reformatted the text.` });
+  }
+  if (count > want) {
+    throw new Error(`The text went into [${idx}] ${count - before} times instead of once; the ${kindWord} now reads "${clip(normText(shown), 200)}". Clear it with clear_index, then check with inspect_page before typing again.`);
+  }
+  throw new Error(`The text didn't show up in [${idx}]; the ${kindWord} reads "${clip(normText(shown), 200)}". It may have rejected the input or moved focus: check with inspect_page.`);
+}
+
 register({
+  serial: true,
   def: {
     type: 'function', name: 'type_index',
-    description: 'Type text into the input/textarea at index [N]. Focuses the element first, optionally clears existing value, then sets value via the React-friendly setter and dispatches input/change events. Use press_key("Enter") afterward if you need to submit. PREFER this over fill_input when the element appears in the snapshot.',
+    description: 'Type text into the input, textarea or rich-text editor (contenteditable, e.g. a chat or reply box) at index [N], including ones inside shadow DOM. Replaces what\'s there unless clear="false", types the text once as real keyboard input, then reads the field back and fails if the text isn\'t there exactly once. To submit afterwards, use press_keys("Enter") or click the send button. PREFER this over fill_input and evaluate_js.',
     parameters: { type: 'object', properties: {
       index: { type: 'number', description: 'The [N] index from the page snapshot.' },
       text: { type: 'string', description: 'Text to type.' },
-      clear: { type: 'string', description: 'Set to "false" to append instead of replace (default: "true" — clears first).' },
+      clear: { type: 'string', description: '"false" to add to the end of the existing text instead of replacing it (default "true").' },
     }, required: ['index', 'text'] },
   },
   async run(args, ctx) {
     const idx = Number(args.index);
-    const text = String(args.text ?? '');
-    const clear = args.clear !== 'false';
     if (!Number.isFinite(idx) || idx < 1) return JSON.stringify({ error: 'index must be a positive integer' });
-    const cdp = ctx.cdp as unknown as { send: (m: string, p?: unknown) => Promise<unknown> };
-    const resolved: ResolvedElement = await resolveIndex(cdp, idx);
-    if (!resolved.found) return JSON.stringify({ success: false, error: resolved.reason || `index ${idx} not found — call inspect_page` });
-    if (!resolved.isEditable) return JSON.stringify({ success: false, error: `element [${idx}] (<${resolved.tag}>) is not editable` });
-    const expr = `(() => {
-      const el = document.querySelector('[data-browy-id="${idx}"]');
-      if (!el) return JSON.stringify({ error: 'element vanished' });
-      try { el.focus(); } catch(_) {}
-      const tag = el.tagName.toLowerCase();
-      const proto = tag === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-      const newVal = ${clear ? '' : '(el.value || "") + '}${JSON.stringify(text)};
-      if (setter) setter.call(el, newVal); else el.value = newVal;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      return JSON.stringify({ success: true, value: String(el.value || '').slice(0, 200) });
-    })()`;
-    const r = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true }) as { result?: { value?: string } };
-    return String(r?.result?.value ?? '{}');
+    const clear = String(args.clear ?? 'true') !== 'false';
+    return typeIntoIndex(ctx, Math.floor(idx), String(args.text ?? ''), clear);
   },
 });
 
@@ -266,8 +652,9 @@ register({
     if (!Number.isFinite(idx) || idx < 1) return JSON.stringify({ error: 'index must be a positive integer' });
     const cdp = ctx.cdp as unknown as { send: (m: string, p?: unknown) => Promise<unknown> };
     const expr = `(() => {
-      const el = document.querySelector('[data-browy-id="${idx}"]');
-      if (!el) return JSON.stringify({ error: 'index ${idx} not found — call inspect_page' });
+      ${FIND_JS}
+      const el = __browyFind(${idx});
+      if (!el) return JSON.stringify({ error: 'index ${idx} not found: call inspect_page' });
       if (el.tagName !== 'SELECT') return JSON.stringify({ error: 'not a <select>; for custom dropdowns use click_index' });
       const want = ${JSON.stringify(value)};
       let chosen = null;
@@ -276,7 +663,7 @@ register({
       }
       if (!chosen) return JSON.stringify({ error: 'no matching option', options: Array.from(el.options).slice(0, 50).map(o => ({ value: o.value, label: o.text })) });
       el.value = chosen.value;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
       return JSON.stringify({ success: true, value: chosen.value, label: chosen.text });
     })()`;
@@ -286,9 +673,10 @@ register({
 });
 
 register({
+  serial: true,
   def: {
     type: 'function', name: 'clear_index',
-    description: 'Empty the value of an input/textarea at index [N]. Convenience for type_index with empty text.',
+    description: 'Empty the input, textarea or rich-text editor (contenteditable) at index [N], including ones inside shadow DOM: select-all and Delete, like a person would. Fails if the field doesn\'t end up empty.',
     parameters: { type: 'object', properties: {
       index: { type: 'number', description: 'The [N] index from the page snapshot.' },
     }, required: ['index'] },
@@ -296,21 +684,7 @@ register({
   async run(args, ctx) {
     const idx = Number(args.index);
     if (!Number.isFinite(idx) || idx < 1) return JSON.stringify({ error: 'index must be a positive integer' });
-    const cdp = ctx.cdp as unknown as { send: (m: string, p?: unknown) => Promise<unknown> };
-    const expr = `(() => {
-      const el = document.querySelector('[data-browy-id="${idx}"]');
-      if (!el) return JSON.stringify({ error: 'index ${idx} not found — call inspect_page' });
-      try { el.focus(); } catch(_) {}
-      const tag = el.tagName.toLowerCase();
-      const proto = tag === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-      if (setter) setter.call(el, ''); else el.value = '';
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      return JSON.stringify({ success: true });
-    })()`;
-    const r = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true }) as { result?: { value?: string } };
-    return String(r?.result?.value ?? '{}');
+    return typeIntoIndex(ctx, Math.floor(idx), '', true);
   },
 });
 
@@ -331,8 +705,9 @@ register({
     const cdp = ctx.cdp as unknown as { send: (m: string, p?: unknown) => Promise<unknown> };
     const want = args.checked == null ? 'null' : (String(args.checked) === 'true' ? 'true' : 'false');
     const expr = `(() => {
-      const el = document.querySelector('[data-browy-id="${idx}"]');
-      if (!el) return JSON.stringify({ error: 'index ${idx} not found — call inspect_page' });
+      ${FIND_JS}
+      const el = __browyFind(${idx});
+      if (!el) return JSON.stringify({ error: 'index ${idx} not found: call inspect_page' });
       const tag = el.tagName.toLowerCase();
       const type = (el.getAttribute('type') || '').toLowerCase();
       const isCheck = tag === 'input' && (type === 'checkbox' || type === 'radio');
@@ -343,7 +718,7 @@ register({
       // Use the React-friendly setter so framework state updates.
       const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set;
       if (setter) setter.call(el, next); else el.checked = next;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
       // Click is what radio groups need to trigger group bookkeeping.
       if (type === 'radio' && next) try { el.click(); } catch(_) {}
@@ -379,6 +754,7 @@ register({
     const cdp = ctx.cdp as unknown as { send: (m: string, p?: unknown) => Promise<unknown> };
     const idxArg = args.index == null ? 'null' : Number(args.index);
     const expr = `(() => {
+      ${FIND_JS}
       function labelFor(el) {
         if (el.id) {
           const lab = document.querySelector('label[for=' + JSON.stringify(el.id) + ']');
@@ -431,8 +807,8 @@ register({
       let form = null;
       const startIdx = ${idxArg};
       if (startIdx != null) {
-        const start = document.querySelector('[data-browy-id="' + startIdx + '"]');
-        if (!start) return JSON.stringify({ error: 'index ' + startIdx + ' not found — call inspect_page' });
+        const start = __browyFind(startIdx);
+        if (!start) return JSON.stringify({ error: 'index ' + startIdx + ' not found: call inspect_page' });
         form = start.closest('form') || start.closest('[role="form"]');
       }
       if (!form) {
@@ -502,13 +878,18 @@ register({
     const cdp = ctx.cdp as unknown as { send: (m: string, p?: unknown) => Promise<unknown> };
     // Run all fills in a single CDP eval to minimise round-trips.
     const expr = `(() => {
+      ${FIND_JS}
       const fields = ${JSON.stringify(parsed)};
       const results = [];
       for (const f of fields) {
-        const el = document.querySelector('[data-browy-id="' + f.index + '"]');
+        const el = __browyFind(f.index);
         if (!el) { results.push({ index: f.index, ok: false, error: 'not found' }); continue; }
         const tag = el.tagName.toLowerCase();
         const type = (el.getAttribute('type') || '').toLowerCase();
+        if (tag !== 'input' && tag !== 'textarea' && tag !== 'select' && el.isContentEditable) {
+          results.push({ index: f.index, ok: false, error: 'rich-text editor: fill it with type_index' });
+          continue;
+        }
         try {
           el.focus && el.focus();
           let action = f.action;
@@ -533,7 +914,7 @@ register({
             const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
             if (setter) setter.call(el, String(f.value)); else el.value = String(f.value);
           }
-          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
           el.dispatchEvent(new Event('change', { bubbles: true }));
           results.push({ index: f.index, ok: true, action });
         } catch (e) {
@@ -561,10 +942,11 @@ register({
     const before = await captureUrlTitle(ctx);
     const idxArg = args.index == null ? 'null' : Number(args.index);
     const expr = `(() => {
+      ${FIND_JS}
       let form = null;
       const startIdx = ${idxArg};
       if (startIdx != null) {
-        const start = document.querySelector('[data-browy-id="' + startIdx + '"]');
+        const start = __browyFind(startIdx);
         if (start) form = start.closest('form');
       }
       if (!form) {
@@ -592,12 +974,35 @@ register({
   },
 });
 
+/** In-page (needs FIND_JS): the file input behind an indexed element. Sites
+ *  usually hide the real <input type=file> and show a button or label, and
+ *  the snapshot only indexes what's visible. */
+const FILE_INPUT_JS = `
+const __browyFileInput = (el) => {
+  const isFile = (x) => !!x && x.localName === 'input' && (x.getAttribute('type') || '').toLowerCase() === 'file';
+  if (isFile(el)) return el;
+  if (el.localName === 'label' && isFile(el.control)) return el.control;
+  const q = 'input[type="file" i]';
+  const inside = el.querySelector(q) || (el.shadowRoot && el.shadowRoot.querySelector(q));
+  if (inside) return inside;
+  let p = el;
+  for (let i = 0; i < 4 && p; i++) {
+    const up = p.parentNode;
+    p = up && up.nodeType === 11 ? up.host : up;
+    if (!p || p.nodeType !== 1) break;
+    const all = p.querySelectorAll(q);
+    if (all.length === 1) return all[0];
+    if (all.length > 1) break;
+  }
+  return null;
+};`;
+
 register({
   def: {
     type: 'function', name: 'upload_index',
-    description: 'Attach a local file to a <input type="file"> at index [N]. Bypasses the OS file-picker dialog entirely (uses CDP DOM.setFileInputFiles). Use absolute path. For multiple files on a multi-attach input, pass paths as a JSON array string.',
+    description: 'Attach local files to the file input at index [N], with no file-picker dialog. [N] can also be the upload button or label next to a hidden file input, including inside shadow DOM. Use absolute paths; for several files on a multi-file input, pass a JSON array string.',
     parameters: { type: 'object', properties: {
-      index: { type: 'number', description: 'The [N] index of the file input.' },
+      index: { type: 'number', description: 'The [N] index of the file input, or of its upload button or label.' },
       path: { type: 'string', description: 'Absolute local file path, OR a JSON array of paths for multi-file inputs.' },
     }, required: ['index', 'path'] },
   },
@@ -615,18 +1020,39 @@ register({
     for (const p of paths) {
       if (!fs.existsSync(p)) return JSON.stringify({ error: `File not found: ${p}` });
     }
-    // Look up the backendNodeId via the data-browy-id attribute selector,
-    // then DOM.setFileInputFiles. Avoids needing a full DOM tree fetch.
-    const cdp = ctx.cdp as unknown as { send: (m: string, p?: unknown) => Promise<unknown> };
-    const doc: any = await cdp.send('DOM.getDocument', { depth: -1 });
-    const found: any = await cdp.send('DOM.querySelector', { nodeId: doc.root.nodeId, selector: `[data-browy-id="${idx}"]` });
-    if (!found?.nodeId) return JSON.stringify({ error: `index ${idx} not found in DOM — call inspect_page` });
-    await cdp.send('DOM.setFileInputFiles', { files: paths, nodeId: found.nodeId });
+    // A handle to the input itself (it may sit in a shadow root, where
+    // DOM.querySelector on the document can't see it), then DOM.setFileInputFiles.
+    const r = await ctx.cdp.send('Runtime.evaluate', {
+      expression: `(() => { ${FIND_JS} ${FILE_INPUT_JS}
+        const el = __browyFind(${Math.floor(idx)});
+        if (!el) return 'gone';
+        return __browyFileInput(el) || el.localName;
+      })()`,
+      objectGroup: 'browy-upload',
+    }) as { result?: { type?: string; value?: string; objectId?: string; subtype?: string } };
+    try {
+      const res = r?.result;
+      if (res?.value === 'gone') throw new Error(`No element [${idx}]: the page changed since the last snapshot. Call inspect_page and use the new index.`);
+      if (!res?.objectId || res.subtype !== 'node') {
+        throw new Error(`[${idx}] is a <${res?.value || '?'}> with no file input in or next to it. Find the file input or its upload button in inspect_page.`);
+      }
+      try {
+        await ctx.cdp.send('DOM.setFileInputFiles', { files: paths, objectId: res.objectId });
+      } catch (e) {
+        if (/not allowed/i.test(errText(e))) {
+          throw new Error('Chrome refused to attach the file ("Not allowed"), which usually means Browy has no file access. Turn on "Allow access to file URLs" for Browy on the extensions page (chrome://extensions, or brave://extensions in Brave), then try again.');
+        }
+        throw e;
+      }
+    } finally {
+      ctx.cdp.send('Runtime.releaseObjectGroup', { objectGroup: 'browy-upload' }).catch(() => {});
+    }
     return JSON.stringify({ success: true, index: idx, files: paths });
   },
 });
 
 register({
+  serial: true,
   def: {
     type: 'function', name: 'press_keys',
     description: `Send a keyboard combination (e.g. "Ctrl+Enter" to submit a chat input, "Tab" to move focus, "Escape" to dismiss). Modifiers: Ctrl, Alt, Shift, Meta. Use this AFTER focusing the right input via type_index/focus_index.`,
@@ -664,43 +1090,121 @@ register({
     };
     const norm = key.length === 1 ? key.toUpperCase() : key;
     const mapped = KEY_MAP[norm] || (key.length === 1
-      ? { key, code: 'Key' + key.toUpperCase(), windowsVirtualKeyCode: key.toUpperCase().charCodeAt(0), text: key }
+      ? { key, code: 'Key' + key.toUpperCase(), windowsVirtualKeyCode: key.toUpperCase().charCodeAt(0), text: (modifiers & 8) ? key.toUpperCase() : key }
       : { key, code: key });
-    const base: any = { ...mapped, modifiers };
-    await ctx.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', ...base });
-    if (base.text && !modifiers) await ctx.cdp.send('Input.dispatchKeyEvent', { type: 'char', ...base });
-    await ctx.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+    // Up to 0.1.13 a separate char event followed the keyDown, so every
+    // printable key, Space and Enter went in twice.
+    await pressKey(ctx, { key: mapped.key, code: mapped.code, keyCode: mapped.windowsVirtualKeyCode ?? 0, text: mapped.text }, modifiers);
     return JSON.stringify({ success: true, keys: combo });
   },
 });
 
 // ── Legacy / general tools ────────────────────────────────────────────────
 
+type NavigateAnswer = { errorText?: string; isDownload?: boolean };
+
+/** Page.navigate's refusals, in words the model can pass on. */
+function navigateError(url: string, e: unknown): Error {
+  const raw = errText(e);
+  if (/not allowed/i.test(raw)) {
+    if (/^file:/i.test(url)) return new Error(`${FILE_ACCESS_HINT} (Chrome said: ${raw})`);
+    let host = url;
+    try { host = new URL(url).hostname || url; } catch {}
+    return new Error(`${blockedMessage('Chrome', host, true)} (Chrome said: ${raw})`);
+  }
+  if (/invalid URL/i.test(raw)) return new Error(`"${url}" isn't a URL Chrome can open. Use a full URL such as https://example.com/. (Chrome said: ${raw})`);
+  return e instanceof Error ? e : new Error(raw);
+}
+
+/** What Page.navigate's answer means for the tool: a download or a load error. */
+function checkNavigateAnswer(url: string, nav: NavigateAnswer | undefined): { download?: true } {
+  if (nav?.isDownload) return { download: true };
+  if (nav?.errorText) {
+    throw new Error(`${url} didn't load: ${nav.errorText}${/ERR_ABORTED/.test(nav.errorText) ? ' (the navigation was cancelled)' : ''}.`);
+  }
+  return {};
+}
+
+/** Open `url` in a new tab and wait for it to load. */
+async function openInNewTab(ctx: BrowserToolContext, url: string, activate: boolean): Promise<{ url: string; title: string; download?: true; loading?: true }> {
+  const page = await ctx.browser.contexts()[0].newPage();
+  if (ctx.getActiveTabInfo) {
+    // Extension mode: newPage() points ctx.cdp at the new tab. Navigate
+    // through it rather than page.goto, which drops Chrome's answer: up to
+    // 0.1.13 a refused URL left a blank tab and the tool said it worked.
+    let nav: NavigateAnswer | undefined;
+    try {
+      nav = await ctx.cdp.send('Page.navigate', { url }) as NavigateAnswer;
+    } catch (e) {
+      await page.close().catch(() => {});
+      throw navigateError(url, e);
+    }
+    const { download } = checkNavigateAnswer(url, nav);
+    if (download) return { url, title: '', download };
+    const w = await waitForDocument(ctx, { timeoutMs: 10_000 });
+    if (w.blocked) throw new Error(w.blocked);
+    if (activate) await ctx.setActivePage(page);
+    return { url: w.state?.url || url, title: w.state?.title || '', ...(w.timedOut ? { loading: true as const } : {}) };
+  }
+  let failure: Error | null = null;
+  try {
+    await page.goto(url, { waitUntil: 'load', timeout: 15_000 });
+  } catch (e) {
+    const raw = errText(e);
+    if (!/timeout/i.test(raw)) failure = new Error(explainBrowserError(raw) || `${url} didn't load: ${raw.split('\n')[0]}`);
+  }
+  if (activate) await ctx.setActivePage(page);
+  if (failure) throw failure;
+  let title = '';
+  try { title = await page.title(); } catch {}
+  return { url: page.url(), title };
+}
+
+/** Reload the current tab and wait until the new document has loaded. */
+async function reloadCurrent(ctx: BrowserToolContext): Promise<string> {
+  const token = newToken();
+  await evalJson(ctx, `(() => { ${ARM_JS} __browyArm(${JSON.stringify(token)}); return 1; })()`);
+  await ctx.cdp.send('Page.reload', {});
+  const w = await waitForDocument(ctx, { token, timeoutMs: 15_000 });
+  if (w.blocked) throw new Error(w.blocked);
+  if (w.state && !w.state.same) return JSON.stringify({ success: true, reloaded: true, url: w.state.url, title: w.state.title });
+  throw new Error(`The page didn't reload within 15 s${w.error ? ` (${w.error})` : ''}. It may be asking to confirm leaving: check the tab.`);
+}
+
 register({
   def: {
     type: 'function', name: 'navigate',
-    description: 'Navigate to a URL. By default, navigates the active tab when the URL is on the SAME hostname as the current tab (so the user keeps working in the same tab); opens a new tab otherwise. Set new_tab="true"/"false" to override.',
+    description: 'Open a URL and wait for it to load (up to 10 s), or reload the current tab with reload=true. A URL on the current tab\'s host opens in that tab, another host in a new tab; new_tab="true"/"false" overrides that. Fails with the reason when the page doesn\'t load, or is one Chrome won\'t let extensions control (chrome://, edge://, brave:// pages and the Chrome Web Store).',
     parameters: { type: 'object', properties: {
-      url: { type: 'string', description: 'The URL to navigate to' },
-      new_tab: { type: 'string', description: 'Set to "true" to force a new tab, "false" to force navigating the current tab. Default: same-host → current tab, cross-host → new tab.' },
-    }, required: ['url'] },
+      url: { type: 'string', description: 'The URL to open. Leave it out with reload.' },
+      new_tab: { type: 'string', description: '"true" for a new tab, "false" for the current tab. Default: same host in the current tab, another host in a new tab.' },
+      reload: { type: 'boolean', description: 'true to reload the current tab instead of opening a URL.' },
+    }, required: [] },
   },
   async run(args, ctx) {
-    const url = String(args.url);
+    if (args.reload === true || String(args.reload) === 'true') return reloadCurrent(ctx);
+    const url = String(args.url ?? '').trim();
+    if (!url) throw new Error('navigate needs a url, or reload=true to reload the current tab.');
+    const blocked = blockedPageReason(url);
+    if (blocked) throw new Error(blocked);
+
+    let curUrl = '';
+    try {
+      if (ctx.getActiveTabInfo) curUrl = (await ctx.getActiveTabInfo())?.url || '';
+      else {
+        const pages = ctx.getPages();
+        if (pages.length) curUrl = pages[0].url();
+      }
+    } catch {}
+    // Browy can't drive a chrome:// or Web Store tab, so never navigate in one.
+    const stuck = !!curUrl && !!blockedPageReason(curUrl);
     let newTab: boolean;
-    if (args.new_tab === 'true') newTab = true;
-    else if (args.new_tab === 'false') newTab = false;
+    if (stuck || args.new_tab === 'true' || args.new_tab === true) newTab = true;
+    else if (args.new_tab === 'false' || args.new_tab === false) newTab = false;
     else {
       // Smart default: same hostname → current tab, cross-host → new tab.
-      let curHost = '';
       try {
-        if (ctx.getActiveTabInfo) {
-          const info = await ctx.getActiveTabInfo();
-          if (info?.url) curHost = new URL(info.url).hostname;
-        } else {
-          const pages = ctx.getPages();
-          if (pages.length) curHost = new URL(pages[0].url()).hostname;
-        }
+        const curHost = curUrl ? new URL(curUrl).hostname : '';
         const tgtHost = new URL(url).hostname;
         newTab = !(curHost && tgtHost && curHost === tgtHost);
       } catch {
@@ -709,32 +1213,91 @@ register({
     }
 
     if (newTab) {
-      // Open in a new tab via Playwright, then switch CDP to it
-      const context = ctx.browser.contexts()[0];
-      const page = await context.newPage();
-      await page.goto(url, { waitUntil: 'load', timeout: 15_000 }).catch(() => {});
-      await ctx.setActivePage(page);
-      return JSON.stringify({ success: true, url, newTab: true });
+      const r = await openInNewTab(ctx, url, true);
+      return JSON.stringify({ success: true, ...r, newTab: true });
     }
 
-    // Navigate current tab
-    await ctx.cdp.send('Page.navigate', { url });
-    await ctx.cdp.send('Page.setLifecycleEventsEnabled', { enabled: true });
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(resolve, 10_000);
-      const handler = (params: { name: string }) => {
-        if (params.name === 'load') {
-          clearTimeout(timeout);
-          ctx.cdp.off('Page.lifecycleEvent', handler);
-          resolve();
-        }
-      };
-      ctx.cdp.on('Page.lifecycleEvent', handler);
-    });
-    await new Promise((r) => setTimeout(r, 500));
-    return JSON.stringify({ success: true, url, newTab: false });
+    let nav: NavigateAnswer | undefined;
+    try {
+      nav = await ctx.cdp.send('Page.navigate', { url }) as NavigateAnswer;
+    } catch (e) {
+      throw navigateError(url, e);
+    }
+    if (checkNavigateAnswer(url, nav).download) return JSON.stringify({ success: true, url, newTab: false, download: true });
+    // Page.navigate answers once the new page has committed; wait for it to
+    // load by polling. Up to 0.1.13 this waited for a load lifecycle event it
+    // started listening for too late, so navigations took the full 10 s.
+    const w = await waitForDocument(ctx, { timeoutMs: 10_000 });
+    if (w.blocked) throw new Error(w.blocked);
+    return JSON.stringify({ success: true, url: w.state?.url || url, title: w.state?.title || '', newTab: false, ...(w.timedOut ? { loading: true } : {}) });
   },
 });
+
+/** In-page text helpers. `__browyText(root, max)` is the rendered text of a
+ *  document or element, like innerText, but also inside open shadow roots
+ *  (innerText skips them), in reading order with slotted content in place.
+ *  `__browyQueryAll(sel)` matches a selector in the document and in every open
+ *  shadow root. */
+const TEXT_JS = `
+const __browyText = (root, max) => {
+  const hosts = [];
+  const scan = (r) => {
+    let all = [];
+    try { all = r.querySelectorAll('*'); } catch (_) {}
+    for (const x of all) if (x.shadowRoot) { hosts.push(x); scan(x.shadowRoot); }
+  };
+  const top = root.nodeType === 9 ? (root.body || root.documentElement) : root;
+  if (!top) return '';
+  if (top.shadowRoot) { hosts.push(top); scan(top.shadowRoot); }
+  scan(top);
+  if (!hosts.length) return top.innerText || '';
+  // Elements with a shadow host below them are walked by hand; everything
+  // else is a plain subtree whose innerText is right as it is.
+  const path = new Set();
+  for (const h of hosts) {
+    for (let p = h; p && !path.has(p); ) {
+      path.add(p);
+      if (p === top) break;
+      const up = p.parentNode;
+      p = up && up.nodeType === 11 ? up.host : up;
+    }
+  }
+  const SKIP = new Set(['script', 'style', 'noscript', 'template', 'head', 'svg']);
+  const out = [];
+  let size = 0;
+  const add = (s) => { if (s) { out.push(s); size += s.length; } };
+  const walk = (node) => {
+    if (size > max) return;
+    if (node.nodeType === 3) { add(node.data.replace(/\\s+/g, ' ')); return; }
+    if (node.nodeType === 11) { for (let c = node.firstChild; c; c = c.nextSibling) walk(c); return; }
+    if (node.nodeType !== 1 || SKIP.has(node.localName)) return;
+    if (node.localName === 'slot') {
+      const a = node.assignedNodes({ flatten: true });
+      if (a.length) { for (const c of a) walk(c); } else { for (let c = node.firstChild; c; c = c.nextSibling) walk(c); }
+      return;
+    }
+    const d = getComputedStyle(node).display;
+    if (d === 'none') return;
+    const block = !(d.startsWith('inline') || d === 'contents');
+    if (block) add('\\n');
+    if (!path.has(node) && d !== 'contents') add(node.innerText);
+    else if (node.shadowRoot) walk(node.shadowRoot);
+    else for (let c = node.firstChild; c; c = c.nextSibling) walk(c);
+    if (block) add('\\n');
+  };
+  walk(top);
+  return out.join('').replace(/[ \\t]+\\n/g, '\\n').replace(/\\n{3,}/g, '\\n\\n').trim();
+};
+const __browyQueryAll = (sel) => {
+  const found = [];
+  const visit = (r) => {
+    for (const el of r.querySelectorAll(sel)) found.push(el);
+    for (const x of r.querySelectorAll('*')) if (x.shadowRoot) visit(x.shadowRoot);
+  };
+  visit(document);
+  return found;
+};
+`;
 
 register({
   def: {
@@ -743,12 +1306,17 @@ register({
   },
   async run(_args, ctx) {
     const { result } = await ctx.cdp.send('Runtime.evaluate', {
-      expression: `JSON.stringify({
-        url: location.href,
-        title: document.title,
-        meta: document.querySelector('meta[name="description"]')?.content || '',
-        text: document.body?.innerText?.slice(0, 2000) || ''
-      })`,
+      expression: `(() => {
+        ${TEXT_JS}
+        let text = '';
+        try { text = __browyText(document, 2500); } catch (_) { text = document.body?.innerText || ''; }
+        return JSON.stringify({
+          url: location.href,
+          title: document.title,
+          meta: document.querySelector('meta[name="description"]')?.content || '',
+          text: text.slice(0, 2000)
+        });
+      })()`,
       returnByValue: true,
     });
     return result.value as string;
@@ -828,18 +1396,78 @@ register({
   },
 });
 
+const EXTRACT_DEFAULT_CHARS = 20_000;
+const EXTRACT_MAX_CHARS = 100_000;
+
 register({
   def: {
-    type: 'function', name: 'extract_text', description: 'Extract visible text from page or element (max 4000 chars).',
-    parameters: { type: 'object', properties: { selector: { type: 'string', description: 'Optional CSS selector' } }, required: [] },
+    type: 'function', name: 'extract_text',
+    description: 'Read the text of the page, or of each element matching a CSS selector, including text inside open shadow roots. Returns up to 20000 characters by default (max_chars up to 100000); a truncated result says where to continue (next_start). A selector is matched in the page and inside every open shadow root and gives one item per match, so "li" or "article" reads a list item by item; it waits up to 3 s for a match to appear.',
+    parameters: { type: 'object', properties: {
+      selector: { type: 'string', description: 'Optional CSS selector. Each match is one item.' },
+      max_chars: { type: 'number', description: 'Most characters to return (default 20000, up to 100000).' },
+      start: { type: 'number', description: 'Where to continue a truncated result: a character offset into the page text, or with a selector, how many matches to skip.' },
+    }, required: [] },
   },
   async run(args, ctx) {
-    const sel = args.selector ? String(args.selector).replace(/'/g, "\\'") : '';
-    const expr = sel
-      ? `JSON.stringify({ text: (document.querySelector('${sel}')?.innerText || 'Not found').slice(0, 4000) })`
-      : `JSON.stringify({ text: document.body?.innerText?.slice(0, 4000) || '' })`;
-    const { result } = await ctx.cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true });
-    return result.value as string;
+    const sel = typeof args.selector === 'string' ? args.selector.trim() : '';
+    const askedMax = Math.floor(Number(args.max_chars));
+    const max = Math.min(EXTRACT_MAX_CHARS, askedMax > 0 ? askedMax : EXTRACT_DEFAULT_CHARS);
+    const start = Math.max(0, Math.floor(Number(args.start) || 0));
+    if (!sel) {
+      const r = await evalJson<{ url: string; title: string; text: string }>(ctx, `(() => {
+        ${TEXT_JS}
+        let text = '';
+        try { text = __browyText(document, ${start + max + 1000}); } catch (_) { text = document.body ? document.body.innerText : ''; }
+        return JSON.stringify({ url: location.href, title: document.title, text });
+      })()`, 20_000);
+      const all = String(r.text || '');
+      const text = all.slice(start, start + max);
+      const more = all.length > start + max;
+      return JSON.stringify({ url: r.url, title: r.title, text, ...(more ? { truncated: true, next_start: start + max } : {}) });
+    }
+    const expr = `(() => {
+      ${TEXT_JS}
+      let els;
+      try { els = __browyQueryAll(${JSON.stringify(sel)}); }
+      catch (e) { return JSON.stringify({ bad: String((e && e.message) || e) }); }
+      const items = [];
+      let size = 0;
+      for (let i = ${start}; i < els.length && size < ${max}; i++) {
+        let t = '';
+        try { t = __browyText(els[i], ${max} - size + 200); } catch (_) { t = els[i].innerText || els[i].textContent || ''; }
+        t = String(t).trim();
+        items.push(t);
+        size += t.length;
+      }
+      return JSON.stringify({ url: location.href, title: document.title, matches: els.length, items });
+    })()`;
+    type Found = { bad?: string; url: string; title: string; matches: number; items: string[] };
+    let r = await evalJson<Found>(ctx, expr, 20_000);
+    // Single-page apps render after load: give the selector a moment.
+    for (const t0 = Date.now(); !r.bad && r.matches === 0 && Date.now() - t0 < 3000; ) {
+      await sleep(300);
+      r = await evalJson<Found>(ctx, expr, 20_000);
+    }
+    if (r.bad) throw new Error(`"${sel}" isn't a valid CSS selector (${r.bad}).`);
+    if (r.matches === 0) throw new Error(`Nothing matches "${sel}" in the page or its open shadow roots, after waiting 3 s. Check the selector, or call extract_text without one to read the whole page.`);
+    const items: string[] = [];
+    let size = 0;
+    let cut = false;
+    for (const t of r.items) {
+      if (size + t.length > max) { items.push(t.slice(0, Math.max(0, max - size))); cut = true; break; }
+      items.push(t);
+      size += t.length;
+    }
+    const shownUpTo = start + items.length;
+    const nextStart = cut ? (items.length > 1 ? shownUpTo - 1 : undefined) : (shownUpTo < r.matches ? shownUpTo : undefined);
+    return JSON.stringify({
+      url: r.url, title: r.title, selector: sel, matches: r.matches,
+      ...(start ? { start } : {}),
+      items,
+      ...(cut || nextStart != null ? { truncated: true } : {}),
+      ...(nextStart != null ? { next_start: nextStart } : {}),
+    });
   },
 });
 
@@ -873,28 +1501,80 @@ register({
   },
 });
 
+/** The code as one expression, so its value can come back like in the
+ *  console, or null when it's statements. Only compiled here, never run. */
+const AsyncFunction = (async () => {}).constructor as new (body: string) => unknown;
+function asExpression(code: string): string | null {
+  const src = code.trim().replace(/;+$/, '').trim();
+  if (!src || /^(const|let|var|function|class|if|for|while|do|switch|try|return|throw|import|export)\b/.test(src)) return null;
+  try { new AsyncFunction(`return (\n${src}\n);`); return src; } catch { return null; }
+}
+
+/** After the code started a navigation, or the page navigated while it ran:
+ *  wait for the new page and say where the tab ended up. */
+async function afterNavigation(ctx: BrowserToolContext, token: string, result: string | undefined, interrupted: string): Promise<string> {
+  const w = await waitForDocument(ctx, { token, timeoutMs: 15_000 });
+  const extra = result !== undefined && result !== 'undefined' ? { result: result.slice(0, 4000) } : {};
+  if (w.blocked) throw new Error(`The code sent the tab to a page Browy can't control. ${w.blocked}`);
+  if (w.state && !w.state.same) {
+    return JSON.stringify({
+      navigated: true, url: w.state.url, title: w.state.title, ...extra,
+      ...(interrupted ? { note: 'The page navigated while the code was still running, so its return value is lost.' } : {}),
+      ...(w.timedOut ? { loading: true } : {}),
+    });
+  }
+  if (w.state?.intercepted) return JSON.stringify({ navigated: true, sameDocument: true, url: w.state.url, title: w.state.title, ...extra });
+  if (w.cancelled) {
+    return JSON.stringify({ navigated: false, url: w.state?.url, ...extra, note: 'The code started a navigation that didn\'t replace the page (a download, an empty response, or it was cancelled).' });
+  }
+  if (interrupted) throw new Error(`The page navigated or closed while the code ran (${interrupted}), and Browy couldn't read the new page within 15 s${w.error ? ` (${w.error})` : ''}.`);
+  return JSON.stringify({ navigated: false, url: w.state?.url, ...extra, note: `The code started loading ${w.state?.nav?.url || 'another page'}, but the tab still shows the old page after 15 s. Check it with get_page_info.` });
+}
+
 register({
   def: {
-    type: 'function', name: 'evaluate_js', description: `Execute JavaScript code in the browser page context. Use this for ANY custom browser action — composing complex DOM queries, automating multi-step UI flows, extracting structured data, or doing anything the pre-built tools can't handle. The code runs in the page with full DOM access. Return data by making the last expression a value. For async work, use await (top-level await is supported).`,
-    parameters: { type: 'object', properties: { code: { type: 'string', description: 'JavaScript code to execute in the page. Can use await. Return data as the last expression.' } }, required: ['code'] },
+    type: 'function', name: 'evaluate_js', description: `Run JavaScript in the page, with full DOM access. The code is the body of an async function: await works, and \`return\` sends back a value (JSON, up to 6000 chars); a lone expression is returned without return. If the code navigates (location.assign, location.reload, a form submit or a link click), the answer is {"navigated": true, "url", "title"} once the new page has loaded, so don't wait or catch errors for that yourself. Prefer navigate, the [N] index tools and extract_text, which also reach into open shadow roots; use this for what they can't do.`,
+    parameters: { type: 'object', properties: { code: { type: 'string', description: 'JavaScript to run in the page. Use return for the value you want, or pass a single expression.' } }, required: ['code'] },
   },
   async run(args, ctx) {
-    const code = String(args.code);
-    // Wrap in async IIFE for top-level await support
-    const wrapped = `(async () => { ${code} })()`;
-    const { result, exceptionDetails } = await ctx.cdp.send('Runtime.evaluate', {
-      expression: wrapped,
-      returnByValue: true,
-      awaitPromise: true,
-      timeout: 30_000,
-    });
-    if (exceptionDetails) {
-      const errMsg = exceptionDetails.exception?.description || exceptionDetails.text || 'JS execution error';
+    const code = String(args.code ?? '');
+    const token = newToken();
+    const expression = asExpression(code);
+    const body = expression != null ? `return (\n${expression}\n);` : code;
+    // The code is on lines of its own, so a trailing // comment can't swallow
+    // the wrapper. __browyArm marks this document and notes any navigation
+    // the code starts.
+    const wrapped = `(() => {
+${ARM_JS}
+__browyArm(${JSON.stringify(token)});
+return (async () => {
+${body}
+})().then((v) => ({ v, nav: window.__browyNav || null }));
+})()`;
+    let res: { result?: { value?: { v?: unknown; nav?: { failed?: boolean } | null } }; exceptionDetails?: { text?: string; exception?: { description?: string } } };
+    try {
+      res = await ctx.cdp.send('Runtime.evaluate', {
+        expression: wrapped,
+        returnByValue: true,
+        awaitPromise: true,
+        timeout: 30_000,
+      }) as typeof res;
+    } catch (e) {
+      // Up to 0.1.13 this came back as a failure, though the navigation
+      // usually was the point of the code.
+      const raw = errText(e);
+      if (!NAV_ERROR_RE.test(raw)) throw e;
+      return afterNavigation(ctx, token, undefined, raw);
+    }
+    if (res.exceptionDetails) {
+      const errMsg = res.exceptionDetails.exception?.description || res.exceptionDetails.text || 'JS execution error';
       return JSON.stringify({ error: errMsg.slice(0, 2000) });
     }
-    const val = result.value;
-    const str = typeof val === 'string' ? val : JSON.stringify(val);
-    return (str ?? 'undefined').slice(0, 6000);
+    const val = res.result?.value?.v;
+    const str = (typeof val === 'string' ? val : JSON.stringify(val)) ?? 'undefined';
+    const nav = res.result?.value?.nav;
+    if (nav && !nav.failed) return afterNavigation(ctx, token, str, '');
+    return str.slice(0, 6000);
   },
 });
 
@@ -1011,6 +1691,7 @@ stdout is captured and returned. Use console.log() for output. Timeout 30s, outp
 });
 
 register({
+  serial: true,
   def: {
     type: 'function', name: 'press_key',
     description: 'Press a keyboard key or key combination in the browser. Useful for keyboard shortcuts, Enter to submit, Escape to close, arrow keys, etc.',
@@ -1133,13 +1814,15 @@ register({
     }, required: [] },
   },
   async run(args, ctx) {
-    const url = args.url ? String(args.url) : 'about:blank';
+    const url = args.url ? String(args.url).trim() : '';
     const doSwitch = String(args.switch ?? 'true') !== 'false';
-    const context = ctx.browser.contexts()[0];
-    const page = await context.newPage();
-    if (url !== 'about:blank') {
-      await page.goto(url, { waitUntil: 'load', timeout: 15_000 }).catch(() => {});
+    if (url && url !== 'about:blank') {
+      const blocked = blockedPageReason(url);
+      if (blocked) throw new Error(blocked);
+      const r = await openInNewTab(ctx, url, doSwitch);
+      return JSON.stringify({ success: true, ...r, switched: doSwitch });
     }
+    const page = await ctx.browser.contexts()[0].newPage();
     if (doSwitch) await ctx.setActivePage(page);
     let title = '';
     try { title = await page.title(); } catch {}
@@ -2011,6 +2694,7 @@ register({
 // ── focus_index: trigger native focus (e.g. so password autofill fires) ───
 
 register({
+  serial: true,
   def: {
     type: 'function', name: 'focus_index',
     description: `Focus the input at index [N] using a real CDP-driven focus. Unlike type_index (which uses a setter that bypasses Chrome autofill), this triggers native focus events — useful when you want the browser's saved-password autofill to kick in. Follow with press_key("Tab") to commit autofill, then re-inspect the page.`,
