@@ -2,7 +2,8 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.14]: chats straight from Copilot, tools that handle real sites, and recovery from drops
+*Released 2026-10-16*
 
 ### Changed
 
