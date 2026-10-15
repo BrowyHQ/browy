@@ -251,14 +251,37 @@ export class Runner {
         return;
 
       case 'chat.list': {
-        const chats = await this.agent.listChats();
-        transport.send({ type: 'chat.list.result', chats });
+        const route = this.replyRoute(msg);
+        try {
+          if (msg.progressive) {
+            const chats = await this.agent.listChats((fast) => {
+              transport.send({ type: 'chat.list.result', chats: fast, complete: false, ...route });
+            });
+            transport.send({ type: 'chat.list.result', chats, complete: true, ...route });
+          } else {
+            const chats = await this.agent.listChats();
+            transport.send({ type: 'chat.list.result', chats, ...route });
+          }
+        } catch (e) {
+          transport.send({ type: 'chat.list.result', chats: [], complete: true, error: e instanceof Error ? e.message : String(e), ...route });
+        }
         return;
       }
 
       case 'chat.history': {
-        const messages = await this.agent.getChatMessages(msg.id);
-        transport.send({ type: 'chat.history.result', id: msg.id, messages });
+        const route = this.replyRoute(msg);
+        try {
+          if (msg.items) {
+            const page = await this.agent.getHistory(String(msg.id || ''), { limit: msg.limit, before: msg.before });
+            transport.send({ type: 'chat.history.result', id: msg.id, ...page, ...route });
+          } else {
+            const messages = await this.agent.getChatMessages(msg.id);
+            transport.send({ type: 'chat.history.result', id: msg.id, messages, ...route });
+          }
+        } catch (e) {
+          const error = e instanceof Error ? e.message : String(e);
+          transport.send({ type: 'chat.history.result', id: msg.id, ...(msg.items ? { items: [] } : { messages: [] }), error, ...route });
+        }
         return;
       }
 
@@ -285,6 +308,18 @@ export class Runner {
         return;
       }
     }
+  }
+
+  /** Where a chat.list / chat.history reply goes. A 0.1.14 side panel names
+   *  its own session, so the reply reaches that panel alone; anything else
+   *  is broadcast to every panel, as before, and the request id lets a panel
+   *  pick out its own replies. A session this host doesn't know (already
+   *  ended) is not used for routing, or the reply would be dropped. */
+  private replyRoute(msg: { reqId?: unknown; sessionId?: unknown }): { reqId?: string; sessionId?: string } {
+    const route: { reqId?: string; sessionId?: string } = {};
+    if (typeof msg.reqId === 'string' && msg.reqId) route.reqId = msg.reqId.slice(0, 64);
+    if (typeof msg.sessionId === 'string' && this.sessions.has(msg.sessionId)) route.sessionId = msg.sessionId;
+    return route;
   }
 
   private async onSessionStart(transport: Transport, msg: SessionStart): Promise<void> {
