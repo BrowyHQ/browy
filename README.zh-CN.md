@@ -88,8 +88,8 @@ curl -fsSL https://github.com/BrowyHQ/browy/releases/latest/download/install.sh 
 
 完成了。试试[第一次对话](https://browyhq.github.io/zh-cn/first-chat/)里的五个具体例子。
 
-> **从中国大陆访问？** GitHub Releases 和 `api.githubcopilot.com` 都可达但偏慢。参见[中国开发者指南](https://browyhq.github.io/zh-cn/china-setup/)里的
-> `BROWY_RELEASE_URL` 镜像方案和延迟说明。
+> **从中国大陆访问？** 视网络情况，GitHub Releases 和 `api.githubcopilot.com` 可能很慢，甚至无法访问。[中国开发者指南](https://browyhq.github.io/zh-cn/china-setup/)
+> 介绍了如何用自己下载的发布文件安装，并附有延迟说明。
 
 ---
 

@@ -86,7 +86,7 @@ Click **Sign in to GitHub Copilot** in the side panel. A terminal window opens w
 
 That's it. Try [your first chat](https://browyhq.github.io/first-chat/) for five concrete examples.
 
-> **From mainland China?** GitHub Releases and `api.githubcopilot.com` are both reachable but slow. See the [China setup guide](https://browyhq.github.io/china-setup/) for the `BROWY_RELEASE_URL` mirror pattern and a latency note.
+> **From mainland China?** GitHub Releases and `api.githubcopilot.com` can be slow or unreachable, depending on your network. The [China setup guide](https://browyhq.github.io/china-setup/) shows how to install from a release file you downloaded yourself, plus a latency note.
 
 ---
 

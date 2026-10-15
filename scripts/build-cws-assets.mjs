@@ -296,11 +296,11 @@ function composeOutroCard() {
   const mascotY = 120;
 
   const head = drawWord('TRY IT', 20, C.brandLite, 1);
-  const url1 = drawWord('BROWY.DEV',                 12, C.brandSoft, 1);
+  const url1 = drawWord('BROWYHQ.GITHUB.IO',         12, C.brandSoft, 1);
   const url2 = drawWord('GITHUB.COM SLASH BROWYHQ',  8,  C.inkDim, 1);
 
   const headW = (6 * 5 + 5) * 20;
-  const u1W   = (9  * 5 + 8) * 12;
+  const u1W   = (17 * 5 + 16) * 12;
   const u2W   = (24 * 5 + 23) * 8;
 
   const headY = mascotY + mascotSize + 70;
