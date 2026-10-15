@@ -122,6 +122,25 @@ export interface CdpEventFromClient {
   params: unknown;
 }
 
+/** The extension lost chrome.debugger on a tab: the tab closed, the user
+ *  clicked Cancel on Chrome's debugging bar, DevTools took over, or similar.
+ *  Calls the extension was still running on the tab have already been
+ *  answered with `message`; `failed` counts this session's. Hosts before
+ *  0.1.14 ignore it. */
+export interface CdpDetached {
+  type: 'cdp.detached';
+  sessionId: string;
+  tabId: number;
+  /** chrome.debugger.onDetach's reason (target_closed, canceled_by_user,
+   *  replaced_with_devtools, ...), or 'unknown' when Chrome gave none. */
+  reason: string;
+  /** The tab itself is gone, not just the debugger. */
+  tabGone?: boolean;
+  /** What the model is told. */
+  message?: string;
+  failed?: number;
+}
+
 export interface AuthSignin {
   type: 'auth.signin';
 }
@@ -162,6 +181,7 @@ export type ClientMessage =
   | HistoryClear
   | ToolResult
   | CdpEventFromClient
+  | CdpDetached
   | AuthSignin
   | ListModels
   | SetModel
@@ -210,6 +230,10 @@ export interface ChatToolCallEnd {
   durationMs?: number;
 }
 
+/** Why a turn ended early without the user pressing Stop: the computer went
+ *  to sleep, or the Copilot runtime quit. */
+export type InterruptReason = 'sleep' | 'copilot';
+
 export interface ChatDone {
   type: 'chat.done';
   sessionId: string;
@@ -217,6 +241,9 @@ export interface ChatDone {
   toolCalls: ToolCallRecord[];
   /** The user pressed Stop; `text` is what the agent had said by then. */
   stopped?: boolean;
+  /** Set with `stopped` when the turn was cut short for this reason. `text`
+   *  then ends with a note saying so, which older panels show as is. */
+  interrupted?: InterruptReason;
 }
 
 /** One agent serves every panel. A chat sent while another panel's chat is
@@ -323,6 +350,14 @@ export interface SdkReady {
   detail?: string;
 }
 
+/** Broadcast while the Copilot runtime is being restarted after it quit, and
+ *  once it is back. Panels show it as a status line; older ones ignore it. */
+export interface HostStatus {
+  type: 'host.status';
+  state: 'copilot_restarting' | 'copilot_ready' | 'copilot_failed';
+  detail?: string;
+}
+
 export interface ModelsList {
   type: 'models.list';
   models: ModelOption[];
@@ -403,6 +438,7 @@ export type ServerMessage =
   | ActivityEvent
   | AuthStatus
   | SdkReady
+  | HostStatus
   | ModelsList
   | CurrentModel
   | BrowsersStatusEvt
@@ -444,5 +480,9 @@ export interface Transport {
  *       may or may not speak them, and all of them report serverVersion "0.3.0".
  *   2 — 0.1.7: guarantees `sdk.ready` and `chat.delete`, and serverVersion is
  *       the real package version.
+ *
+ * 0.1.14 added `cdp.detached` (extension to host), `host.status` and
+ * `chat.done.interrupted` (host to extension) without a bump: each side works
+ * as before when the other doesn't send them, so nothing relies on them.
  */
 export const PROTOCOL_VERSION = 2;

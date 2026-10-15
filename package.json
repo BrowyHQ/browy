@@ -20,7 +20,7 @@
     "build:prod": "cross-env BA_PROD=1 node build.mjs",
     "start": "node dist/cli-bin.js",
     "test": "node tests/run.mjs",
-    "test:unit": "node tests/sidepanel-boot-state.mjs && node tests/session-routing.mjs && node tests/onboarding.mjs && node tests/copilot-cli.mjs && node tests/recent-actions.mjs && node tests/tool-policy.mjs && node tests/turn-text.mjs && node tests/turn-control.mjs",
+    "test:unit": "node tests/sidepanel-boot-state.mjs && node tests/session-routing.mjs && node tests/onboarding.mjs && node tests/copilot-cli.mjs && node tests/recent-actions.mjs && node tests/tool-policy.mjs && node tests/turn-text.mjs && node tests/turn-control.mjs && node tests/debugger-detach.mjs && node tests/copilot-loss.mjs",
     "repl": "node tests/repl.mjs",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build:prod",

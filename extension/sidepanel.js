@@ -998,6 +998,160 @@ function markHostDown() {
   } catch {}
 }
 
+// ── Connection status ──────────────────────────────────────────────────────
+//
+// A one-line banner for what Browy recovers from by itself: the backend
+// reconnecting, Copilot restarting, the computer having slept, or Chrome
+// taking the debugger off a tab. Each clears once things are healthy again.
+// Kept to this block so the rest of the panel doesn't need to know.
+const connStatus = (() => {
+  const TEXT = {
+    reconnecting: "Browy's backend restarted. Reconnecting…",
+    copilot: 'Copilot quit, so Browy is restarting it…',
+    copilotFailed: "Copilot couldn't restart. Send a message to try again.",
+    slept: 'Your computer went to sleep, so the task stopped. Say continue to pick it up.',
+    canceled: "You clicked Cancel on Chrome's debugging bar. Ask Browy to try again and it reattaches.",
+    tabGone: 'The tab Browy was working in was closed.',
+    tabBlocked: "The tab went to a page Browy can't work on.",
+    detached: 'Browy lost the tab for a moment. It reattaches on the next step.',
+  };
+  const BACKEND_NOTE = '_The backend restarted, so this task stopped. The chat is saved._';
+  // Most important first; one line shows at a time.
+  const ORDER = ['reconnecting', 'copilot', 'detached', 'slept'];
+  const active = new Map();
+  let el = null;
+  let losses = 0;
+
+  function banner() {
+    if (el && document.contains(el)) return el;
+    el = document.createElement('div');
+    el.id = 'statusBanner';
+    el.className = 'conn-banner warn';
+    el.setAttribute('role', 'status');
+    el.setAttribute('aria-live', 'polite');
+    const anchor = document.getElementById('connBanner');
+    if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(el, anchor.nextSibling);
+    else document.body.prepend(el);
+    return el;
+  }
+  function render() {
+    const kind = ORDER.find((k) => active.has(k));
+    const b = banner();
+    if (kind) b.textContent = active.get(kind);
+    b.classList.toggle('show', !!kind);
+  }
+  function set(kind, text) { active.set(kind, text); render(); }
+  function clear(...kinds) {
+    let changed = false;
+    for (const k of kinds) changed = active.delete(k) || changed;
+    if (changed) render();
+  }
+
+  // End the running turn in the chat with `text` (what was said, then a
+  // note), the way Stop does but without Stop's own note.
+  function endTurn(text) {
+    try { markStopped(); } catch {}
+    try { reconcileFinal(text); } catch {}
+    try { setBusy(false); } catch {}
+    try { pose('idle', 400); } catch {}
+    try { persistChatSoon(); } catch {}
+  }
+  function endTurnForRestart() {
+    if (!busy) return;
+    const said = typeof liveText === 'string' ? liveText.trim() : '';
+    endTurn((said ? said + '\n\n' : '') + BACKEND_NOTE);
+  }
+
+  // After a sleep, check the service worker still answers and this chat is
+  // still registered, rather than wait for the user to find out.
+  let lastTick = Date.now();
+  let pongTimer = null;
+  setInterval(() => {
+    const now = Date.now();
+    const gap = now - lastTick;
+    lastTick = now;
+    if (gap > 30_000 && bgPort && !onboardMode) {
+      clearTimeout(pongTimer);
+      pongTimer = setTimeout(() => {
+        // No answer: the port died without telling us. Start a new one.
+        pongTimer = null;
+        endTurnForRestart();
+        try { bgPort && bgPort.disconnect(); } catch {}
+        bgPort = null;
+        sessionReady = false;
+        connect();
+      }, 5_000);
+      browyPost({ type: '__ping' });
+    }
+  }, 5_000);
+
+  return {
+    /** The native host went away. True while a reconnect is worth waiting
+     *  for; after a few in a row, false, so the reinstall hint shows. */
+    hostLost() {
+      endTurnForRestart();
+      if (++losses > 3) { clear('reconnecting'); return false; }
+      set('reconnecting', TEXT.reconnecting);
+      return true;
+    },
+    /** The port to the service worker closed, which takes the host with it. */
+    portLost() {
+      endTurnForRestart();
+    },
+    /** Sees every message first. True means it was handled here. */
+    onMessage(raw) {
+      if (!raw || typeof raw !== 'object') return false;
+      const mine = raw.sessionId === BROWY_SESSION_ID;
+      switch (raw.type) {
+        case 'session.ready':
+          losses = 0;
+          clear('reconnecting');
+          return false;
+        case '__pong':
+          clearTimeout(pongTimer);
+          pongTimer = null;
+          if (!raw.nativeReady) browyPost({ type: '__retry_host' });
+          else if (!sessionReady) startSession();
+          return true;
+        case 'host.status':
+          if (raw.state === 'copilot_restarting') set('copilot', TEXT.copilot);
+          else if (raw.state === 'copilot_failed') set('copilot', TEXT.copilotFailed);
+          else clear('copilot');
+          return true;
+        case '__debugger_detached':
+          if (mine && busy) {
+            set('detached', raw.reason === 'canceled_by_user' ? TEXT.canceled
+              : raw.tabGone ? TEXT.tabGone
+              : raw.reason === 'target_closed' ? TEXT.tabBlocked
+              : TEXT.detached);
+          }
+          return true;
+        case '__debugger_attached':
+          if (mine) clear('detached');
+          return true;
+        case 'event.activity':
+          // A new turn: what happened before it is old news.
+          if (mine && raw.event === 'status.thinking') clear('slept', 'detached');
+          return false;
+        case 'chat.done':
+          if (!mine) return false;
+          if (!raw.interrupted) {
+            clear('slept', 'copilot');
+            // The model has had its say about the tab; a Cancel stays up
+            // until the next message, which is what lifts it.
+            if (active.get('detached') !== TEXT.canceled) clear('detached');
+            return false;
+          }
+          endTurn(raw.text || '');
+          if (raw.interrupted === 'sleep') set('slept', TEXT.slept);
+          return true;
+        default:
+          return false;
+      }
+    },
+  };
+})();
+
 function connect() {
   // Hard-fail fast if our context is dead — full page reload picks up the
   // freshly-installed extension code + a working chrome.runtime.
@@ -1019,6 +1173,7 @@ function connect() {
   }
   ws = wsShim;
   bgPort.onMessage.addListener((raw) => {
+    if (connStatus.onMessage(raw)) return;
     if (raw.type === '__host_ready') {
       reconnectAttempts = 0;
       const cameFromOnboarding = hideOnboarding();
@@ -1072,6 +1227,7 @@ function connect() {
       return;
     }
     if (raw.type === '__host_error' || raw.type === '__host_disconnected') {
+      const reconnecting = raw.type === '__host_disconnected' && !onboardMode && connStatus.hostLost();
       markHostDown();
       if (onboardMode) {
         // Found a host but it died starting up. After a disconnect the service
@@ -1082,6 +1238,7 @@ function connect() {
         setOnboardPhase('crashed');
         return;
       }
+      if (reconnecting) return;
       try {
         showConnBanner('Host disconnected. Retrying…', {
           warn: true,
@@ -1156,6 +1313,7 @@ function connect() {
     if (legacy) handle(legacy);
   });
   bgPort.onDisconnect.addListener(() => {
+    connStatus.portLost();
     sessionReady = false;
     sdkReady = false;
     bgPort = null;

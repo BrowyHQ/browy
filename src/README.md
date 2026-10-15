@@ -63,7 +63,8 @@ src/
 │   ├── foreground.ts      ← OS focus detection (which Chromium window is on top)
 │   ├── llm.ts             ← optional standalone LLM bridge (legacy)
 │   ├── page-snapshot.ts   ← indexed [N] page snapshot (the model's "eyes")
-│   └── runner.ts          ← per-port lifecycle, message routing
+│   ├── runner.ts          ← per-port lifecycle, message routing
+│   └── wake-watch.ts      ← notices the computer sleeping, so a running task stops cleanly
 └── transports/
     ├── native-messaging.ts ← stdio length-prefixed JSON framer
     └── ws.ts               ← optional WebSocket transport (for CLI/dev)

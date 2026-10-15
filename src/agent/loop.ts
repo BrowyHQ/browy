@@ -1,4 +1,5 @@
 import type { Config, ToolCallRecord, WSMessage, CdpEndpoint } from '../types.js';
+import type { InterruptReason } from '../protocol.js';
 import { getAllTools, type BrowserToolContext } from './tools/browser.js';
 import { ensureSnapshot, serializeSnapshot } from './page-snapshot.js';
 import { chromium, type Browser, type CDPSession, type Page } from 'playwright-core';
@@ -9,6 +10,7 @@ import { copilotClientOptions, resolveCopilotCli } from './copilot-cli.js';
 import { RecentActions } from './recent-actions.js';
 import { OPT_IN_TOOLS, toolPolicy } from './tool-policy.js';
 import { TurnText } from './turn-text.js';
+import type { WakeWatch } from './wake-watch.js';
 
 // Copilot SDK is CJS — use require
 import { createRequire } from 'module';
@@ -78,7 +80,7 @@ function isBrowySession(s: any): boolean {
 function cleanChatSummary(s: string | undefined): string | undefined {
   if (!s) return s;
   let out = s;
-  const tags = ['browser_context', 'page_snapshot', 'recent_actions', 'page_stats', 'page_info'];
+  const tags = ['browser_context', 'page_snapshot', 'recent_actions', 'page_stats', 'page_info', 'browy_note'];
   // 1. Strip closed pairs.
   for (const t of tags) {
     out = out.replace(new RegExp(`<${t}>[\\s\\S]*?</${t}>`, 'g'), '');
@@ -207,15 +209,33 @@ interface BrowserConnection {
 
 /** The turn in flight, so abort() can end it. `stop` is set once the turn is
  *  listening for SDK events; `stopped` records that Stop was pressed; `halt`
- *  ends whatever setup step the turn is waiting on. */
+ *  ends whatever setup step the turn is waiting on. `interrupted` says the
+ *  turn was cut short by a sleep or by Copilot quitting, not by Stop. */
 interface TurnControl {
   stopped: boolean;
   stop: (() => void) | null;
   halt: () => void;
+  interrupted?: InterruptReason;
+}
+
+/** What chat() returns. */
+export interface ChatResult {
+  text: string;
+  toolCalls: ToolCallRecord[];
+  stopped?: boolean;
+  interrupted?: InterruptReason;
 }
 
 /** Thrown inside chat() when Stop ends a setup step. */
 const STOPPED = Symbol('stopped');
+
+/** Added to the next message in a chat whose last turn was cut short, so a
+ *  "continue" doesn't blindly redo a step that already went through. */
+const MODEL_NOTES: Record<InterruptReason, string> = {
+  sleep: "Your previous turn in this chat was cut short because the user's computer went to sleep.",
+  copilot: 'Your previous turn in this chat was cut short because the Copilot runtime quit unexpectedly.',
+};
+const MODEL_NOTE_CAUTION = 'If you carry on with that task, check the page first. Before you redo a step that submits, sends, posts or buys something, make sure it did not already go through.';
 
 /** How long a tool request may go unanswered before the turn answers it with
  *  an error, so the model can carry on. Each call to the browser already
@@ -298,6 +318,22 @@ export class Agent {
   private sessionSuspect = false;
   /** The ensureSession() in flight, so a chat is never resumed twice at once. */
   private sessionOpening: Promise<void> | null = null;
+  /** Shared with the runner: notices the computer sleeping. */
+  private wake: WakeWatch | null = null;
+  /** True once Copilot has started; after that a missing client means it
+   *  quit and gets started again. */
+  private copilotStarted = false;
+  /** The Copilot restart in flight, shared by everyone waiting on it. */
+  private copilotRestart: Promise<void> | null = null;
+  /** When Copilot quit lately, to stop restarting a runtime that keeps dying. */
+  private copilotLosses: number[] = [];
+  /** CLI processes already watched for exit. */
+  private watchedCli = new WeakSet<object>();
+  /** disconnect() was called: Copilot stopping now is expected. */
+  private shuttingDown = false;
+  /** Chats whose last turn was cut short, and why. Their next turn tells the
+   *  model (MODEL_NOTES). */
+  private interruptedChats = new Map<string, InterruptReason>();
 
   constructor(config: Config) {
     this.config = config;
@@ -509,6 +545,8 @@ export class Agent {
     console.log(`  Copilot CLI: ${resolveCopilotCli() || '(SDK bundled runtime)'}`);
     this.copilotClient = new CopilotClient(cliOptions);
     await this.copilotClient.start();
+    this.copilotStarted = true;
+    this.watchCopilot(this.copilotClient);
     // Sweep stale BrowserAgent sessions left over from previous runs
     // (crashes, kill -9, etc.) so they don't accumulate on disk.
     // Sessions persist across host restarts (so the side panel can reload and
@@ -539,6 +577,107 @@ export class Agent {
     // delete anything older than 30 days. User-CLI sessions are untouched.
     if (!process.env.BROWY_NO_PRUNE) this.pruneOldBrowySessions().catch(() => {});
     console.log('  ✅ Copilot SDK ready');
+  }
+
+  /** Shared with the runner. Timers that act on a long wait ask it first,
+   *  so a sleep is reported as a sleep and not as a timeout. */
+  setWakeWatch(w: WakeWatch | null): void {
+    this.wake = w;
+  }
+
+  /** After a sleep: is Copilot still answering? A ping that fails or hangs
+   *  means the connection is gone, and Copilot restarts now rather than
+   *  failing the next message. */
+  async checkCopilot(): Promise<void> {
+    const client = this.copilotClient;
+    if (!client || this.copilotRestart) return;
+    const ok = await withDeadline(Promise.resolve().then(() => client.ping('browy')).then(() => true), 10_000, false);
+    if (!ok) this.copilotLost(client, 'it stopped answering after the computer slept');
+  }
+
+  /** Watch the Copilot CLI the SDK spawned (SDK 1.0.21 keeps it on the
+   *  client as `cliProcess`). When it exits, the SDK only drops the session's
+   *  listeners, so without this a turn waited for the five-minute watchdog. */
+  private watchCopilot(client: any): void {
+    const child = client?.cliProcess;
+    if (!child || typeof child.once !== 'function' || this.watchedCli.has(child)) return;
+    this.watchedCli.add(child);
+    child.once('exit', (code: number | null, signal: string | null) => {
+      // The SDK starts a new CLI on the same client when a chat is opened
+      // after a disconnect. An older one exiting is old news then.
+      if (client.cliProcess && client.cliProcess !== child) return;
+      this.copilotLost(client, `the Copilot CLI exited (${signal || `code ${code}`})`);
+    });
+  }
+
+  /** Copilot quit, or the connection to it closed. End the turn it was
+   *  running, forget the dead chat handle and start Copilot again. The next
+   *  message resumes the chat from disk. */
+  private copilotLost(client: any, why: string): void {
+    if (this.shuttingDown || !client || client !== this.copilotClient) return;
+    console.log(`  ⚠ Copilot is gone: ${why}`);
+    this.copilotSession = null;
+    this.sessionSuspect = false;
+    const ctl = this.turn;
+    if (ctl && !ctl.stopped) {
+      ctl.interrupted ??= 'copilot';
+      ctl.stopped = true;
+      ctl.stop?.();
+      ctl.halt();
+    }
+    this.restartCopilot(why).catch(() => {});
+  }
+
+  /** Start a fresh Copilot client in place of the lost one. After three
+   *  losses in two minutes Browy stops restarting it by itself and leaves it
+   *  to the next message (`onDemand`). */
+  private restartCopilot(why: string, onDemand = false): Promise<void> {
+    if (this.copilotRestart) return this.copilotRestart;
+    const now = Date.now();
+    this.copilotLosses = this.copilotLosses.filter((t) => now - t < 120_000);
+    if (!onDemand) this.copilotLosses.push(now);
+    const old = this.copilotClient;
+    this.copilotClient = null;
+    this.copilotSession = null;
+    const stopOld = () => (old ? withDeadline(Promise.resolve().then(() => old.forceStop()), 5_000, undefined) : Promise.resolve());
+    if (!onDemand && this.copilotLosses.length >= 3) {
+      console.log('  ⚠ Copilot quit three times in two minutes; the next message starts it again');
+      this.emit({ type: 'host_status', state: 'copilot_failed', detail: 'Copilot keeps quitting. Browy starts it again with your next message.' });
+      void stopOld();
+      return Promise.resolve();
+    }
+    console.log('  ↻ restarting Copilot');
+    this.emit({ type: 'host_status', state: 'copilot_restarting', detail: why });
+    const restart = (async () => {
+      await stopOld();
+      const client = new CopilotClient(copilotClientOptions());
+      try {
+        await client.start();
+      } catch (e) {
+        await withDeadline(Promise.resolve().then(() => client.forceStop()), 5_000, undefined);
+        throw e;
+      }
+      if (this.shuttingDown) {
+        void Promise.resolve().then(() => client.forceStop()).catch(() => {});
+        return;
+      }
+      this.copilotClient = client;
+      this.watchCopilot(client);
+      console.log('  ✅ Copilot restarted');
+      this.emit({ type: 'host_status', state: 'copilot_ready' });
+    })();
+    const done: Promise<void> = restart.catch((e: unknown) => {
+      const m = e instanceof Error ? e.message : String(e);
+      console.log(`  ❌ Copilot did not restart: ${m}`);
+      this.emit({ type: 'host_status', state: 'copilot_failed', detail: m });
+      throw e;
+    }).finally(() => {
+      if (this.copilotRestart === done) this.copilotRestart = null;
+    });
+    this.copilotRestart = done;
+    // chat(), listChats() and the rest wait for this before using the client.
+    this.copilotReady = done;
+    return done;
   }
 
   private async pruneOldBrowySessions() {
@@ -794,6 +933,10 @@ export class Agent {
   }
 
   private async ensureSession() {
+    if (this.copilotSession?.disconnected) {
+      // The connection behind this handle closed while no turn was running.
+      this.copilotSession = null;
+    }
     if (this.sessionSuspect && this.copilotSession) {
       // The last turn stalled on this handle, or the SDK stopped dispatching
       // its tools. Detach it before resuming, so the detach can't land on the
@@ -835,9 +978,10 @@ export class Agent {
 
     // Try to resume an existing on-disk session for this Browy id. This is
     // what makes "reload the side panel and pick up where I left off" work.
+    const client = this.copilotClient;
     if (wantId) {
       try {
-        this.copilotSession = await this.copilotClient.resumeSession(wantId, {
+        const session = await client.resumeSession(wantId, {
           clientName: BROWSERAGENT_CLIENT_NAME,
           workingDirectory: BROWSERAGENT_WORKDIR,
           // The runtime does not keep the system message across a resume.
@@ -850,14 +994,19 @@ export class Agent {
           streaming: true,
           onPermissionRequest: approveAll,
         });
+        this.adoptSession(client, session);
         return;
-      } catch {
-        // Session doesn't exist (first run, or was cleared) — fall through
-        // and create a new one bound to this same id.
+      } catch (e) {
+        // Session doesn't exist (first run, or was cleared): fall through and
+        // create a new one bound to this same id. But not when Copilot went
+        // away mid-resume, which would start the chat over on top of the one
+        // still on disk.
+        const m = e instanceof Error ? e.message : String(e);
+        if (client !== this.copilotClient || /not connected|connection|disposed|exited|EPIPE|ECONNRESET/i.test(m)) throw e;
       }
     }
 
-    this.copilotSession = await this.copilotClient.createSession({
+    const session = await client.createSession({
       // Use the Browy protocol id as the SDK session id so reloads can resume.
       sessionId: wantId || undefined,
       // Identity so we can never collide with the user's `copilot` CLI sessions
@@ -875,18 +1024,41 @@ export class Agent {
       streaming: true,
       onPermissionRequest: approveAll,
     });
+    this.adoptSession(client, session);
   }
 
-  async chat(userText: string): Promise<{ text: string; toolCalls: ToolCallRecord[]; stopped?: boolean }> {
+  /** Keep a chat handle that just opened, unless Copilot was lost while it
+   *  opened, which leaves it dead on arrival. */
+  private adoptSession(client: any, session: any): void {
+    if (client !== this.copilotClient) {
+      Promise.resolve().then(() => session.disconnect()).catch(() => {});
+      throw new Error('Copilot quit while the chat was opening.');
+    }
+    this.copilotSession = session;
+    // Opening a chat after a disconnect makes the SDK start a new CLI.
+    this.watchCopilot(client);
+  }
+
+  /** A turn that ended early. One cut short by a sleep or by Copilot quitting
+   *  says why, and the chat's next turn tells the model (MODEL_NOTES). */
+  private stoppedTurn(ctl: TurnControl, chatKey: string, text: string): ChatResult {
+    if (!ctl.interrupted) return { text, toolCalls: [], stopped: true };
+    this.interruptedChats.set(chatKey, ctl.interrupted);
+    return { text, toolCalls: [], stopped: true, interrupted: ctl.interrupted };
+  }
+
+  async chat(userText: string): Promise<ChatResult> {
     // Registered before the first await, so a Stop that lands while the turn
     // is still being set up is not lost.
     let halt: () => void = () => {};
     const halted = new Promise<void>((resolve) => { halt = resolve; });
     const ctl: TurnControl = { stopped: false, stop: null, halt: () => halt() };
     this.turn = ctl;
-    const stoppedResult = () => {
+    const chatKey = this.chatKey();
+    let turnText: TurnText | null = null;
+    const stoppedResult = (): ChatResult => {
       this.emit({ type: 'status', status: 'idle' });
-      return { text: '', toolCalls: [] as ToolCallRecord[], stopped: true };
+      return this.stoppedTurn(ctl, chatKey, turnText?.text ?? '');
     };
     // A setup step ends at once when Stop is pressed, and after `ms` the turn
     // carries on with `fallback`. Until 0.1.13 a step that never finished
@@ -899,7 +1071,11 @@ export class Agent {
           p,
           halted.then((): T => { throw STOPPED; }),
           new Promise<T>((resolve) => {
-            timer = setTimeout(() => { console.log(`  ⏱ ${what} took over ${ms / 1000} s`); resolve(fallback); }, ms);
+            timer = setTimeout(() => {
+              // Coming out of a sleep, the time limit says nothing about the step.
+              if (!this.wake?.check()) console.log(`  ⏱ ${what} took over ${ms / 1000} s`);
+              resolve(fallback);
+            }, ms);
           }),
         ]);
         if (ctl.stopped) throw STOPPED;
@@ -910,6 +1086,13 @@ export class Agent {
     };
     try {
       await step('waiting for Copilot to start', this.whenCopilotReady(), 60_000, undefined);
+      // Copilot quit since the last turn and wasn't restarted then.
+      if (!this.copilotClient && this.copilotStarted) {
+        await step('restarting Copilot', this.restartCopilot('it was not running', true).catch(() => {}), 60_000, undefined);
+      }
+      if (!this.copilotClient && this.copilotStarted) {
+        throw new Error("Copilot quit and couldn't be started again. Try again in a moment.");
+      }
       if (!this.copilotClient) {
         throw new Error('Copilot SDK is not initialised yet — try again in a moment, or run /signin if this persists.');
       }
@@ -930,7 +1113,7 @@ export class Agent {
       }
     } catch (e) {
       if (this.turn === ctl) this.turn = null;
-      if (e === STOPPED) return stoppedResult();
+      if (e === STOPPED || ctl.interrupted) return stoppedResult();
       throw e;
     }
     this.emit({ type: 'status', status: 'thinking' });
@@ -980,11 +1163,16 @@ export class Agent {
       const contextBlock = contextLines.length
         ? `<browser_context>\n${contextLines.join('\n')}\n</browser_context>${snapshotBlock}\n${recentBlock}\n`
         : recentBlock ? `${recentBlock}\n` : '';
+      // The last turn in this chat was cut short: say so once, so "continue"
+      // checks before it repeats anything.
+      const cutShort = this.interruptedChats.get(chatKey);
+      if (cutShort) this.interruptedChats.delete(chatKey);
+      const noteBlock = cutShort ? `<browy_note>\n${MODEL_NOTES[cutShort]} ${MODEL_NOTE_CAUTION}\n</browy_note>\n` : '';
       // Put the user's actual text FIRST so the SDK's session-summary (which
       // truncates to ~100 chars) captures the user's intent rather than our
       // injected scaffolding. The model sees the same content either way.
-      const prompt = contextBlock
-        ? `${userText}\n\n${contextBlock}`
+      const prompt = contextBlock || noteBlock
+        ? `${userText}\n\n${contextBlock}${noteBlock}`
         : userText;
 
       // ── Stream-based send ────────────────────────────────────────────
@@ -993,7 +1181,9 @@ export class Agent {
       // and resolve when we see session.idle. This also lets us stream
       // assistant.message_delta chunks to the UI in real time.
       const session = this.copilotSession;
+      const client = this.copilotClient;
       const turn = new TurnText();
+      turnText = turn;
 
       const completion = new Promise<string>((resolve, reject) => {
         let unsub: (() => void) | null = null;
@@ -1011,6 +1201,9 @@ export class Agent {
         // Each request is handled once, even if the runtime delivers it again.
         const seenRequests = new Set<string>();
         const giveUpOnTool = (requestId: string, name: string) => {
+          // Coming out of a sleep, every deadline is overdue at once. The
+          // sleep stops the turn; the tool didn't time out.
+          if (this.wake?.check()) return;
           toolTimers.delete(requestId);
           const stepId = this.toolSteps.get(requestId);
           const limit = TOOL_DEADLINE_MS >= 60_000 ? `${Math.round(TOOL_DEADLINE_MS / 60_000)} minutes` : `${Math.round(TOOL_DEADLINE_MS / 1000)} seconds`;
@@ -1030,6 +1223,7 @@ export class Agent {
           settled = true;
           try { unsub?.(); } catch {}
           clearTimeout(idleTimer);
+          clearInterval(liveness);
           for (const t of toolTimers.values()) clearTimeout(t);
           toolTimers.clear();
           this.abandonedTools.clear();
@@ -1039,6 +1233,12 @@ export class Agent {
         // The Stop button ends the turn here with whatever was said so far;
         // abort() asks the SDK to stop the turn alongside.
         ctl.stop = () => finish(() => resolve(turn.text));
+        // When the connection to Copilot closes, the SDK drops this listener
+        // without a word. The CLI exiting is caught by watchCopilot(); this
+        // catches the connection going on its own, within a second.
+        const liveness = setInterval(() => {
+          if (session.disconnected && this.copilotSession === session) this.copilotLost(client, 'the connection to Copilot closed');
+        }, 1_000);
         // Last resort, reset by every SDK event. Tool calls are answered
         // within two minutes, so five silent minutes means the runtime itself
         // is stuck. Abort the SDK turn as well, or the next message queues
@@ -1047,6 +1247,7 @@ export class Agent {
         const armIdle = () => {
           clearTimeout(idleTimer);
           idleTimer = setTimeout(() => {
+            if (this.wake?.check()) return;
             const waiting = [...new Set(running.values())].join(', ');
             console.log(`  ⏱ watchdog: 5 min without SDK events (running: ${waiting || 'none'}, session handle ${session.disconnected ? 'disconnected' : 'connected'})`);
             // Don't trust this handle for the next turn.
@@ -1129,10 +1330,11 @@ export class Agent {
       this.emit({ type: 'activity', event: 'llm_call_end', durationMs: dur });
       this.emit({ type: 'status', status: 'idle' });
 
-      if (ctl.stopped) return { text, toolCalls: [], stopped: true };
+      if (ctl.stopped) return this.stoppedTurn(ctl, chatKey, text);
       return { text: text || 'No response', toolCalls: [] };
     } catch (err) {
-      if (err === STOPPED) return stoppedResult();
+      // A send that failed because Copilot just quit is reported as that.
+      if (err === STOPPED || ctl.interrupted) return stoppedResult();
       const errMsg = `${err instanceof Error ? err.message : String(err)}`;
       this.emit({ type: 'status', status: 'error', detail: errMsg });
       return { text: `Error: ${errMsg}`, toolCalls: [] };
@@ -1221,6 +1423,9 @@ export class Agent {
       const { savePrefs } = await import('./prefs.js');
       savePrefs({ model: id });
     } catch {}
+    // No chat open, e.g. right after Copilot restarted: the next one opens
+    // with this model. Rebuilding here would delete the chat on disk.
+    if (!this.copilotSession) return;
     if (this.copilotSession && typeof this.copilotSession.setModel === 'function') {
       try {
         await this.copilotSession.setModel(id);
@@ -1231,7 +1436,7 @@ export class Agent {
         console.warn(`  ⚠ session.setModel("${id}") failed; rebuilding session:`, (e as Error)?.message || e);
       }
     }
-    // No live session, no setModel support, or setModel threw → rebuild.
+    // No setModel support, or setModel threw → rebuild.
     await this.clearHistory();
   }
 
@@ -1465,6 +1670,13 @@ export class Agent {
     await Promise.race([aborting, new Promise((r) => setTimeout(r, 5000))]);
   }
 
+  /** End the running turn the way Stop does, for a reason the result names:
+   *  the computer slept, or Copilot quit. */
+  async interrupt(reason: InterruptReason): Promise<void> {
+    if (this.turn && !this.turn.stopped) this.turn.interrupted ??= reason;
+    await this.abort();
+  }
+
   async clearHistory() {
     // Detach reference SYNCHRONOUSLY so any chat() that arrives during
     // cleanup will spin up a fresh session via ensureSession().
@@ -1481,7 +1693,9 @@ export class Agent {
     }
     if (id) {
       this.previewTimePins.delete(id);
-      try { await this.copilotClient.deleteSession(id); } catch {}
+      // Copilot may be restarting; the delete waits for it.
+      await this.whenCopilotReady();
+      try { await this.copilotClient?.deleteSession(id); } catch {}
     }
     this.emit({ type: 'status', status: 'idle' });
   }
@@ -1514,6 +1728,7 @@ export class Agent {
   }
 
   async disconnect() {
+    this.shuttingDown = true;
     // Detach our SDK session handle WITHOUT deleting it on disk so the next
     // host start can resume it. Clear chat (history.clear) is the only path
     // that intentionally deletes.
@@ -1556,7 +1771,7 @@ function mapEventsToMessages(events: any[]): Array<
         if (typeof text === 'string' && text.trim()) {
           // Strip our injected <browser_context>/<page_snapshot>/<recent_actions>
           // wrappers so the user sees only what they typed.
-          const stripped = text.replace(/<(browser_context|page_snapshot|recent_actions)>[\s\S]*?<\/\1>\s*/g, '').trim();
+          const stripped = text.replace(/<(browser_context|page_snapshot|recent_actions|browy_note)>[\s\S]*?<\/\1>\s*/g, '').trim();
           if (stripped) out.push({ role: 'user', text: stripped, timestamp: ts });
         }
         break;
