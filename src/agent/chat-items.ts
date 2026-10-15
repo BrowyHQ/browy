@@ -61,11 +61,13 @@ export const LEGACY_BYTES = 700_000;
 /** Tools the runtime calls for its own bookkeeping; nothing happened in the browser. */
 const HIDDEN_TOOLS = new Set(['report_intent']);
 
-const CONTEXT_TAGS = ['browser_context', 'page_snapshot', 'recent_actions', 'page_stats', 'page_info'];
+/** Blocks Browy adds to a user message that the user never typed. */
+const CONTEXT_TAGS = ['browser_context', 'page_snapshot', 'recent_actions', 'page_stats', 'page_info', 'browy_note'];
 
 /** The user's own words. Browy sends every message with a <browser_context>,
- *  <page_snapshot> and <recent_actions> block after it (before 0.1.x, ahead
- *  of it), which the user never typed. */
+ *  <page_snapshot> and <recent_actions> block after it (older versions put
+ *  it ahead of the text), and sometimes a <browy_note>, none of which the
+ *  user typed. */
 export function stripContext(text: string): string {
   let out = String(text || '');
   for (const t of CONTEXT_TAGS) out = out.replace(new RegExp(`<${t}>[\\s\\S]*?</${t}>`, 'g'), '');

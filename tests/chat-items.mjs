@@ -19,6 +19,7 @@ const ctx = '\n\n<browser_context>\nBrowser:    Chrome\nURL:        https://exam
 
 check('context after the text is removed', stripContext('summarize this page' + ctx) === 'summarize this page');
 check('context ahead of the text (older Browy) is removed', stripContext(ctx + 'and the next one') === 'and the next one');
+check("Browy's note after a cut-short turn is removed", stripContext('carry on' + ctx + '<browy_note>\nThe last turn was cut short.\n</browy_note>\n') === 'carry on');
 check('a block cut off at the end is removed', stripContext('go on\n\n<browser_context>\nURL: https://a.test') === 'go on');
 check('plain text is kept as is', stripContext('what is <b>bold</b>?') === 'what is <b>bold</b>?');
 check('tool args become one short line', shortArgs({ index: 4, text: 'hello\nworld' }) === '4, hello world');
