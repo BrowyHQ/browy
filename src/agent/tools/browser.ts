@@ -27,13 +27,23 @@ export interface ToolHandler {
 
 const tools: ToolHandler[] = [];
 
-/** Adds a tool. `serial` tools use focus or the mouse and run one at a time
- *  (see serialInput). */
+/** Adds a tool. A failure that comes from Chrome refusing to let an extension
+ *  near the page (chrome:// pages, the Web Store) is rewritten into a reason
+ *  the model can pass on to the user. `serial` tools use focus or the mouse
+ *  and run one at a time (see serialInput). */
 function register(handler: ToolHandler & { serial?: boolean }) {
   const run = handler.run;
   tools.push({
     def: handler.def,
-    run: (args, ctx) => (handler.serial ? serialInput(ctx, () => run(args, ctx)) : run(args, ctx)),
+    run: async (args, ctx) => {
+      try {
+        return await (handler.serial ? serialInput(ctx, () => run(args, ctx)) : run(args, ctx));
+      } catch (err) {
+        const raw = errText(err);
+        const why = explainBrowserError(raw);
+        throw why ? new Error(`${why} (Chrome said: ${raw})`) : err;
+      }
+    },
   });
 }
 
@@ -95,6 +105,157 @@ function serialInput<T>(ctx: BrowserToolContext, fn: () => Promise<T>): Promise<
   const next = prev.then(fn, fn);
   inputQueues.set(key, next.catch(() => {}));
   return next;
+}
+
+// ── Pages Chrome keeps extensions away from ────────────────────────────────
+
+const INTERNAL_SCHEMES: Record<string, string> = {
+  chrome: 'Chrome', 'chrome-untrusted': 'Chrome', 'chrome-search': 'Chrome', devtools: 'Chrome',
+  edge: 'Edge', brave: 'Brave', opera: 'Opera', vivaldi: 'Vivaldi',
+};
+
+function blockedMessage(browser: string, what: string, readable: boolean, here = false): string {
+  // `here`: the tab is already on that page, rather than Browy trying to open it.
+  return `${browser} doesn't let extensions open or control ${what} pages, so Browy can't work there. `
+    + (here ? 'Do this part yourself, or switch to a regular web page' : 'Open it yourself')
+    + (readable ? ', or ask me to read it with web_fetch (switch it on in Settings first).' : '.');
+}
+
+const FILE_ACCESS_HINT = 'Chrome only lets extensions control file:// pages after you turn on "Allow access to file URLs" for Browy on the extensions page (chrome://extensions, or brave://extensions in Brave).';
+
+/** Why Browy can't open or drive this URL, or null when it can. Chrome keeps
+ *  extensions off its own pages and the Web Store: chrome.debugger won't
+ *  attach there, Page.navigate to the store is refused, and a tab navigated
+ *  to a chrome:// page drops the debugger, leaving the agent stranded. */
+export function blockedPageReason(raw: string): string | null {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  let u: URL;
+  try { u = new URL(s); } catch {
+    try { u = new URL('https://' + s); } catch { return null; }
+  }
+  const scheme = u.protocol.replace(/:$/, '').toLowerCase();
+  if (INTERNAL_SCHEMES[scheme]) return blockedMessage(INTERNAL_SCHEMES[scheme], `${scheme}://`, false);
+  if (scheme === 'about' && !/^(blank|srcdoc)$/i.test(u.pathname)) return blockedMessage('Chrome', 'about:', false);
+  if (scheme === 'http' || scheme === 'https') {
+    const host = u.hostname.toLowerCase();
+    if (host === 'chromewebstore.google.com') return blockedMessage('Chrome', host, true);
+    if (host === 'chrome.google.com' && /^\/webstore(\/|$)/i.test(u.pathname)) return blockedMessage('Chrome', 'chrome.google.com/webstore', true);
+  }
+  return null;
+}
+
+/** The reason behind chrome.debugger refusing to attach to a tab (the tab is
+ *  on a page extensions can't control), or null. */
+export function explainBlockedError(message: string): string | null {
+  if (/extensions gallery cannot be scripted/i.test(message)) return blockedMessage('Chrome', 'chromewebstore.google.com', true, true);
+  const m = /Cannot access a ([a-z][a-z0-9+.-]*):\/\/ URL/i.exec(message);
+  if (!m) return null;
+  const scheme = m[1].toLowerCase();
+  if (scheme === 'file') return FILE_ACCESS_HINT;
+  if (scheme === 'chrome-extension') return blockedMessage('Chrome', "other extensions'", false, true);
+  return blockedMessage(INTERNAL_SCHEMES[scheme] || 'Chrome', `${scheme}://`, false, true);
+}
+
+function explainBrowserError(message: string): string | null {
+  const blocked = explainBlockedError(message);
+  if (blocked) return blocked;
+  if (/Detached while handling command/i.test(message)) {
+    return 'Chrome cut Browy off from the tab during the call, usually because the tab went to a page extensions can\'t control (a chrome:// page or the Chrome Web Store), or the debugging bar was closed. Check the tab, then try again.';
+  }
+  return null;
+}
+
+// ── Waiting for a page to load ─────────────────────────────────────────────
+
+/** In-page: `__browyArm(token)` marks the current document, so a new document
+ *  can be told apart even at the same URL, and records the next cross-document
+ *  navigation this document starts (Navigation API) in window.__browyNav. */
+const ARM_JS = `
+const __browyArm = (token) => {
+  const def = (k, v) => { try { Object.defineProperty(window, k, { value: v, configurable: true, writable: true, enumerable: false }); } catch (_) {} };
+  def('__browyDocMark', token);
+  def('__browyNav', null);
+  try {
+    if (window.navigation && !window.__browyNavHook) {
+      def('__browyNavHook', true);
+      navigation.addEventListener('navigate', (e) => {
+        try {
+          if (e.destination.sameDocument) return;
+          const rec = { url: e.destination.url, type: e.navigationType, start: location.href };
+          window.__browyNav = rec;
+          queueMicrotask(() => { if (e.defaultPrevented) rec.failed = true; });
+        } catch (_) {}
+      });
+      navigation.addEventListener('navigateerror', () => { if (window.__browyNav) window.__browyNav.failed = true; });
+    }
+  } catch (_) {}
+};`;
+
+interface DocState {
+  /** Still the document marked with the token. */
+  same: boolean;
+  url: string;
+  title: string;
+  readyState: string;
+  nav: { url: string; type?: string; start?: string; failed?: boolean } | null;
+  /** The page's router intercepted the navigation: same document, new URL. */
+  intercepted: boolean;
+}
+
+interface WaitResult {
+  state?: DocState;
+  /** Why Browy can't reach the page the tab went to. */
+  blocked?: string;
+  /** The navigation started but didn't replace the page (204, download, cancelled). */
+  cancelled?: boolean;
+  timedOut?: boolean;
+  error?: string;
+}
+
+/** Wait until the tab shows a loaded document: a new one when `token` marks
+ *  the old document, or just a loaded one without it. Polls with
+ *  Runtime.evaluate, which works the same over chrome.debugger and Playwright
+ *  and needs no CDP events. */
+async function waitForDocument(ctx: BrowserToolContext, opts: { token?: string; timeoutMs: number }): Promise<WaitResult> {
+  const t0 = Date.now();
+  const token = JSON.stringify(opts.token ?? '');
+  const expr = `(() => {
+    const n = window.__browyNav || null;
+    let busy = false;
+    try { busy = !!(window.navigation && navigation.transition); } catch (_) {}
+    const same = ${opts.token ? `window.__browyDocMark === ${token}` : 'false'};
+    const intercepted = !!(same && n && !n.failed && n.type !== 'reload' && !busy && location.href === n.url && n.url !== n.start);
+    return JSON.stringify({ same, url: location.href, title: document.title, readyState: document.readyState, nav: n, intercepted });
+  })()`;
+  let last: DocState | undefined;
+  let lastError = '';
+  let interactiveSince = 0;
+  while (Date.now() - t0 < opts.timeoutMs) {
+    try {
+      const s = await evalJson<DocState>(ctx, expr, 3000);
+      last = s;
+      lastError = '';
+      if (!s.same) {
+        if (s.readyState === 'complete') return { state: s };
+        if (s.readyState === 'interactive') {
+          // Loaded enough to read; don't wait forever on a slow image or ad.
+          if (!interactiveSince) interactiveSince = Date.now();
+          else if (Date.now() - interactiveSince > 3000) return { state: s };
+        }
+      } else if (s.nav?.failed) {
+        return { state: s, cancelled: true };
+      } else if (s.intercepted) {
+        return { state: s };
+      }
+    } catch (e) {
+      lastError = errText(e);
+      const blocked = explainBlockedError(lastError);
+      if (blocked) return { blocked, error: lastError };
+    }
+    await sleep(150);
+  }
+  return { state: last, timedOut: true, error: lastError || undefined };
 }
 
 // ── Tools ──────────────────────────────────────────────────────────────────
@@ -937,31 +1098,110 @@ register({
 
 // ── Legacy / general tools ────────────────────────────────────────────────
 
+type NavigateAnswer = { errorText?: string; isDownload?: boolean };
+
+/** Page.navigate's refusals, in words the model can pass on. */
+function navigateError(url: string, e: unknown): Error {
+  const raw = errText(e);
+  if (/not allowed/i.test(raw)) {
+    if (/^file:/i.test(url)) return new Error(`${FILE_ACCESS_HINT} (Chrome said: ${raw})`);
+    let host = url;
+    try { host = new URL(url).hostname || url; } catch {}
+    return new Error(`${blockedMessage('Chrome', host, true)} (Chrome said: ${raw})`);
+  }
+  if (/invalid URL/i.test(raw)) return new Error(`"${url}" isn't a URL Chrome can open. Use a full URL such as https://example.com/. (Chrome said: ${raw})`);
+  return e instanceof Error ? e : new Error(raw);
+}
+
+/** What Page.navigate's answer means for the tool: a download or a load error. */
+function checkNavigateAnswer(url: string, nav: NavigateAnswer | undefined): { download?: true } {
+  if (nav?.isDownload) return { download: true };
+  if (nav?.errorText) {
+    throw new Error(`${url} didn't load: ${nav.errorText}${/ERR_ABORTED/.test(nav.errorText) ? ' (the navigation was cancelled)' : ''}.`);
+  }
+  return {};
+}
+
+/** Open `url` in a new tab and wait for it to load. */
+async function openInNewTab(ctx: BrowserToolContext, url: string, activate: boolean): Promise<{ url: string; title: string; download?: true; loading?: true }> {
+  const page = await ctx.browser.contexts()[0].newPage();
+  if (ctx.getActiveTabInfo) {
+    // Extension mode: newPage() points ctx.cdp at the new tab. Navigate
+    // through it rather than page.goto, which drops Chrome's answer: up to
+    // 0.1.13 a refused URL left a blank tab and the tool said it worked.
+    let nav: NavigateAnswer | undefined;
+    try {
+      nav = await ctx.cdp.send('Page.navigate', { url }) as NavigateAnswer;
+    } catch (e) {
+      await page.close().catch(() => {});
+      throw navigateError(url, e);
+    }
+    const { download } = checkNavigateAnswer(url, nav);
+    if (download) return { url, title: '', download };
+    const w = await waitForDocument(ctx, { timeoutMs: 10_000 });
+    if (w.blocked) throw new Error(w.blocked);
+    if (activate) await ctx.setActivePage(page);
+    return { url: w.state?.url || url, title: w.state?.title || '', ...(w.timedOut ? { loading: true as const } : {}) };
+  }
+  let failure: Error | null = null;
+  try {
+    await page.goto(url, { waitUntil: 'load', timeout: 15_000 });
+  } catch (e) {
+    const raw = errText(e);
+    if (!/timeout/i.test(raw)) failure = new Error(explainBrowserError(raw) || `${url} didn't load: ${raw.split('\n')[0]}`);
+  }
+  if (activate) await ctx.setActivePage(page);
+  if (failure) throw failure;
+  let title = '';
+  try { title = await page.title(); } catch {}
+  return { url: page.url(), title };
+}
+
+/** Reload the current tab and wait until the new document has loaded. */
+async function reloadCurrent(ctx: BrowserToolContext): Promise<string> {
+  const token = newToken();
+  await evalJson(ctx, `(() => { ${ARM_JS} __browyArm(${JSON.stringify(token)}); return 1; })()`);
+  await ctx.cdp.send('Page.reload', {});
+  const w = await waitForDocument(ctx, { token, timeoutMs: 15_000 });
+  if (w.blocked) throw new Error(w.blocked);
+  if (w.state && !w.state.same) return JSON.stringify({ success: true, reloaded: true, url: w.state.url, title: w.state.title });
+  throw new Error(`The page didn't reload within 15 s${w.error ? ` (${w.error})` : ''}. It may be asking to confirm leaving: check the tab.`);
+}
+
 register({
   def: {
     type: 'function', name: 'navigate',
-    description: 'Navigate to a URL. By default, navigates the active tab when the URL is on the SAME hostname as the current tab (so the user keeps working in the same tab); opens a new tab otherwise. Set new_tab="true"/"false" to override.',
+    description: 'Open a URL and wait for it to load (up to 10 s), or reload the current tab with reload=true. A URL on the current tab\'s host opens in that tab, another host in a new tab; new_tab="true"/"false" overrides that. Fails with the reason when the page doesn\'t load, or is one Chrome won\'t let extensions control (chrome://, edge://, brave:// pages and the Chrome Web Store).',
     parameters: { type: 'object', properties: {
-      url: { type: 'string', description: 'The URL to navigate to' },
-      new_tab: { type: 'string', description: 'Set to "true" to force a new tab, "false" to force navigating the current tab. Default: same-host → current tab, cross-host → new tab.' },
-    }, required: ['url'] },
+      url: { type: 'string', description: 'The URL to open. Leave it out with reload.' },
+      new_tab: { type: 'string', description: '"true" for a new tab, "false" for the current tab. Default: same host in the current tab, another host in a new tab.' },
+      reload: { type: 'boolean', description: 'true to reload the current tab instead of opening a URL.' },
+    }, required: [] },
   },
   async run(args, ctx) {
-    const url = String(args.url);
+    if (args.reload === true || String(args.reload) === 'true') return reloadCurrent(ctx);
+    const url = String(args.url ?? '').trim();
+    if (!url) throw new Error('navigate needs a url, or reload=true to reload the current tab.');
+    const blocked = blockedPageReason(url);
+    if (blocked) throw new Error(blocked);
+
+    let curUrl = '';
+    try {
+      if (ctx.getActiveTabInfo) curUrl = (await ctx.getActiveTabInfo())?.url || '';
+      else {
+        const pages = ctx.getPages();
+        if (pages.length) curUrl = pages[0].url();
+      }
+    } catch {}
+    // Browy can't drive a chrome:// or Web Store tab, so never navigate in one.
+    const stuck = !!curUrl && !!blockedPageReason(curUrl);
     let newTab: boolean;
-    if (args.new_tab === 'true') newTab = true;
-    else if (args.new_tab === 'false') newTab = false;
+    if (stuck || args.new_tab === 'true' || args.new_tab === true) newTab = true;
+    else if (args.new_tab === 'false' || args.new_tab === false) newTab = false;
     else {
       // Smart default: same hostname → current tab, cross-host → new tab.
-      let curHost = '';
       try {
-        if (ctx.getActiveTabInfo) {
-          const info = await ctx.getActiveTabInfo();
-          if (info?.url) curHost = new URL(info.url).hostname;
-        } else {
-          const pages = ctx.getPages();
-          if (pages.length) curHost = new URL(pages[0].url()).hostname;
-        }
+        const curHost = curUrl ? new URL(curUrl).hostname : '';
         const tgtHost = new URL(url).hostname;
         newTab = !(curHost && tgtHost && curHost === tgtHost);
       } catch {
@@ -970,30 +1210,23 @@ register({
     }
 
     if (newTab) {
-      // Open in a new tab via Playwright, then switch CDP to it
-      const context = ctx.browser.contexts()[0];
-      const page = await context.newPage();
-      await page.goto(url, { waitUntil: 'load', timeout: 15_000 }).catch(() => {});
-      await ctx.setActivePage(page);
-      return JSON.stringify({ success: true, url, newTab: true });
+      const r = await openInNewTab(ctx, url, true);
+      return JSON.stringify({ success: true, ...r, newTab: true });
     }
 
-    // Navigate current tab
-    await ctx.cdp.send('Page.navigate', { url });
-    await ctx.cdp.send('Page.setLifecycleEventsEnabled', { enabled: true });
-    await new Promise<void>((resolve) => {
-      const timeout = setTimeout(resolve, 10_000);
-      const handler = (params: { name: string }) => {
-        if (params.name === 'load') {
-          clearTimeout(timeout);
-          ctx.cdp.off('Page.lifecycleEvent', handler);
-          resolve();
-        }
-      };
-      ctx.cdp.on('Page.lifecycleEvent', handler);
-    });
-    await new Promise((r) => setTimeout(r, 500));
-    return JSON.stringify({ success: true, url, newTab: false });
+    let nav: NavigateAnswer | undefined;
+    try {
+      nav = await ctx.cdp.send('Page.navigate', { url }) as NavigateAnswer;
+    } catch (e) {
+      throw navigateError(url, e);
+    }
+    if (checkNavigateAnswer(url, nav).download) return JSON.stringify({ success: true, url, newTab: false, download: true });
+    // Page.navigate answers once the new page has committed; wait for it to
+    // load by polling. Up to 0.1.13 this waited for a load lifecycle event it
+    // started listening for too late, so navigations took the full 10 s.
+    const w = await waitForDocument(ctx, { timeoutMs: 10_000 });
+    if (w.blocked) throw new Error(w.blocked);
+    return JSON.stringify({ success: true, url: w.state?.url || url, title: w.state?.title || '', newTab: false, ...(w.timedOut ? { loading: true } : {}) });
   },
 });
 
@@ -1395,13 +1628,15 @@ register({
     }, required: [] },
   },
   async run(args, ctx) {
-    const url = args.url ? String(args.url) : 'about:blank';
+    const url = args.url ? String(args.url).trim() : '';
     const doSwitch = String(args.switch ?? 'true') !== 'false';
-    const context = ctx.browser.contexts()[0];
-    const page = await context.newPage();
-    if (url !== 'about:blank') {
-      await page.goto(url, { waitUntil: 'load', timeout: 15_000 }).catch(() => {});
+    if (url && url !== 'about:blank') {
+      const blocked = blockedPageReason(url);
+      if (blocked) throw new Error(blocked);
+      const r = await openInNewTab(ctx, url, doSwitch);
+      return JSON.stringify({ success: true, ...r, switched: doSwitch });
     }
+    const page = await ctx.browser.contexts()[0].newPage();
     if (doSwitch) await ctx.setActivePage(page);
     let title = '';
     try { title = await page.title(); } catch {}
