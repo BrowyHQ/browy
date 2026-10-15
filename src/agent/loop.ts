@@ -1293,7 +1293,8 @@ export class Agent {
    *  0.1.14 expect. */
   async listChats(onFast?: (chats: ChatSummary[]) => void): Promise<ChatSummary[]> {
     await this.whenCopilotReady();
-    if (!this.copilotClient) return [];
+    // An empty list would read as "no chats yet"; say what went wrong instead.
+    if (!this.copilotClient) throw new Error('Copilot is not running');
     const t0 = Date.now();
     const scanFresh = !!this.chatScan && Date.now() - this.chatScan.at < CHAT_SCAN_TTL_MS;
     const scan = this.scanAllChats().catch((e: any) => {
@@ -1312,6 +1313,7 @@ export class Agent {
     }
     if (onFast && own && !scanFresh) onFast(this.mergeChats(own, ownIsAll, this.chatScan?.chats));
     const scanned = await scan;
+    if (!own && !scanned) throw new Error('Copilot did not list its sessions');
     const out = this.mergeChats(own, ownIsAll, scanned || undefined);
     console.log(`  📜 listChats: ${out.length} Browy chats in ${Date.now() - t0} ms${scanFresh ? ' (scan reused)' : ''}`);
     return out;
@@ -1427,13 +1429,19 @@ export class Agent {
     const t0 = Date.now();
     const none = { items: [], start: 0, end: 0, total: 0, missing: true };
     await this.whenCopilotReady();
-    if (!this.copilotClient || !id) return none;
+    // "missing" would show the chat as gone for good; this is only Copilot down.
+    if (!this.copilotClient) throw new Error('Copilot is not running');
+    if (!id) return none;
     // "Load earlier" pages come from the read that produced the first page,
     // so turn numbers line up.
     let turns = opts.before !== undefined && opts.before !== null ? this.cachedTurns(id) : null;
     if (!turns) {
       const events = await this.readChatEvents(id);
       if (!events) {
+        // A session the runtime still lists has a log, so this is a failed
+        // read, not a chat that is gone.
+        const meta = await Promise.resolve().then(() => this.copilotClient.getSessionMetadata(id)).catch(() => undefined);
+        if (meta) throw new Error('Copilot could not read this chat');
         console.log(`  📜 chat.history ${id}: no event log`);
         return none;
       }

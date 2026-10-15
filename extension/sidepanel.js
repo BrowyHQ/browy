@@ -2352,6 +2352,12 @@ function refreshChatList() {
     renderChatRows();
     return null;
   }
+  if (sdkFailedDetail) {
+    // Copilot didn't start, so the host has nothing to list: keep what we have.
+    chatsState = 'failed';
+    renderChatRows();
+    return null;
+  }
   chatsState = 'loading';
   renderChatRows();
   chatsLoad = (async () => {

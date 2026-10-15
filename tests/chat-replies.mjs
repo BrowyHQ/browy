@@ -71,6 +71,12 @@ await send({ type: 'session.start', sessionId: 'sp-a', capabilities: [] });
   const r = await send({ type: 'chat.history', id: 'sp-x', items: true, reqId: 'h2', sessionId: 'sp-a' });
   check('a failed read answers with the error instead of a chat error', r.length === 1 && r[0].type === 'chat.history.result' && r[0].error === 'disk on fire', JSON.stringify(r));
 }
+{
+  // An empty list would read as "no chats yet" in the panel.
+  agent.listChats = async () => { throw new Error('Copilot is not running'); };
+  const r = await send({ type: 'chat.list', reqId: 'q3', sessionId: 'sp-a', progressive: true });
+  check('a failed list says so', r.length === 1 && r[0].error === 'Copilot is not running' && r[0].chats.length === 0 && r[0].reqId === 'q3', JSON.stringify(r));
+}
 
 if (failures.length) {
   console.error('FAIL:\n  - ' + failures.join('\n  - '));
