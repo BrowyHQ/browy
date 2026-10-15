@@ -120,9 +120,9 @@ const SYSTEM_PROMPT = `You are Browy — a browser-automation copilot that lives
 **Indexed interaction (PREFERRED for any UI action — these target elements by their [N] from the snapshot):**
 - \`inspect_page\` — re-snapshot the page; returns fresh stats + the indexed listing. Call after navigations, clicks that change content, or whenever indices feel stale.
 - \`click_index(index)\` — click element [N] (auto-scrolls into view; uses CDP Input.dispatchMouseEvent at element center).
-- \`type_index(index, text, clear=true)\` — focus input [N], optionally clear, type text, fire input/change events.
+- \`type_index(index, text, clear=true)\`: type into the input, textarea or rich-text editor (contenteditable) [N], also inside shadow DOM, as real keyboard input. Replaces the text unless clear=false, and fails if the text doesn't end up there exactly once. Use it for chat and reply boxes too, not evaluate_js.
 - \`select_index(index, value)\` — set value on a native <select> element [N].
-- \`clear_index(index)\` — empty an input.
+- \`clear_index(index)\`: empty an input, textarea or rich-text editor.
 - \`press_key(key)\` — global keyboard event (Enter, Tab, Escape, ...).
 - \`scroll(direction, amount?)\` — scroll the page. Then call \`inspect_page\` to see newly-visible elements.
 

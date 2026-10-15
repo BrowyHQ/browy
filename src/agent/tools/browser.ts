@@ -27,8 +27,14 @@ export interface ToolHandler {
 
 const tools: ToolHandler[] = [];
 
-function register(handler: ToolHandler) {
-  tools.push(handler);
+/** Adds a tool. `serial` tools use focus or the mouse and run one at a time
+ *  (see serialInput). */
+function register(handler: ToolHandler & { serial?: boolean }) {
+  const run = handler.run;
+  tools.push({
+    def: handler.def,
+    run: (args, ctx) => (handler.serial ? serialInput(ctx, () => run(args, ctx)) : run(args, ctx)),
+  });
 }
 
 export function getAllTools(): ToolHandler[] {
@@ -75,6 +81,20 @@ async function evalJson<T>(ctx: BrowserToolContext, expression: string, timeoutM
   if (r?.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text || 'page script failed');
   const v = r?.result?.value;
   return (typeof v === 'string' ? JSON.parse(v) : v) as T;
+}
+
+const inputQueues = new WeakMap<object, Promise<unknown>>();
+
+/** Run input that depends on focus or the mouse (typing, keys, clicks) one
+ *  call at a time per tab connection. The model often sends several tool
+ *  calls at once, and two type_index calls that interleave both type into
+ *  whichever field took focus last. */
+function serialInput<T>(ctx: BrowserToolContext, fn: () => Promise<T>): Promise<T> {
+  const key = ctx.cdp as unknown as object;
+  const prev = inputQueues.get(key) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  inputQueues.set(key, next.catch(() => {}));
+  return next;
 }
 
 // ── Tools ──────────────────────────────────────────────────────────────────
@@ -182,6 +202,7 @@ register({
 });
 
 register({
+  serial: true,
   def: {
     type: 'function', name: 'click_index',
     description: 'Click the element with the given index [N] from the page snapshot. Auto-scrolls into view. Returns urlChanged/titleChanged/domChanged/modalAppeared/modalClosed/elementStateChanged so you can verify the click had an effect. If all are false, the click had no observable effect — read the hint and try a different approach. PREFER this over click_element when the element appears in the snapshot.',
@@ -239,40 +260,216 @@ register({
   },
 });
 
+// ── Typing: inputs, textareas and rich-text editors ───────────────────────
+//
+// Text goes in the way a person's typing does: focus the field, select what's
+// there (select-all, then Delete) when replacing it, then one CDP
+// Input.insertText. That fires real beforeinput/input events, which cross
+// shadow-DOM boundaries and which editors like Draft.js, Lexical or
+// ProseMirror handle themselves. Afterwards the field is read back: the text
+// must be there exactly once, or the tool fails and says what the field shows.
+// Up to 0.1.13 type_index set .value with a setter, which threw on a
+// contenteditable editor, so the model typed with execCommand and synthetic
+// events instead, and on X the reply box got the text twice.
+
+/** In-page helpers (need FIND_JS): the text field or editor behind [n], its
+ *  kind, its text, and selecting all of it or putting the caret at the end. */
+const FIELD_JS = `
+const __browyTextTypes = new Set(['', 'text', 'search', 'email', 'url', 'tel', 'password', 'number']);
+const __browyValueTypes = new Set(['date', 'time', 'datetime-local', 'month', 'week', 'color', 'range']);
+const __browyKind = (el) => {
+  if (!el || el.nodeType !== 1) return null;
+  if (el.localName === 'textarea') return 'text';
+  if (el.localName === 'input') {
+    const t = (el.getAttribute('type') || '').toLowerCase();
+    return __browyTextTypes.has(t) ? 'text' : __browyValueTypes.has(t) ? 'value' : null;
+  }
+  return el.isContentEditable ? 'rich' : null;
+};
+const __browyField = (n) => {
+  const el0 = __browyFind(n);
+  if (!el0) return { gone: true };
+  let el = el0;
+  if (!__browyKind(el)) {
+    const q = 'textarea, input:not([type]), input[type="text" i], input[type="search" i], input[type="email" i], input[type="url" i], input[type="tel" i], input[type="password" i], input[type="number" i], [contenteditable]:not([contenteditable="false"])';
+    el = el0.querySelector(q) || (el0.shadowRoot && el0.shadowRoot.querySelector(q)) || el0;
+  }
+  // A rich-text editor is edited as a whole: work on its editing host.
+  if (__browyKind(el) === 'rich') { while (el.parentElement && el.parentElement.isContentEditable) el = el.parentElement; }
+  return { el, kind: __browyKind(el), tag: el0.localName };
+};
+const __browyFieldText = (el, kind) => kind === 'rich' ? (el.innerText || el.textContent || '') : String(el.value == null ? '' : el.value);
+const __browySelect = (el, kind, all) => {
+  if (kind === 'rich') {
+    const doc = el.ownerDocument, sel = doc.defaultView.getSelection(), r = doc.createRange();
+    r.selectNodeContents(el);
+    if (!all) r.collapse(false);
+    sel.removeAllRanges();
+    sel.addRange(r);
+    return;
+  }
+  const len = String(el.value || '').length;
+  try { if (all) el.select(); else el.setSelectionRange(len, len); } catch (_) {}
+};
+`;
+
+interface FieldPrep { kind: 'text' | 'rich' | 'value'; focused?: boolean; text: string; cx?: number; cy?: number; done?: boolean }
+
+/** Find the field behind [N], focus it, and select its text (`all`) or put the
+ *  caret at the end. A date, color or range input just gets `value`. */
+async function prepareField(ctx: BrowserToolContext, idx: number, all: boolean, value: string): Promise<FieldPrep> {
+  const r = await evalJson<FieldPrep & { error?: string; tag?: string }>(ctx, `(() => {
+    ${FIND_JS}
+    ${FIELD_JS}
+    const f = __browyField(${idx});
+    if (f.gone) return JSON.stringify({ error: 'gone' });
+    if (!f.kind) return JSON.stringify({ error: 'not_editable', tag: f.tag });
+    const el = f.el;
+    if (el.disabled || el.readOnly) return JSON.stringify({ error: 'readonly', tag: el.localName });
+    try { Object.defineProperty(window, '__browyTyping', { value: { el, kind: f.kind }, configurable: true, writable: true, enumerable: false }); } catch (_) {}
+    try { el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); } catch (_) {}
+    if (f.kind === 'value') {
+      const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      set.call(el, ${JSON.stringify(value)});
+      el.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      return JSON.stringify({ kind: 'value', done: true, text: String(el.value) });
+    }
+    try { el.focus({ preventScroll: true }); } catch (_) {}
+    __browySelect(el, f.kind, ${all});
+    const a = __browyDeepActive();
+    const focused = a === el || (!!a && el.contains(a));
+    const b = el.getBoundingClientRect();
+    let x = b.left + b.width / 2, y = b.top + Math.min(b.height / 2, 20);
+    try {
+      for (let w = el.ownerDocument.defaultView; w && w.frameElement; w = w.parent) {
+        const fe = w.frameElement, fr = fe.getBoundingClientRect();
+        x += fr.left + fe.clientLeft; y += fr.top + fe.clientTop;
+      }
+    } catch (_) {}
+    return JSON.stringify({ kind: f.kind, focused, text: __browyFieldText(el, f.kind), cx: x, cy: y });
+  })()`);
+  if (r.error === 'gone') throw new Error(`No element [${idx}]: the page changed since the last snapshot. Call inspect_page and use the new index.`);
+  if (r.error === 'not_editable') throw new Error(`[${idx}] is a <${r.tag}>, not a text field or editor. Use the index of an input, textarea or contenteditable element.`);
+  if (r.error === 'readonly') throw new Error(`[${idx}] (<${r.tag}>) is disabled or read-only.`);
+  return r;
+}
+
+/** Read back the field being typed into (or, if the editor replaced it, the
+ *  field that has focus now). `commit` fires change on inputs and textareas,
+ *  as leaving the field would. */
+async function readField(ctx: BrowserToolContext, idx: number, commit: boolean): Promise<string> {
+  const r = await evalJson<{ text: string }>(ctx, `(() => {
+    ${FIND_JS}
+    ${FIELD_JS}
+    const t = window.__browyTyping;
+    let el = t && t.el && t.el.isConnected ? t.el : null, kind = t && t.kind;
+    if (!el) { const f = __browyField(${idx}); if (!f.gone && f.kind) { el = f.el; kind = f.kind; } }
+    if (!el) { const a = __browyDeepActive(); if (__browyKind(a)) { el = a; kind = __browyKind(a); } }
+    if (!el) return JSON.stringify({ text: '' });
+    if (${commit} && kind === 'text') el.dispatchEvent(new Event('change', { bubbles: true }));
+    return JSON.stringify({ text: __browyFieldText(el, kind) });
+  })()`);
+  return String(r?.text ?? '');
+}
+
+const normText = (s: string) => s.replace(/[\u200b\u200c\u200d\ufeff]/g, '').replace(/\s+/g, ' ').trim();
+const looseText = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+
+/** How many times `needle` occurs in `hay`, ignoring whitespace differences
+ *  (editors turn spaces into &nbsp; and lines into blocks). */
+function occurrences(hay: string, needle: string, norm: (s: string) => string = normText): number {
+  const h = norm(hay), n = norm(needle);
+  if (!n) return 0;
+  let count = 0;
+  for (let i = h.indexOf(n); i !== -1; i = h.indexOf(n, i + n.length)) count++;
+  return count;
+}
+
+interface KeySpec { key: string; code: string; keyCode: number; text?: string }
+
+/** One key press. A key that types (has text) sends keyDown with that text,
+ *  which Chrome turns into keydown + keypress; a separate char event on top
+ *  types the character a second time. */
+async function pressKey(ctx: BrowserToolContext, k: KeySpec, modifiers = 0): Promise<void> {
+  const types = !!k.text && !(modifiers & (1 | 2 | 4)); // no Alt, Ctrl or Meta
+  const base = { key: k.key, code: k.code, windowsVirtualKeyCode: k.keyCode, nativeVirtualKeyCode: k.keyCode, modifiers };
+  await ctx.cdp.send('Input.dispatchKeyEvent', types
+    ? { type: 'keyDown', ...base, text: k.text, unmodifiedText: k.text }
+    : { type: 'rawKeyDown', ...base });
+  await ctx.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+}
+
+const DELETE_KEY: KeySpec = { key: 'Delete', code: 'Delete', keyCode: 46 };
+
+/** type_index and clear_index: focus [N], clear it if asked, insert `text`
+ *  once, and check the result. */
+async function typeIntoIndex(ctx: BrowserToolContext, idx: number, text: string, clear: boolean): Promise<string> {
+  let prep = await prepareField(ctx, idx, clear, text);
+  if (prep.kind === 'value') {
+    const ok = !text || prep.text.toLowerCase() === text.trim().toLowerCase();
+    if (!ok) throw new Error(`[${idx}] didn't take "${clip(text, 60)}"; it shows "${clip(prep.text, 60)}". Check the format the field expects.`);
+    return JSON.stringify({ success: true, index: idx, kind: 'value', value: clip(prep.text, 200) });
+  }
+  if (!prep.focused && prep.cx != null && prep.cy != null) {
+    // Some editors only take focus from a real click.
+    await dispatchClick(ctx, prep.cx, prep.cy);
+    await sleep(100);
+    prep = await prepareField(ctx, idx, clear, text);
+  }
+  if (!prep.focused) throw new Error(`Couldn't put the cursor in [${idx}]: the page keeps focus elsewhere. Try click_index on it, then type_index again.`);
+  const before = clear ? 0 : occurrences(prep.text, text);
+  if (clear && normText(prep.text) !== '') {
+    await pressKey(ctx, DELETE_KEY);
+    await sleep(30);
+  }
+  if (text) await ctx.cdp.send('Input.insertText', { text });
+
+  // Read it back. Editors may re-render a moment later, so give a missing
+  // text up to a second to show up; text that's there twice won't go away.
+  let shown = await readField(ctx, idx, true);
+  const want = before + (text ? 1 : 0);
+  let count = occurrences(shown, text);
+  for (let i = 0; text && count < want && i < 10; i++) {
+    await sleep(100);
+    shown = await readField(ctx, idx, false);
+    count = occurrences(shown, text);
+  }
+  const kindWord = prep.kind === 'rich' ? 'editor' : 'field';
+  if (!text) {
+    if (normText(shown) !== '') throw new Error(`[${idx}] still shows "${clip(normText(shown), 120)}" after select-all and Delete; this ${kindWord} didn't clear.`);
+    return JSON.stringify({ success: true, index: idx, kind: prep.kind, cleared: true });
+  }
+  const result = { success: true, index: idx, kind: prep.kind, value: clip(shown, 200) };
+  if (count === want) {
+    const extra = clear && normText(shown) !== normText(text);
+    return JSON.stringify(extra ? { ...result, note: `The ${kindWord} also holds other text; check it reads as intended.` } : result);
+  }
+  if (count < want && occurrences(shown, text, looseText) === want) {
+    return JSON.stringify({ ...result, note: `The ${kindWord} reformatted the text.` });
+  }
+  if (count > want) {
+    throw new Error(`The text went into [${idx}] ${count - before} times instead of once; the ${kindWord} now reads "${clip(normText(shown), 200)}". Clear it with clear_index, then check with inspect_page before typing again.`);
+  }
+  throw new Error(`The text didn't show up in [${idx}]; the ${kindWord} reads "${clip(normText(shown), 200)}". It may have rejected the input or moved focus: check with inspect_page.`);
+}
+
 register({
+  serial: true,
   def: {
     type: 'function', name: 'type_index',
-    description: 'Type text into the input/textarea at index [N]. Focuses the element first, optionally clears existing value, then sets value via the React-friendly setter and dispatches input/change events. Use press_key("Enter") afterward if you need to submit. PREFER this over fill_input when the element appears in the snapshot.',
+    description: 'Type text into the input, textarea or rich-text editor (contenteditable, e.g. a chat or reply box) at index [N], including ones inside shadow DOM. Replaces what\'s there unless clear="false", types the text once as real keyboard input, then reads the field back and fails if the text isn\'t there exactly once. To submit afterwards, use press_keys("Enter") or click the send button. PREFER this over fill_input and evaluate_js.',
     parameters: { type: 'object', properties: {
       index: { type: 'number', description: 'The [N] index from the page snapshot.' },
       text: { type: 'string', description: 'Text to type.' },
-      clear: { type: 'string', description: 'Set to "false" to append instead of replace (default: "true" — clears first).' },
+      clear: { type: 'string', description: '"false" to add to the end of the existing text instead of replacing it (default "true").' },
     }, required: ['index', 'text'] },
   },
   async run(args, ctx) {
     const idx = Number(args.index);
-    const text = String(args.text ?? '');
-    const clear = args.clear !== 'false';
     if (!Number.isFinite(idx) || idx < 1) return JSON.stringify({ error: 'index must be a positive integer' });
-    const cdp = ctx.cdp as unknown as { send: (m: string, p?: unknown) => Promise<unknown> };
-    const resolved: ResolvedElement = await resolveIndex(cdp, idx);
-    if (!resolved.found) return JSON.stringify({ success: false, error: resolved.reason || `index ${idx} not found — call inspect_page` });
-    if (!resolved.isEditable) return JSON.stringify({ success: false, error: `element [${idx}] (<${resolved.tag}>) is not editable` });
-    const expr = `(() => {
-      const el = document.querySelector('[data-browy-id="${idx}"]');
-      if (!el) return JSON.stringify({ error: 'element vanished' });
-      try { el.focus(); } catch(_) {}
-      const tag = el.tagName.toLowerCase();
-      const proto = tag === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-      const newVal = ${clear ? '' : '(el.value || "") + '}${JSON.stringify(text)};
-      if (setter) setter.call(el, newVal); else el.value = newVal;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      return JSON.stringify({ success: true, value: String(el.value || '').slice(0, 200) });
-    })()`;
-    const r = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true }) as { result?: { value?: string } };
-    return String(r?.result?.value ?? '{}');
+    const clear = String(args.clear ?? 'true') !== 'false';
+    return typeIntoIndex(ctx, Math.floor(idx), String(args.text ?? ''), clear);
   },
 });
 
@@ -312,9 +509,10 @@ register({
 });
 
 register({
+  serial: true,
   def: {
     type: 'function', name: 'clear_index',
-    description: 'Empty the value of an input/textarea at index [N]. Convenience for type_index with empty text.',
+    description: 'Empty the input, textarea or rich-text editor (contenteditable) at index [N], including ones inside shadow DOM: select-all and Delete, like a person would. Fails if the field doesn\'t end up empty.',
     parameters: { type: 'object', properties: {
       index: { type: 'number', description: 'The [N] index from the page snapshot.' },
     }, required: ['index'] },
@@ -322,21 +520,7 @@ register({
   async run(args, ctx) {
     const idx = Number(args.index);
     if (!Number.isFinite(idx) || idx < 1) return JSON.stringify({ error: 'index must be a positive integer' });
-    const cdp = ctx.cdp as unknown as { send: (m: string, p?: unknown) => Promise<unknown> };
-    const expr = `(() => {
-      const el = document.querySelector('[data-browy-id="${idx}"]');
-      if (!el) return JSON.stringify({ error: 'index ${idx} not found — call inspect_page' });
-      try { el.focus(); } catch(_) {}
-      const tag = el.tagName.toLowerCase();
-      const proto = tag === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-      if (setter) setter.call(el, ''); else el.value = '';
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      return JSON.stringify({ success: true });
-    })()`;
-    const r = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true }) as { result?: { value?: string } };
-    return String(r?.result?.value ?? '{}');
+    return typeIntoIndex(ctx, Math.floor(idx), '', true);
   },
 });
 
@@ -538,6 +722,10 @@ register({
         if (!el) { results.push({ index: f.index, ok: false, error: 'not found' }); continue; }
         const tag = el.tagName.toLowerCase();
         const type = (el.getAttribute('type') || '').toLowerCase();
+        if (tag !== 'input' && tag !== 'textarea' && tag !== 'select' && el.isContentEditable) {
+          results.push({ index: f.index, ok: false, error: 'rich-text editor: fill it with type_index' });
+          continue;
+        }
         try {
           el.focus && el.focus();
           let action = f.action;
@@ -700,6 +888,7 @@ register({
 });
 
 register({
+  serial: true,
   def: {
     type: 'function', name: 'press_keys',
     description: `Send a keyboard combination (e.g. "Ctrl+Enter" to submit a chat input, "Tab" to move focus, "Escape" to dismiss). Modifiers: Ctrl, Alt, Shift, Meta. Use this AFTER focusing the right input via type_index/focus_index.`,
@@ -737,12 +926,11 @@ register({
     };
     const norm = key.length === 1 ? key.toUpperCase() : key;
     const mapped = KEY_MAP[norm] || (key.length === 1
-      ? { key, code: 'Key' + key.toUpperCase(), windowsVirtualKeyCode: key.toUpperCase().charCodeAt(0), text: key }
+      ? { key, code: 'Key' + key.toUpperCase(), windowsVirtualKeyCode: key.toUpperCase().charCodeAt(0), text: (modifiers & 8) ? key.toUpperCase() : key }
       : { key, code: key });
-    const base: any = { ...mapped, modifiers };
-    await ctx.cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', ...base });
-    if (base.text && !modifiers) await ctx.cdp.send('Input.dispatchKeyEvent', { type: 'char', ...base });
-    await ctx.cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+    // Up to 0.1.13 a separate char event followed the keyDown, so every
+    // printable key, Space and Enter went in twice.
+    await pressKey(ctx, { key: mapped.key, code: mapped.code, keyCode: mapped.windowsVirtualKeyCode ?? 0, text: mapped.text }, modifiers);
     return JSON.stringify({ success: true, keys: combo });
   },
 });
@@ -1084,6 +1272,7 @@ stdout is captured and returned. Use console.log() for output. Timeout 30s, outp
 });
 
 register({
+  serial: true,
   def: {
     type: 'function', name: 'press_key',
     description: 'Press a keyboard key or key combination in the browser. Useful for keyboard shortcuts, Enter to submit, Escape to close, arrow keys, etc.',
@@ -2084,6 +2273,7 @@ register({
 // ── focus_index: trigger native focus (e.g. so password autofill fires) ───
 
 register({
+  serial: true,
   def: {
     type: 'function', name: 'focus_index',
     description: `Focus the input at index [N] using a real CDP-driven focus. Unlike type_index (which uses a setter that bypasses Chrome autofill), this triggers native focus events — useful when you want the browser's saved-password autofill to kick in. Follow with press_key("Tab") to commit autofill, then re-inspect the page.`,
