@@ -26,6 +26,11 @@ check('switching run_script on hands the SDK its definition', names(r).includes(
 r = policy([], ['bash']);
 check('a CLI host tool switched on joins the allowlist only', r.allow.includes('bash') && !names(r).includes('bash'), JSON.stringify(r));
 
+r = policy([], ['read_file', 'write_file', 'bash']);
+check("the switches turn on the CLI's own tools (CLI 1.0.97 names)",
+  ['view', 'create', 'edit', 'powershell', 'read_powershell'].every((n) => r.allow.includes(n)) && !names(r).includes('view'), JSON.stringify(r.allow));
+check('none of them is on by default', !['view', 'create', 'edit', 'powershell'].some((n) => policy().allow.includes(n)));
+
 r = policy(['click_index']);
 check('a disabled browser tool leaves both the definitions and the allowlist', !names(r).includes('click_index') && !r.allow.includes('click_index'));
 

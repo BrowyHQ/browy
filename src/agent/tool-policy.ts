@@ -8,11 +8,27 @@
 // could talk the agent into should reach the machine by default. Until 0.1.10
 // run_script was missed here and was on by default.
 
+/** The Copilot CLI tools behind each host switch. The switches keep the names
+ *  Browy has used since 0.1.2, but CLI 1.0.97 calls its tools view, create and
+ *  edit, and powershell on Windows or bash elsewhere, each shell with its
+ *  read_/write_/stop_/list_ helpers (`client.rpc.tools.list`). Up to 0.1.13
+ *  the read_file, write_file and bash switches matched no tool, so switching
+ *  them on did nothing. A name the CLI doesn't have is ignored. */
+export const SDK_TOOL_NAMES: Readonly<Record<string, readonly string[]>> = {
+  read_file: ['view'],
+  write_file: ['create', 'edit'],
+  bash: [
+    'bash', 'read_bash', 'write_bash', 'stop_bash', 'list_bash',
+    'powershell', 'read_powershell', 'write_powershell', 'stop_powershell', 'list_powershell',
+  ],
+  grep: ['grep'],
+  glob: ['glob'],
+  web_fetch: ['web_fetch'],
+};
+
 /** Copilot SDK tools the user can opt into. The SDK implements them; the host
  *  only stops suppressing them from the session's allowlist. */
-export const SDK_OPT_IN_TOOLS: ReadonlySet<string> = new Set([
-  'read_file', 'write_file', 'bash', 'grep', 'glob', 'web_fetch',
-]);
+export const SDK_OPT_IN_TOOLS: ReadonlySet<string> = new Set(Object.keys(SDK_TOOL_NAMES));
 
 /** Browy's own tools that reach the machine, so they're opt-in too. */
 export const BROWY_OPT_IN_TOOLS: ReadonlySet<string> = new Set(['run_script']);
@@ -35,7 +51,8 @@ export function toolPolicy<T extends { name: string }>(
   const kept = tools.filter((t) => !disabled.has(t.name) && (!BROWY_OPT_IN_TOOLS.has(t.name) || optedIn(t.name)));
   const allow = kept.map((t) => t.name);
   for (const name of SDK_OPT_IN_TOOLS) {
-    if (optedIn(name) && !allow.includes(name)) allow.push(name);
+    if (!optedIn(name)) continue;
+    for (const cli of SDK_TOOL_NAMES[name]) if (!allow.includes(cli)) allow.push(cli);
   }
   return { tools: kept, allow };
 }

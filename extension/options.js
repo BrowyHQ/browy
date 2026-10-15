@@ -98,8 +98,8 @@ const TOOL_REGISTRY = [
   // validated against OPT_IN_TOOLS in src/agent/tool-policy.ts.
   { cat: 'host', optIn: true, name: 'run_script', desc: 'run Node.js on your machine: files, network, shell (full user privileges)' },
   { cat: 'host', optIn: true, name: 'read_file',  desc: 'read any file on your machine (the agent runs as your user)' },
-  { cat: 'host', optIn: true, name: 'write_file', desc: 'create or overwrite files on your machine' },
-  { cat: 'host', optIn: true, name: 'bash',       desc: 'run arbitrary shell commands (full user privileges)' },
+  { cat: 'host', optIn: true, name: 'write_file', desc: 'create or edit files on your machine' },
+  { cat: 'host', optIn: true, name: 'bash',       desc: 'run shell commands: PowerShell on Windows, bash elsewhere (full user privileges)' },
   { cat: 'host', optIn: true, name: 'grep',       desc: 'search file contents on your machine' },
   { cat: 'host', optIn: true, name: 'glob',       desc: 'list files by path pattern on your machine' },
   { cat: 'host', optIn: true, name: 'web_fetch',  desc: 'fetch arbitrary URLs from your machine (bypasses browser CORS/cookies)' },
