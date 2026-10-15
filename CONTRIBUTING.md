@@ -218,7 +218,7 @@ Releases are cut from `main` by the maintainer. Each release:
 
 1. Brings dependencies up to date: merges the open Dependabot PRs and checks `npm outdated`, so every release ships the current Copilot SDK and CLI.
 2. Bumps `extension/manifest.json` and `package.json`.
-3. Adds a new section to [CHANGELOG.md](CHANGELOG.md) with `### Added` / `### Changed` / `### Fixed` / `### Removed` subsections per [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+3. Adds a new section to [CHANGELOG.md](CHANGELOG.md), headed `## [0.X.Y]: <one-line headline>`, with `### Added` / `### Changed` / `### Fixed` / `### Removed` subsections per [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). That section becomes the GitHub release's title and notes (`scripts/release-notes.mjs`), and people who watch the repo's releases get it by email, so write it for users.
 4. Tags `v0.X.Y` and pushes the tag.
 5. The release workflow builds the installers and uploads to [GitHub Releases](https://github.com/BrowyHQ/browy/releases).
 6. The Chrome Web Store listing is updated separately, only when the extension code itself changes.

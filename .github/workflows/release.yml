@@ -130,13 +130,21 @@ jobs:
           set -euxo pipefail
           TAG="v${VERSION}"
           # Create the release if it doesn't already exist (first run after a
-          # fresh tag push). Idempotent: --notes-from-tag uses the annotated
-          # tag's message; subsequent reruns hit the upload path.
+          # fresh tag push); reruns hit the upload path. The notes are this
+          # version's CHANGELOG.md section, which is what people watching the
+          # repo's releases get by email.
           if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            NOTES="$(mktemp)"
+            if node scripts/release-notes.mjs "$VERSION" > "$NOTES"; then
+              TITLE="$(node scripts/release-notes.mjs "$VERSION" --title)"
+            else
+              TITLE="$TAG"
+              echo "Release $TAG. See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details." > "$NOTES"
+            fi
             gh release create "$TAG" \
               --repo "${{ github.repository }}" \
-              --title "$TAG" \
-              --notes "Release $TAG. See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details."
+              --title "$TITLE" \
+              --notes-file "$NOTES"
           fi
           # Always also include the install scripts from the source tree
           # so the GH release has everything a user needs in one place.
