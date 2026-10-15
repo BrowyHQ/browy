@@ -574,14 +574,19 @@ export class Agent {
   private async pruneOldBrowySessions() {
     if (!this.copilotClient) return;
     try {
-      // The same full scan, and so the same isBrowySession() test, as
-      // listChats. Pruning once matched only the sp-/dt- prefix while listing
-      // matched more, so legacy sessions were listed forever and never
-      // cleaned up. Every signal is Browy-specific, so `copilot` CLI
-      // sessions can never match.
-      const scanned = await this.scanAllChats();
-      const ours = [...scanned.values()]
-        .map((s) => ({ id: s.id, mod: s.modifiedTime }))
+      const sessions = await this.copilotClient.listSessions();
+      if (!Array.isArray(sessions) || sessions.length === 0) return;
+      // Use the SAME predicate as listChats. Pruning previously matched only
+      // the sp-/dt- prefix while listing matched three signals, so legacy
+      // sessions were listed forever and never cleaned up. Every signal is
+      // Browy-specific (our id prefix, our workdir, or our own
+      // <browser_context> marker), so `copilot` CLI sessions can never match.
+      const ours = sessions
+        .filter((s: any) => isBrowySession(s))
+        .map((s: any) => ({
+          id: s.sessionId,
+          mod: s.modifiedTime instanceof Date ? s.modifiedTime.getTime() : Number(s.modifiedTime) || 0,
+        }))
         .sort((a, b) => b.mod - a.mod);
       const KEEP_RECENT = 100;
       const MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
@@ -590,7 +595,7 @@ export class Agent {
       if (toDelete.length === 0) return;
       let removed = 0;
       for (const s of toDelete) {
-        try { await this.copilotClient.deleteSession(s.id); removed++; this.forgetChat(s.id); } catch {}
+        try { await this.copilotClient.deleteSession(s.id); removed++; } catch {}
       }
       if (removed > 0) console.log(`  🧹 Pruned ${removed} old Browy session${removed > 1 ? 's' : ''} (>30d, keeping ${KEEP_RECENT} most recent)`);
     } catch { /* non-fatal */ }
