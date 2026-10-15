@@ -89,6 +89,7 @@ class FakeClient {
   }
   async listModels() { return [{ id: 'gpt-5-mini' }]; }
   async listSessions() { return []; }
+  async deleteSession(id) { this.deleted = [...(this.deleted || []), id]; onDisk.delete(id); }
   async ping() { if (!this.connected || this.pingHangs) throw new Error('Client not connected'); return {}; }
   async forceStop() { this.connected = false; this.stopped = true; for (const s of this.sessions) s.markDisconnected(); }
   async stop() { return this.forceStop(); }
@@ -107,6 +108,12 @@ globalThis.__fakeSdk = {
 
 // ── the test ────────────────────────────────────────────────────────────────
 
+// A home of its own: the agent writes ~/.browy/data/prefs.json when the model
+// changes, and that file belongs to the real Browy on this machine.
+const home = path.join(out, 'home');
+fs.mkdirSync(home, { recursive: true });
+process.env.USERPROFILE = home;
+process.env.HOME = home;
 const { Agent } = await import(pathToFileURL(path.join(out, 'loop.mjs')).href);
 
 const failures = [];
@@ -148,13 +155,17 @@ try {
   await until('the restart', () => ready() === 1);
   check('Copilot is started again by itself', clients.length === 2 && clients[0].stopped && statuses.join() === 'copilot_restarting,copilot_ready', statuses.join());
 
+  // Picking another model before the next message must not cost the chat.
+  await agent.setModel('gpt-5');
+  check('changing the model while no chat is open keeps the chat on disk', onDisk.has('sp-loss') && !clients.some((c) => c.deleted?.length));
+
   // The next message resumes the same chat on the new Copilot.
   const t3 = agent.chat('continue');
   await until('the resumed send', () => clients[1].sessions[0]?.sent.length === 1);
   const s3 = clients[1].sessions[0];
   const opened = clients[0].creates[0];
   const resumed = clients[1].resumes[0];
-  check('the next message resumes the same chat from disk', s3.sessionId === 'sp-loss' && clients[1].creates.length === 0 && !!resumed);
+  check('the next message resumes the same chat from disk, with the new model', s3.sessionId === 'sp-loss' && clients[1].creates.length === 0 && resumed?.model === 'gpt-5');
   check('with the same system message, streaming and tools as before',
     /You are Browy/.test(resumed?.systemMessage?.content) && resumed.systemMessage.content === opened.systemMessage.content
       && resumed.streaming === true && JSON.stringify(resumed.availableTools) === JSON.stringify(opened.availableTools));
@@ -202,5 +213,5 @@ if (failures.length) {
   console.error('FAIL:\n  - ' + failures.join('\n  - '));
   process.exit(1);
 }
-console.log('PASS: Copilot quitting under a chat (10 assertions)');
+console.log('PASS: Copilot quitting under a chat (11 assertions)');
 process.exit(0);

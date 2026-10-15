@@ -1422,6 +1422,9 @@ export class Agent {
       const { savePrefs } = await import('./prefs.js');
       savePrefs({ model: id });
     } catch {}
+    // No chat open, e.g. right after Copilot restarted: the next one opens
+    // with this model. Rebuilding here would delete the chat on disk.
+    if (!this.copilotSession) return;
     if (this.copilotSession && typeof this.copilotSession.setModel === 'function') {
       try {
         await this.copilotSession.setModel(id);
@@ -1432,7 +1435,7 @@ export class Agent {
         console.warn(`  ⚠ session.setModel("${id}") failed; rebuilding session:`, (e as Error)?.message || e);
       }
     }
-    // No live session, no setModel support, or setModel threw → rebuild.
+    // No setModel support, or setModel threw → rebuild.
     await this.clearHistory();
   }
 
@@ -1689,7 +1692,9 @@ export class Agent {
     }
     if (id) {
       this.previewTimePins.delete(id);
-      try { await this.copilotClient.deleteSession(id); } catch {}
+      // Copilot may be restarting; the delete waits for it.
+      await this.whenCopilotReady();
+      try { await this.copilotClient?.deleteSession(id); } catch {}
     }
     this.emit({ type: 'status', status: 'idle' });
   }
