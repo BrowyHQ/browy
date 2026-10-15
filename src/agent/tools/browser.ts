@@ -192,6 +192,9 @@ const __browyArm = (token) => {
   } catch (_) {}
 };`;
 
+/** Errors a CDP call gets when the page navigates or closes under it. */
+const NAV_ERROR_RE = /Execution context was destroyed|Inspected target navigated or closed|Cannot find context with specified id|Promise was collected|Detached while handling command|Target closed|Session closed|has been closed/i;
+
 interface DocState {
   /** Still the document marked with the token. */
   same: boolean;
@@ -1367,28 +1370,80 @@ register({
   },
 });
 
+/** The code as one expression, so its value can come back like in the
+ *  console, or null when it's statements. Only compiled here, never run. */
+const AsyncFunction = (async () => {}).constructor as new (body: string) => unknown;
+function asExpression(code: string): string | null {
+  const src = code.trim().replace(/;+$/, '').trim();
+  if (!src || /^(const|let|var|function|class|if|for|while|do|switch|try|return|throw|import|export)\b/.test(src)) return null;
+  try { new AsyncFunction(`return (\n${src}\n);`); return src; } catch { return null; }
+}
+
+/** After the code started a navigation, or the page navigated while it ran:
+ *  wait for the new page and say where the tab ended up. */
+async function afterNavigation(ctx: BrowserToolContext, token: string, result: string | undefined, interrupted: string): Promise<string> {
+  const w = await waitForDocument(ctx, { token, timeoutMs: 15_000 });
+  const extra = result !== undefined && result !== 'undefined' ? { result: result.slice(0, 4000) } : {};
+  if (w.blocked) throw new Error(`The code sent the tab to a page Browy can't control. ${w.blocked}`);
+  if (w.state && !w.state.same) {
+    return JSON.stringify({
+      navigated: true, url: w.state.url, title: w.state.title, ...extra,
+      ...(interrupted ? { note: 'The page navigated while the code was still running, so its return value is lost.' } : {}),
+      ...(w.timedOut ? { loading: true } : {}),
+    });
+  }
+  if (w.state?.intercepted) return JSON.stringify({ navigated: true, sameDocument: true, url: w.state.url, title: w.state.title, ...extra });
+  if (w.cancelled) {
+    return JSON.stringify({ navigated: false, url: w.state?.url, ...extra, note: 'The code started a navigation that didn\'t replace the page (a download, an empty response, or it was cancelled).' });
+  }
+  if (interrupted) throw new Error(`The page navigated or closed while the code ran (${interrupted}), and Browy couldn't read the new page within 15 s${w.error ? ` (${w.error})` : ''}.`);
+  return JSON.stringify({ navigated: false, url: w.state?.url, ...extra, note: `The code started loading ${w.state?.nav?.url || 'another page'}, but the tab still shows the old page after 15 s. Check it with get_page_info.` });
+}
+
 register({
   def: {
-    type: 'function', name: 'evaluate_js', description: `Execute JavaScript code in the browser page context. Use this for ANY custom browser action — composing complex DOM queries, automating multi-step UI flows, extracting structured data, or doing anything the pre-built tools can't handle. The code runs in the page with full DOM access. Return data by making the last expression a value. For async work, use await (top-level await is supported).`,
-    parameters: { type: 'object', properties: { code: { type: 'string', description: 'JavaScript code to execute in the page. Can use await. Return data as the last expression.' } }, required: ['code'] },
+    type: 'function', name: 'evaluate_js', description: `Run JavaScript in the page, with full DOM access. The code is the body of an async function: await works, and \`return\` sends back a value (JSON, up to 6000 chars); a lone expression is returned without return. If the code navigates (location.assign, location.reload, a form submit or a link click), the answer is {"navigated": true, "url", "title"} once the new page has loaded, so don't wait or catch errors for that yourself. Prefer navigate, the [N] index tools and extract_text, which also reach into open shadow roots; use this for what they can't do.`,
+    parameters: { type: 'object', properties: { code: { type: 'string', description: 'JavaScript to run in the page. Use return for the value you want, or pass a single expression.' } }, required: ['code'] },
   },
   async run(args, ctx) {
-    const code = String(args.code);
-    // Wrap in async IIFE for top-level await support
-    const wrapped = `(async () => { ${code} })()`;
-    const { result, exceptionDetails } = await ctx.cdp.send('Runtime.evaluate', {
-      expression: wrapped,
-      returnByValue: true,
-      awaitPromise: true,
-      timeout: 30_000,
-    });
-    if (exceptionDetails) {
-      const errMsg = exceptionDetails.exception?.description || exceptionDetails.text || 'JS execution error';
+    const code = String(args.code ?? '');
+    const token = newToken();
+    const expression = asExpression(code);
+    const body = expression != null ? `return (\n${expression}\n);` : code;
+    // The code is on lines of its own, so a trailing // comment can't swallow
+    // the wrapper. __browyArm marks this document and notes any navigation
+    // the code starts.
+    const wrapped = `(() => {
+${ARM_JS}
+__browyArm(${JSON.stringify(token)});
+return (async () => {
+${body}
+})().then((v) => ({ v, nav: window.__browyNav || null }));
+})()`;
+    let res: { result?: { value?: { v?: unknown; nav?: { failed?: boolean } | null } }; exceptionDetails?: { text?: string; exception?: { description?: string } } };
+    try {
+      res = await ctx.cdp.send('Runtime.evaluate', {
+        expression: wrapped,
+        returnByValue: true,
+        awaitPromise: true,
+        timeout: 30_000,
+      }) as typeof res;
+    } catch (e) {
+      // Up to 0.1.13 this came back as a failure, though the navigation
+      // usually was the point of the code.
+      const raw = errText(e);
+      if (!NAV_ERROR_RE.test(raw)) throw e;
+      return afterNavigation(ctx, token, undefined, raw);
+    }
+    if (res.exceptionDetails) {
+      const errMsg = res.exceptionDetails.exception?.description || res.exceptionDetails.text || 'JS execution error';
       return JSON.stringify({ error: errMsg.slice(0, 2000) });
     }
-    const val = result.value;
-    const str = typeof val === 'string' ? val : JSON.stringify(val);
-    return (str ?? 'undefined').slice(0, 6000);
+    const val = res.result?.value?.v;
+    const str = (typeof val === 'string' ? val : JSON.stringify(val)) ?? 'undefined';
+    const nav = res.result?.value?.nav;
+    if (nav && !nav.failed) return afterNavigation(ctx, token, str, '');
+    return str.slice(0, 6000);
   },
 });
 
