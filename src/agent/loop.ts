@@ -9,6 +9,7 @@ import { copilotClientOptions, resolveCopilotCli } from './copilot-cli.js';
 import { RecentActions } from './recent-actions.js';
 import { OPT_IN_TOOLS, toolPolicy } from './tool-policy.js';
 import { TurnText } from './turn-text.js';
+import { eventsToTurns, pageTurns, legacyMessages, type ChatItem, type ChatPage, type LegacyMessage } from './chat-items.js';
 
 // Copilot SDK is CJS — use require
 import { createRequire } from 'module';
@@ -44,27 +45,24 @@ function withDeadline<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
   ]).finally(() => clearTimeout(timer));
 }
 
-/** Decide whether an SDK session belongs to Browy.
+/** Decide whether an SDK session belongs to Browy. Any one signal is enough:
+ *   1. ID prefix (sp-* or dt-*): every chat since the side panel took over.
+ *   2. clientName 'browseragent', when the metadata carries it (the
+ *      runtime's own session list does; the SDK's listSessions() drops it).
+ *   3. Summary contains <browser_context>: the SDK records the first user
+ *      message as the summary, and Browy adds that block to every message.
+ *      Catches the oldest chats, from before the id prefix.
  *
- * We use three signals in order of confidence:
- *   1. ID prefix (sp-* or dt-*) — current scheme, perfectly reliable.
- *   2. context.cwd matches our BROWSERAGENT_WORKDIR — set on every session
- *      we create, including older UUID-prefixed sessions from before we
- *      switched to the sp-* / dt-* scheme.
- *   3. Summary contains <browser_context> — the SDK records the first
- *      user message as the session summary, and Browy prepends a
- *      <browser_context> block to every user message. Catches ancient
- *      sessions that predate even the cwd convention.
- *
- * Without (2) and (3), all sessions older than the sp- / dt- prefix
- * introduction silently disappear from the chats overlay even though
- * they're still on disk. Treating any of these signals as sufficient
- * gets users their full history back. */
+ * The working directory is not a signal. Any `copilot` started in
+ * ~/.browseragent/sessions gets it too: on the machine this was written on,
+ * a Copilot CLI coding session ("Deploy TinyDetect Redesign") had it, and
+ * pruneOldBrowySessions() uses this same test to decide what to delete. The
+ * old check read context.cwd, which SDK 1.x renamed to workingDirectory, so it
+ * never matched anyway. */
 function isBrowySession(s: any): boolean {
   const id = s?.sessionId || '';
   if (isBrowySessionId(id)) return true;
-  const cwd = s?.context?.cwd;
-  if (cwd && cwd === BROWSERAGENT_WORKDIR) return true;
+  if (s?.clientName === BROWSERAGENT_CLIENT_NAME) return true;
   const summary = s?.summary || '';
   if (typeof summary === 'string' && summary.includes('<browser_context>')) return true;
   return false;
@@ -92,6 +90,34 @@ function cleanChatSummary(s: string | undefined): string | undefined {
   // surface a placeholder so the row isn't blank.
   if (!out) return '(no summary)';
   return out;
+}
+
+/** One row of the chats list. Times are ms since epoch. */
+export interface ChatSummary { id: string; summary?: string; startTime: number; modifiedTime: number }
+/** A chat the full scan found, and whether a by-id listing finds it too. */
+type ScannedChat = ChatSummary & { byId: boolean };
+
+/** A full scan of every session is kept this long. Chats Browy creates have
+ *  sp-/dt- ids and show up in the fast by-id listing anyway; the scan only
+ *  adds the old ones that don't, which rarely change. */
+const CHAT_SCAN_TTL_MS = 10 * 60 * 1000;
+/** Transcripts kept in memory so a "load earlier" page comes from the same read. */
+const HISTORY_CACHE_SIZE = 4;
+const HISTORY_CACHE_TTL_MS = 5 * 60 * 1000;
+
+function msOf(v: unknown): number {
+  if (v instanceof Date) return v.getTime();
+  if (typeof v === 'string') return Date.parse(v) || 0;
+  return Number(v) || 0;
+}
+
+function toChatSummary(s: any): ChatSummary {
+  return {
+    id: String(s.sessionId),
+    summary: cleanChatSummary(s.summary),
+    startTime: msOf(s.startTime),
+    modifiedTime: msOf(s.modifiedTime),
+  };
 }
 
 const SYSTEM_PROMPT = `You are Browy — a browser-automation copilot that lives inside the user's browser as a side-panel extension. The user can drag you around as a small pixel mascot, type questions in the side panel, and watch you drive their real tabs in real time.
@@ -265,6 +291,11 @@ export class Agent {
    *  pre-read value keeps the order stable; a real chat turn clears the pin so
    *  genuine activity still floats the chat to the top. */
   private previewTimePins = new Map<string, number>();
+  /** The last full scan of every session for Browy chats (see listChats). */
+  private chatScan: { at: number; chats: Map<string, ScannedChat> } | null = null;
+  private chatScanning: Promise<Map<string, ScannedChat>> | null = null;
+  /** Chat id → its turns as of the last read (see getHistory). */
+  private historyCache = new Map<string, { at: number; turns: ChatItem[][] }>();
   /** Names of tools the user has disabled from the built-in browser-tool
    *  registry. ensureSession() removes these from the SDK's allowlist before
    *  creating/resuming a session. Empty set = no overrides (all built-ins). */
@@ -536,26 +567,21 @@ export class Agent {
     // forever otherwise (one per panel open) and slow down listSessions
     // (which walks every session on disk). Keep the 100 most recent and
     // delete anything older than 30 days. User-CLI sessions are untouched.
-    this.pruneOldBrowySessions().catch(() => {});
+    if (!process.env.BROWY_NO_PRUNE) this.pruneOldBrowySessions().catch(() => {});
     console.log('  ✅ Copilot SDK ready');
   }
 
   private async pruneOldBrowySessions() {
     if (!this.copilotClient) return;
     try {
-      const sessions = await this.copilotClient.listSessions();
-      if (!Array.isArray(sessions) || sessions.length === 0) return;
-      // Use the SAME predicate as listChats. Pruning previously matched only
-      // the sp-/dt- prefix while listing matched three signals, so legacy
-      // sessions were listed forever and never cleaned up. Every signal is
-      // Browy-specific (our id prefix, our workdir, or our own
-      // <browser_context> marker), so `copilot` CLI sessions can never match.
-      const ours = sessions
-        .filter((s: any) => isBrowySession(s))
-        .map((s: any) => ({
-          id: s.sessionId,
-          mod: s.modifiedTime instanceof Date ? s.modifiedTime.getTime() : Number(s.modifiedTime) || 0,
-        }))
+      // The same full scan, and so the same isBrowySession() test, as
+      // listChats. Pruning once matched only the sp-/dt- prefix while listing
+      // matched more, so legacy sessions were listed forever and never
+      // cleaned up. Every signal is Browy-specific, so `copilot` CLI
+      // sessions can never match.
+      const scanned = await this.scanAllChats();
+      const ours = [...scanned.values()]
+        .map((s) => ({ id: s.id, mod: s.modifiedTime }))
         .sort((a, b) => b.mod - a.mod);
       const KEEP_RECENT = 100;
       const MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
@@ -564,7 +590,7 @@ export class Agent {
       if (toDelete.length === 0) return;
       let removed = 0;
       for (const s of toDelete) {
-        try { await this.copilotClient.deleteSession(s.id); removed++; } catch {}
+        try { await this.copilotClient.deleteSession(s.id); removed++; this.forgetChat(s.id); } catch {}
       }
       if (removed > 0) console.log(`  🧹 Pruned ${removed} old Browy session${removed > 1 ? 's' : ''} (>30d, keeping ${KEEP_RECENT} most recent)`);
     } catch { /* non-fatal */ }
@@ -1250,40 +1276,114 @@ export class Agent {
     }
   }
 
-  /** List Browy chats. We identify our sessions by sessionId prefix (`sp-`
-   *  for side panel, `dt-` for DevTools panel) — the SDK's `{ cwd }` filter
-   *  doesn't work for us because SessionMetadata.context is only populated
-   *  from git, not from our workspace.yaml cwd, so it comes back undefined
-   *  and the cwd filter returns nothing. */
-  async listChats(): Promise<Array<{ id: string; summary?: string; startTime: number; modifiedTime: number }>> {
+  /** List Browy chats, newest first.
+   *
+   *  Two passes. The fast one lists only session ids and reads summaries for
+   *  Browy's own (sp-/dt-), about 250 ms here against 3,327 sessions. The
+   *  full one lists every session with its metadata (0.7 to 1 s warm, over
+   *  6 s on a cold start) and adds the old Browy chats that have no sp-/dt-
+   *  id; it runs alongside and is kept for CHAT_SCAN_TTL_MS. The runtime's
+   *  working-directory filter costs as much as the full listing, because the
+   *  runtime still reads every session to apply it, and it also matches
+   *  Copilot CLI sessions started in that folder.
+   *
+   *  `onFast` gets the fast pass's chats as soon as they are in, merged with
+   *  any earlier scan. The returned list always includes the full scan, so a
+   *  caller without `onFast` gets one complete answer, as panels before
+   *  0.1.14 expect. */
+  async listChats(onFast?: (chats: ChatSummary[]) => void): Promise<ChatSummary[]> {
     await this.whenCopilotReady();
     if (!this.copilotClient) return [];
+    const t0 = Date.now();
+    const scanFresh = !!this.chatScan && Date.now() - this.chatScan.at < CHAT_SCAN_TTL_MS;
+    const scan = this.scanAllChats().catch((e: any) => {
+      console.error('  ❌ listChats: full scan failed:', e?.message || e);
+      return null;
+    });
+    let own: ChatSummary[] | null = null;
+    let ownIsAll = false;
     try {
-      const sessions = await this.copilotClient.listSessions();
-      const total = Array.isArray(sessions) ? sessions.length : 0;
-      const out: Array<{ id: string; summary?: string; startTime: number; modifiedTime: number }> = [];
-      for (const s of sessions || []) {
-        const id = s?.sessionId || '';
-        if (!isBrowySession(s)) continue;
-        const rawModified = s.modifiedTime instanceof Date ? s.modifiedTime.getTime() : Number(s.modifiedTime) || 0;
-        // Reading a transcript forces a resumeSession, which rewrites the
-        // session's modifiedTime. Without this pin, merely clicking a chat
-        // teleported it to the top of the list.
-        const pinned = this.previewTimePins.get(id);
-        out.push({
-          id,
-          summary: cleanChatSummary(s.summary),
-          startTime: s.startTime instanceof Date ? s.startTime.getTime() : Number(s.startTime) || 0,
-          modifiedTime: pinned !== undefined ? pinned : rawModified,
-        });
-      }
-      out.sort((a, b) => b.modifiedTime - a.modifiedTime);
-      console.log(`  📜 listChats: SDK returned ${total} sessions → ${out.length} Browy chats`);
-      return out;
+      const r = await this.listOwnChats();
+      own = r.chats;
+      ownIsAll = r.allOfOurs;
+      console.log(`  📜 listChats: ${own.length} chats ${ownIsAll ? 'by id' : 'by working directory'} in ${Date.now() - t0} ms`);
     } catch (e: any) {
-      console.error('  ❌ listChats failed:', e?.message || e);
-      return [];
+      console.error('  ❌ listChats: fast listing failed:', e?.message || e);
     }
+    if (onFast && own && !scanFresh) onFast(this.mergeChats(own, ownIsAll, this.chatScan?.chats));
+    const scanned = await scan;
+    const out = this.mergeChats(own, ownIsAll, scanned || undefined);
+    console.log(`  📜 listChats: ${out.length} Browy chats in ${Date.now() - t0} ms${scanFresh ? ' (scan reused)' : ''}`);
+    return out;
+  }
+
+  /** Browy's sp-/dt- chats. Lists session ids only, then reads the summaries
+   *  of ours. Both calls are marked experimental in SDK 1.0.21, so a runtime
+   *  without them gets the public working-directory filter instead, which
+   *  misses sp- chats started elsewhere (`allOfOurs` false); the full scan
+   *  adds those. */
+  private async listOwnChats(): Promise<{ chats: ChatSummary[]; allOfOurs: boolean }> {
+    const rpc = this.copilotClient?.rpc?.sessions;
+    if (rpc && typeof rpc.list === 'function' && typeof rpc.enrichMetadata === 'function') {
+      try {
+        const basic = await rpc.list({ source: 'local', metadataLimit: 0 });
+        const ours = (basic?.sessions || []).filter((s: any) => !s.isRemote && isBrowySessionId(String(s.sessionId || '')));
+        if (!ours.length) return { chats: [], allOfOurs: true };
+        // Sessions the runtime finds empty are left out, as listSessions() does.
+        const rich = await rpc.enrichMetadata({ sessions: ours });
+        return { chats: (rich?.sessions || []).map(toChatSummary), allOfOurs: true };
+      } catch (e: any) {
+        console.log(`  📜 listChats: session ids unavailable (${e?.message || e}), using the working-directory filter`);
+      }
+    }
+    const sessions = await this.copilotClient.listSessions({ workingDirectory: BROWSERAGENT_WORKDIR });
+    const chats = (sessions || []).filter((s: any) => isBrowySessionId(String(s?.sessionId || ''))).map(toChatSummary);
+    return { chats, allOfOurs: false };
+  }
+
+  /** Every Browy chat, from a listing of every session the runtime has. */
+  private scanAllChats(): Promise<Map<string, ScannedChat>> {
+    if (this.chatScan && Date.now() - this.chatScan.at < CHAT_SCAN_TTL_MS) return Promise.resolve(this.chatScan.chats);
+    this.chatScanning ??= (async () => {
+      const t0 = Date.now();
+      const sessions = await this.copilotClient.listSessions();
+      const chats = new Map<string, ScannedChat>();
+      for (const s of sessions || []) {
+        if (!isBrowySession(s)) continue;
+        chats.set(String(s.sessionId), { ...toChatSummary(s), byId: isBrowySessionId(String(s.sessionId)) });
+      }
+      this.chatScan = { at: Date.now(), chats };
+      console.log(`  📜 listChats: full scan of ${(sessions || []).length} sessions found ${chats.size} Browy chats in ${Date.now() - t0} ms`);
+      return chats;
+    })().finally(() => { this.chatScanning = null; });
+    return this.chatScanning;
+  }
+
+  /** The fast pass's chats plus what only the scan finds. When the fast pass
+   *  covered every sp-/dt- chat, a scanned one it lacks was deleted since. */
+  private mergeChats(own: ChatSummary[] | null, ownIsAll: boolean, scanned?: Map<string, ScannedChat>): ChatSummary[] {
+    const byId = new Map<string, ChatSummary>();
+    for (const s of scanned?.values() || []) {
+      if (own && ownIsAll && s.byId) continue;
+      byId.set(s.id, { id: s.id, summary: s.summary, startTime: s.startTime, modifiedTime: s.modifiedTime });
+    }
+    for (const c of own || []) byId.set(c.id, c);
+    const out = [...byId.values()].map((c) => {
+      // Reading a transcript by resuming the session (the fallback in
+      // readChatEvents) rewrites its modifiedTime. Without this pin, merely
+      // clicking a chat teleported it to the top of the list.
+      const pinned = this.previewTimePins.get(c.id);
+      return pinned !== undefined ? { ...c, modifiedTime: pinned } : c;
+    });
+    out.sort((a, b) => b.modifiedTime - a.modifiedTime);
+    return out;
+  }
+
+  /** Drop a deleted chat from the in-memory lists. */
+  private forgetChat(id: string): void {
+    this.chatScan?.chats.delete(id);
+    this.historyCache.delete(id);
+    this.previewTimePins.delete(id);
   }
 
   /** Delete a chat by SDK session id, whether or not it is the one currently
@@ -1308,7 +1408,7 @@ export class Agent {
       try { await old.disconnect(); } catch {}
     }
     this.recentActions.clear(id);
-    this.previewTimePins.delete(id);
+    this.forgetChat(id);
     try {
       await this.copilotClient.deleteSession(id);
       console.log(`  🗑 deleted chat ${id}`);
@@ -1319,46 +1419,126 @@ export class Agent {
     }
   }
 
-  /** Read a chat's transcript by SDK session id. If it's the active session
-   *  we read from it directly; otherwise we briefly resume a side-handle and
-   *  disconnect after reading. Maps SDK SessionEvents → side-panel bubbles. */
-  async getChatMessages(id: string): Promise<Array<
-    | { role: 'user'; text: string; timestamp?: number }
-    | { role: 'assistant'; text: string; timestamp?: number }
-    | { role: 'tool'; name: string; ok: boolean; summary?: string; timestamp?: number }
-  >> {
+  /** A page of a chat as ChatItems (agent/chat-items.ts): its newest `limit`
+   *  turns, or those before turn `before`. Read from the chat's Copilot
+   *  session without resuming it. `missing` means the session has no event
+   *  log: it never ran a turn, or it is older than events.jsonl. */
+  async getHistory(id: string, opts: { limit?: number; before?: number } = {}): Promise<ChatPage & { missing?: boolean }> {
+    const t0 = Date.now();
+    const none = { items: [], start: 0, end: 0, total: 0, missing: true };
+    await this.whenCopilotReady();
+    if (!this.copilotClient || !id) return none;
+    // "Load earlier" pages come from the read that produced the first page,
+    // so turn numbers line up.
+    let turns = opts.before !== undefined && opts.before !== null ? this.cachedTurns(id) : null;
+    if (!turns) {
+      const events = await this.readChatEvents(id);
+      if (!events) {
+        console.log(`  📜 chat.history ${id}: no event log`);
+        return none;
+      }
+      turns = eventsToTurns(events, { live: this.isTurnRunning(id) });
+      this.cacheTurns(id, turns);
+    }
+    const page = pageTurns(turns, opts);
+    console.log(`  📜 chat.history ${id}: turns ${page.start}-${page.end} of ${page.total} in ${Date.now() - t0} ms`);
+    return page;
+  }
+
+  /** The transcript in the shape panels before 0.1.14 understand (see
+   *  legacyMessages); the DevTools panel's /sessions still uses it. */
+  async getChatMessages(id: string): Promise<LegacyMessage[]> {
     await this.whenCopilotReady();
     if (!this.copilotClient || !id) return [];
-    let events: any[] = [];
-    if (this.copilotSession && this.browyProtocolSessionId === id) {
-      try { events = (await this.copilotSession.getEvents()) || []; } catch { return []; }
-    } else {
-      let handle: any = null;
-      // Capture the on-disk timestamp before resuming so listChats can report
-      // the real last-activity time instead of "just now".
-      let before: number | undefined;
+    const events = await this.readChatEvents(id);
+    if (!events) return [];
+    const turns = eventsToTurns(events, { live: this.isTurnRunning(id) });
+    this.cacheTurns(id, turns);
+    return legacyMessages(turns);
+  }
+
+  private isTurnRunning(id: string): boolean {
+    return !!this.turn && this.browyProtocolSessionId === id;
+  }
+
+  private cachedTurns(id: string): ChatItem[][] | null {
+    const hit = this.historyCache.get(id);
+    return hit && Date.now() - hit.at < HISTORY_CACHE_TTL_MS ? hit.turns : null;
+  }
+
+  private cacheTurns(id: string, turns: ChatItem[][]): void {
+    this.historyCache.delete(id);
+    this.historyCache.set(id, { at: Date.now(), turns });
+    while (this.historyCache.size > HISTORY_CACHE_SIZE) {
+      const oldest = this.historyCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.historyCache.delete(oldest);
+    }
+  }
+
+  /** Every event of a chat, oldest first, or null when it has no event log.
+   *
+   *  Reads the session's persisted log (sessions.readPersistedEvents,
+   *  experimental in SDK 1.0.21) without resuming the session: 0.3 s for the
+   *  biggest chat on the machine this was written on (16.8 MB, 14,002
+   *  events), and the session is left untouched. Until 0.1.13 every read
+   *  resumed the session, which took seconds on big chats and rewrote its
+   *  modifiedTime; that is now only the fallback. */
+  private async readChatEvents(id: string): Promise<any[] | null> {
+    const rpc = this.copilotClient?.rpc?.sessions;
+    if (rpc && typeof rpc.readPersistedEvents === 'function') {
+      // The open chat's newest events may not be on disk yet.
+      if (this.copilotSession && this.browyProtocolSessionId === id && typeof rpc.save === 'function') {
+        await withDeadline(Promise.resolve().then(() => rpc.save({ sessionId: id })), 5000, undefined);
+      }
       try {
-        const meta = await this.copilotClient.getSessionMetadata(id);
-        const mt = meta?.modifiedTime;
-        const n = mt instanceof Date ? mt.getTime() : Number(mt);
-        if (Number.isFinite(n) && n > 0) before = n;
-      } catch { /* metadata is optional — pin is best-effort */ }
-      try {
-        handle = await this.copilotClient.resumeSession(id, {
-          clientName: BROWSERAGENT_CLIENT_NAME,
-          workingDirectory: BROWSERAGENT_WORKDIR,
-          model: this.config.model,
-          onPermissionRequest: approveAll,
-        });
-        events = (await handle.getEvents()) || [];
-      } catch {
-        return [];
-      } finally {
-        if (handle) { try { await handle.disconnect(); } catch {} }
-        if (before !== undefined) this.previewTimePins.set(id, before);
+        const events: any[] = [];
+        let cursor: string | undefined;
+        for (let page = 0; page < 5000; page++) {
+          const r = await rpc.readPersistedEvents({ sessionId: id, max: 1000, ...(cursor ? { cursor } : {}) });
+          if (r?.cursorStatus && r.cursorStatus !== 'ok') throw new Error(`event log cursor ${r.cursorStatus}`);
+          for (const e of r?.events || []) events.push(e);
+          if (!r?.hasMore) break;
+          cursor = r.cursor;
+        }
+        return events;
+      } catch (e: any) {
+        const m = String(e?.message || e);
+        // How the runtime answers for a session without events.jsonl.
+        if (/unavailable|not found|does not exist|no such/i.test(m)) return null;
+        console.log(`  📜 reading ${id} from its event log failed (${m}); resuming it instead`);
       }
     }
-    return mapEventsToMessages(events);
+    return this.readChatEventsByResume(id);
+  }
+
+  /** The old way: the open session's events, or a side handle resumed just to
+   *  read them. Resuming rewrites the session's modifiedTime, so the previous
+   *  one is pinned for the chats list (see mergeChats). */
+  private async readChatEventsByResume(id: string): Promise<any[] | null> {
+    if (this.copilotSession && this.browyProtocolSessionId === id) {
+      try { return (await this.copilotSession.getEvents()) || []; } catch { return null; }
+    }
+    let handle: any = null;
+    let before: number | undefined;
+    try {
+      const n = msOf((await this.copilotClient.getSessionMetadata(id))?.modifiedTime);
+      if (n > 0) before = n;
+    } catch { /* metadata is optional, the pin is best-effort */ }
+    try {
+      handle = await this.copilotClient.resumeSession(id, {
+        clientName: BROWSERAGENT_CLIENT_NAME,
+        workingDirectory: BROWSERAGENT_WORKDIR,
+        model: this.config.model,
+        onPermissionRequest: approveAll,
+      });
+      return (await handle.getEvents()) || [];
+    } catch {
+      return null;
+    } finally {
+      if (handle) { try { await handle.disconnect(); } catch {} }
+      if (before !== undefined) this.previewTimePins.set(id, before);
+    }
   }
 
   /** Returns whichever CDP duck-type is currently in play (extension override
@@ -1533,51 +1713,4 @@ export class Agent {
     this.activeConnection = null;
     shutdownForeground();
   }
-}
-
-/** Maps Copilot SDK SessionEvents → the slim role/text shape the side panel
- *  knows how to render. Skips ephemeral events, sub-agent chatter, and
- *  intermediate streaming deltas (we keep only the final assistant.message). */
-function mapEventsToMessages(events: any[]): Array<
-  | { role: 'user'; text: string; timestamp?: number }
-  | { role: 'assistant'; text: string; timestamp?: number }
-  | { role: 'tool'; name: string; ok: boolean; summary?: string; timestamp?: number }
-> {
-  const out: Array<any> = [];
-  for (const ev of events || []) {
-    if (!ev || typeof ev !== 'object') continue;
-    if (ev.ephemeral) continue;
-    if (ev.agentId) continue; // sub-agent events — skip for top-level transcript
-    const ts = ev.timestamp ? (ev.timestamp instanceof Date ? ev.timestamp.getTime() : Number(ev.timestamp) || undefined) : undefined;
-    switch (ev.type) {
-      case 'user.message': {
-        const text = ev.data?.content;
-        if (typeof text === 'string' && text.trim()) {
-          // Strip our injected <browser_context>/<page_snapshot>/<recent_actions>
-          // wrappers so the user sees only what they typed.
-          const stripped = text.replace(/<(browser_context|page_snapshot|recent_actions)>[\s\S]*?<\/\1>\s*/g, '').trim();
-          if (stripped) out.push({ role: 'user', text: stripped, timestamp: ts });
-        }
-        break;
-      }
-      case 'assistant.message': {
-        const text = ev.data?.content;
-        if (typeof text === 'string' && text.trim()) {
-          out.push({ role: 'assistant', text, timestamp: ts });
-        }
-        break;
-      }
-      case 'tool.execution_complete': {
-        const name = ev.data?.toolName || ev.data?.name || 'tool';
-        const status = ev.data?.status || (ev.data?.error ? 'error' : 'ok');
-        const ok = status !== 'error' && status !== 'failed';
-        const summary = typeof ev.data?.result === 'string'
-          ? ev.data.result.slice(0, 120)
-          : (ev.data?.error ? String(ev.data.error).slice(0, 120) : undefined);
-        out.push({ role: 'tool', name, ok, summary, timestamp: ts });
-        break;
-      }
-    }
-  }
-  return out;
 }
