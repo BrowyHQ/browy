@@ -30,6 +30,10 @@ All notable changes to Browy will be documented in this file. The format follows
 - **A model reply that never arrives no longer stops a task.** On 15 October a long run stopped at the five-minute safety limit with "No reply from Copilot", and on 16 October a test hung the same way: the request to the model went out on a connection the Copilot CLI had kept open from the turn before, and nothing ever came back. Your next message went through the same Copilot and could hang on the same connection. Now, when Copilot sends nothing for five minutes and no tool is running, Browy restarts Copilot, which opens new connections, and the task carries on by itself, once. The model is told to check the page before it redoes anything that submits, sends, posts or buys. Meanwhile the side panel says "Copilot stopped answering, so Browy is reconnecting…". If it happens twice in one task, the task stops with a note, and your next message carries on in the same chat.
 - **A backend crash mid-task ends the task with a note, and the panel recovers by itself.** The side panel ends the task with "The backend restarted, so this task stopped. The chat is saved.", reconnects, and registers the chat again, so your next message works. Up to 0.1.13 it said "Host disconnected. Retrying…" with a link to reinstall, and left the half-finished reply with its tools still spinning. After the computer wakes, the panel also checks it can still reach the backend.
 
+### Security
+
+- **`ws` 8.22 and `@azure/identity` 4.14.** The `ws` that shipped with the backend had two advisories, a memory disclosure and a denial of service, and the `uuid` under `@azure/identity` had a bounds-check advisory. Browy's own code doesn't use either package, but both ship with the backend.
+
 ### Upgrading
 
 Update both halves: run the install command again for the backend, and reload the extension. With a new extension and an old backend, the list still opens at once, but chats arrive whole rather than a page at a time and the backend lists them as slowly as before. With an old extension, the new backend answers the old way.
