@@ -2372,6 +2372,8 @@ async function openChatsOverlay() {
   chatsOverlay.classList.add('open');
   chatsOverlay.setAttribute('aria-hidden', 'false');
   setTimeout(() => chatsSearch?.focus(), 50);
+  // Ask the host at once; the rows fill in from whatever arrives first.
+  refreshChatList();
   renderChatRows();
   if (!chatsCache) {
     const c = await loadListCache();
@@ -2381,7 +2383,6 @@ async function openChatsOverlay() {
   savedCopies = await loadSavedCopies();
   noteGoneChats();
   renderChatRows();
-  refreshChatList();
 }
 
 function closeChatsOverlay() {
