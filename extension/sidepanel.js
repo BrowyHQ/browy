@@ -243,10 +243,19 @@ async function deleteChatStorage(id) {
   const next = idx.filter(x => x !== id);
   try { await chrome.storage.local.set({ [INDEX_KEY]: next }); } catch {}
   try {
-    const r = await chrome.storage.local.get([VIEW_INDEX_KEY]);
-    const v = Array.isArray(r?.[VIEW_INDEX_KEY]) ? r[VIEW_INDEX_KEY] : [];
-    if (v.includes(id)) await chrome.storage.local.set({ [VIEW_INDEX_KEY]: v.filter(x => x !== id) });
+    const views = await loadViewIndex();
+    if (views.some((v) => v.id === id)) await chrome.storage.local.set({ [VIEW_INDEX_KEY]: views.filter((v) => v.id !== id) });
   } catch {}
+}
+
+/** [{ id, title, at }], newest first: the chats with a cached view. */
+async function loadViewIndex() {
+  try {
+    const r = await chrome.storage.local.get([VIEW_INDEX_KEY]);
+    const v = r?.[VIEW_INDEX_KEY];
+    if (Array.isArray(v)) return v.filter((x) => x && typeof x.id === 'string');
+  } catch {}
+  return [];
 }
 
 function deriveChatTitle(htmlOrText) {
@@ -1870,13 +1879,27 @@ async function saveView() {
   if (!id || id !== BROWY_SESSION_ID || view.mode !== 'session' || !view.items.length) return;
   const items = compactView(view.items);
   const first = items.find((it) => it.kind === 'turn');
-  const entry = { v: 1, items, start: first ? first.turn : 0, total: view.total, title: chatTitle(id, view.items), at: Date.now() };
+  const title = chatTitle(id, view.items);
+  const at = Date.now();
+  const entry = { v: 1, items, start: first ? first.turn : 0, total: view.total, title, at };
   try {
-    const r = await chrome.storage.local.get([VIEW_INDEX_KEY]);
-    const idx = [id, ...(Array.isArray(r?.[VIEW_INDEX_KEY]) ? r[VIEW_INDEX_KEY] : []).filter((x) => x !== id)];
-    const evict = idx.slice(VIEW_CACHE_MAX);
-    await chrome.storage.local.set({ [VIEW_PREFIX + id]: entry, [VIEW_INDEX_KEY]: idx.slice(0, VIEW_CACHE_MAX) });
+    // A chat whose session is gone keeps its view however old: it is the
+    // only copy left.
+    const idx = [{ id, title, at }, ...(await loadViewIndex()).filter((x) => x.id !== id)];
+    const keep = idx.filter((x, i) => i < VIEW_CACHE_MAX || x.gone);
+    const evict = idx.filter((x) => !keep.includes(x)).map((x) => x.id);
+    await chrome.storage.local.set({ [VIEW_PREFIX + id]: entry, [VIEW_INDEX_KEY]: keep });
     if (evict.length) await chrome.storage.local.remove(evict.map((x) => VIEW_PREFIX + x));
+  } catch {}
+}
+
+/** Remember that these chats' sessions are gone, so their views are kept. */
+async function markViewsGone(ids) {
+  try {
+    const idx = await loadViewIndex();
+    let changed = false;
+    for (const x of idx) if (ids.has(x.id) && !x.gone) { x.gone = true; changed = true; }
+    if (changed) await chrome.storage.local.set({ [VIEW_INDEX_KEY]: idx });
   } catch {}
 }
 
@@ -2005,8 +2028,9 @@ async function historyMissing(id) {
     view.mode = 'saved';
     setChatTitle(deriveChatTitle(html));
   } else if (view.mode === 'cached' && view.items.length) {
-    // Deleted or pruned since this panel last showed it.
+    // Deleted or pruned since this panel last showed it: its view is the copy.
     view.mode = 'saved';
+    markViewsGone(new Set([id]));
   } else {
     view.mode = 'empty';
     view.items = [];
@@ -2286,14 +2310,21 @@ async function switchToChat(id) {
 // Opens at once with the last list this panel saw (kept in storage), then
 // refreshes from the host with a spinner in the header. The host's first
 // reply lists Browy's own chats by id within a few hundred ms; a second adds
-// old chats only a full scan of every session finds. Chats from 0.1.13 and
-// earlier whose session has no event log any more still have their HTML
-// copy in storage: they are listed as read-only saved copies.
+// old chats only a full scan of every session finds.
+//
+// A chat whose session is gone (it predates events.jsonl, or the host
+// pruned or lost it) stays listed as a read-only saved copy for as long as
+// the panel has a copy of it: 0.1.13's HTML copy, or the panel's own view
+// of it. It is never dropped from the list automatically; only deleting it
+// removes it.
 let chatsCache = null;        // [{ id, summary, startTime, modifiedTime }]
 let chatsComplete = false;    // chatsCache includes the full scan
 let chatsState = 'idle';      // 'idle' | 'loading' | 'connecting' | 'failed'
 let chatsLoad = null;
-let savedCopies = null;       // [{ id, title, updated }]
+let savedCopies = null;       // [{ id, title, updated }]: chats with a local copy
+/** Saved copies a complete list has shown to be gone. Kept while a later
+ *  refresh is still partial, so they don't blink out of the list. */
+const goneIds = new Set();
 const chatsSync = document.getElementById('chatsSync');
 
 async function loadListCache() {
@@ -2310,17 +2341,31 @@ function saveListCache(chats) {
   chrome.storage.local.set({ [LIST_CACHE_KEY]: { at: Date.now(), chats: slim } }).catch(() => {});
 }
 
-/** 0.1.13's HTML copies, from its index and metadata. */
+/** Every chat the panel has a copy of: 0.1.13's HTML copies (its index and
+ *  metadata) and the panel's own cached views. */
 async function loadSavedCopies() {
   try {
     const idx = await loadChatIndex();
-    if (!idx.length) return [];
-    const r = await chrome.storage.local.get(idx.map((id) => META_PREFIX + id));
-    return idx.map((id) => {
+    const r = idx.length ? await chrome.storage.local.get(idx.map((id) => META_PREFIX + id)) : {};
+    const out = new Map();
+    for (const id of idx) {
       const m = r?.[META_PREFIX + id] || {};
-      return { id, title: m.title || '', updated: Number(m.updated) || 0 };
-    });
+      out.set(id, { id, title: m.title || '', updated: Number(m.updated) || 0 });
+    }
+    for (const v of await loadViewIndex()) {
+      if (!out.has(v.id)) out.set(v.id, { id: v.id, title: v.title || '', updated: Number(v.at) || 0 });
+    }
+    return [...out.values()];
   } catch { return []; }
+}
+
+/** After a complete list: which saved copies have no session any more. */
+function noteGoneChats() {
+  if (!chatsComplete || !chatsCache || !savedCopies) return;
+  const listed = new Set(chatsCache.map((c) => c.id));
+  goneIds.clear();
+  for (const s of savedCopies) if (!listed.has(s.id)) goneIds.add(s.id);
+  if (goneIds.size) markViewsGone(goneIds);
 }
 
 async function openChatsOverlay() {
@@ -2332,7 +2377,9 @@ async function openChatsOverlay() {
     const c = await loadListCache();
     if (c && !chatsCache) { chatsCache = c.chats; chatsComplete = true; }
   }
-  if (!savedCopies) savedCopies = await loadSavedCopies();
+  // Read again each time: another window may have deleted one.
+  savedCopies = await loadSavedCopies();
+  noteGoneChats();
   renderChatRows();
   refreshChatList();
 }
@@ -2381,6 +2428,7 @@ function refreshChatList() {
     chatsComplete = msg.complete !== false;
     chatsState = 'idle';
     saveListCache(msg.chats);
+    noteGoneChats();
     renderChatRows();
   })();
   return chatsLoad;
@@ -2483,15 +2531,18 @@ function renderChatRows() {
     title: (c.summary || '').trim() || describeUndatedChat(c.startTime || c.modifiedTime),
     updated: c.modifiedTime || c.startTime || 0,
   }));
-  // Saved copies only once the list is complete: until then a chat missing
-  // from it may simply not have been listed yet.
-  if (chatsComplete && savedCopies) {
+  // Saved copies once a complete list has shown their session is gone: until
+  // then a chat missing from a quick reply may simply not be listed yet.
+  // One known to be gone stays while a refresh is still partial.
+  if (savedCopies) {
     const listed = new Set(rows.map((r) => r.id));
+    let added = false;
     for (const s of savedCopies) {
-      if (listed.has(s.id)) continue;
+      if (listed.has(s.id) || !(chatsComplete || goneIds.has(s.id))) continue;
       rows.push({ id: s.id, title: s.title || describeUndatedChat(s.updated), updated: s.updated, saved: true });
+      added = true;
     }
-    rows.sort((a, b) => (b.updated || 0) - (a.updated || 0));
+    if (added) rows.sort((a, b) => (b.updated || 0) - (a.updated || 0));
   }
   // Make sure the current SID is visible even if the SDK hasn't recorded
   // a summary for it yet (brand-new chat with no turns).
@@ -2554,6 +2605,7 @@ function chatRow(meta) {
     await deleteChatStorage(id);
     if (chatsCache) chatsCache = chatsCache.filter((c) => c.id !== id);
     if (savedCopies) savedCopies = savedCopies.filter((c) => c.id !== id);
+    goneIds.delete(id);
     if (id === BROWY_SESSION_ID) await startNewChat();
     renderChatRows();
   });
