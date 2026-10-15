@@ -13,6 +13,7 @@
 // Naming convention: <namespace>.<verb>. Lowercase, dot-separated.
 
 import type { ToolCallRecord, ModelOption, BrowserStatus, ActiveBrowser } from './types.js';
+import type { ChatItem } from './agent/chat-items.js';
 
 // ── Capabilities ───────────────────────────────────────────────────────────
 //
@@ -156,12 +157,33 @@ export interface SetModel {
 
 export interface ChatList {
   type: 'chat.list';
+  /** Echoed in every reply, so a panel can tell its replies from replies to
+   *  other panels (they all receive unrouted ones). 0.1.14+. */
+  reqId?: string;
+  /** The asking panel's own session: replies are routed to that panel only.
+   *  0.1.14+; without it the reply goes to every panel, as before. */
+  sessionId?: string;
+  /** Reply twice: at once with the chats found by id (`complete: false`),
+   *  then with every chat once the full scan is in (`complete: true`).
+   *  Without it the host replies once, with the full list. 0.1.14+. */
+  progressive?: boolean;
 }
 
 export interface ChatHistory {
   type: 'chat.history';
   /** SDK session id whose transcript to fetch. */
   id: string;
+  /** Reply with a page of `items` (ChatItem, agent/chat-items.ts) instead of
+   *  the whole transcript as `messages`. 0.1.14+. */
+  items?: boolean;
+  /** With `items`: turns per page, newest first (default 10, at most 50). */
+  limit?: number;
+  /** With `items`: the page ends before this turn (a previous reply's `start`). */
+  before?: number;
+  /** Echoed in the reply, as for chat.list. 0.1.14+. */
+  reqId?: string;
+  /** Route the reply to this panel only, as for chat.list. 0.1.14+. */
+  sessionId?: string;
 }
 
 /** Delete one chat by SDK session id, regardless of whether it is the chat
@@ -386,8 +408,8 @@ export interface FocusedTab {
   tabCount: number;
 }
 
-/** Slim chat metadata for the side-panel chats overlay. Sourced from
- *  Copilot SDK `client.listSessions({cwd})` filtered to our workdir. */
+/** Slim chat metadata for the side-panel chats overlay. Sourced from the
+ *  Copilot SDK's session list, filtered to Browy's chats (Agent.listChats). */
 export interface ChatListResult {
   type: 'chat.list.result';
   chats: Array<{
@@ -398,18 +420,39 @@ export interface ChatListResult {
     /** ms since epoch — newest activity */
     modifiedTime: number;
   }>;
+  /** From the request. */
+  reqId?: string;
+  /** From the request, when the host knows that session; routes the reply. */
+  sessionId?: string;
+  /** Progressive requests only: false on the quick first reply, true on the
+   *  full one that follows. */
+  complete?: boolean;
+  /** Listing failed; `chats` is empty and the panel keeps what it had. */
+  error?: string;
 }
 
-/** Slim transcript for re-rendering a chat. We map SDK SessionEvents to
- *  three roles the side panel already knows how to render. */
+/** A chat's transcript. With `items` requested: one page of ChatItems for
+ *  turns [start, end) of `total`, oldest first. Otherwise the whole
+ *  transcript as `messages`, the three roles panels before 0.1.14 render. */
 export interface ChatHistoryResult {
   type: 'chat.history.result';
   id: string;
-  messages: Array<
+  messages?: Array<
     | { role: 'user'; text: string; timestamp?: number }
     | { role: 'assistant'; text: string; timestamp?: number }
     | { role: 'tool'; name: string; ok: boolean; summary?: string; timestamp?: number }
   >;
+  items?: ChatItem[];
+  start?: number;
+  end?: number;
+  total?: number;
+  /** The session has no event log: it never ran a turn, or it is older than
+   *  events.jsonl. */
+  missing?: boolean;
+  /** Reading failed. */
+  error?: string;
+  reqId?: string;
+  sessionId?: string;
 }
 
 /** Ack for `chat.delete`, so the UI only removes the row once the session is
@@ -484,5 +527,9 @@ export interface Transport {
  * 0.1.14 added `cdp.detached` (extension to host), `host.status` and
  * `chat.done.interrupted` (host to extension) without a bump: each side works
  * as before when the other doesn't send them, so nothing relies on them.
+ * 0.1.14 added optional fields to `chat.list` and `chat.history` (reqId,
+ * sessionId, progressive, items/limit/before) and their replies, without a
+ * bump: an older host ignores them and answers the old way, which the side
+ * panel still renders, and an older panel never sends them.
  */
 export const PROTOCOL_VERSION = 2;

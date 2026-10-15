@@ -472,6 +472,55 @@
       100% { content: '⠋'; }
     }
 
+    /* ── Chat history: one wrapper per turn, loading states, paging ──── */
+    .turn { display: contents; }
+    .hist-top {
+      align-self: stretch;
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      font-family: var(--mono); font-size: 10.5px; color: var(--ink-2);
+      padding: 0 0 6px;
+      border-bottom: 1px dashed var(--line);
+    }
+    .hist-top:empty { display: none; }
+    .hist-top .hist-note { flex: 1; min-width: 0; display: inline-flex; align-items: baseline; gap: 6px; }
+    .hist-top.err .hist-note { color: #facc15; }
+    .hist-top.saved .hist-note { color: var(--lime); }
+    .hist-top button {
+      background: transparent; border: 1px solid var(--line-2); color: var(--ink);
+      font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.04em;
+      padding: 3px 8px; cursor: pointer;
+    }
+    .hist-top button:hover { border-color: var(--green); color: var(--green); }
+    .hist-top .load-earlier { color: var(--green); border-color: rgba(74,222,128,0.35); }
+    /* Braille spinner, same frames as a running tool call. */
+    .spin::before {
+      content: '⠋'; display: inline-block; width: 1ch;
+      color: var(--lime); font-weight: 700;
+      animation: spinFrames 0.8s steps(10) infinite;
+    }
+    /* Skeletons pulse in steps, like everything else on the panel. */
+    .skel-line, .skel-bub i {
+      display: block; height: 8px;
+      background: var(--line-2);
+      animation: skelPulse 1.2s steps(3) infinite;
+    }
+    @keyframes skelPulse { 0%,100% { opacity: 0.45; } 50% { opacity: 1; } }
+    .skel-bub { display: flex; flex-direction: column; gap: 7px; padding: 9px 10px; }
+    .skel-bub.u { align-self: flex-end; width: 58%; background: var(--bub-u-bg); border-left: 2px solid var(--line-2); }
+    .skel-bub.a { align-self: stretch; padding-left: 12px; border-left: 2px solid var(--line-2); }
+    .skel-bub.a i:nth-child(2) { width: 86%; }
+    .skel-bub.a i:nth-child(3) { width: 54%; }
+    .hist-fail {
+      align-self: center; margin: auto 0;
+      display: flex; flex-direction: column; align-items: center; gap: 12px;
+      color: var(--ink-2); font-size: 11px; text-align: center;
+    }
+    .hist-fail .chats-retry { margin: 0; }
+    .steps-clipped { font-size: 10.5px; color: var(--ink-2); opacity: 0.7; padding-left: 18px; }
+    .tool-steps.collapsed .steps-clipped { display: none; }
+    .tool-steps.expanded-back.collapsed .steps-clipped { display: block; }
+    .bub .note.err { color: var(--err); font-style: normal; margin-top: 4px; }
+
     /* Reasoning peek — quiet italic line above the answer */
     .reasoning {
       font-size: 10px; color: var(--ink-2); opacity: 0.7;
@@ -693,13 +742,13 @@
       display: block; margin: 0 auto 24px;
       padding: 6px 14px;
       background: transparent;
-      border: 1px solid var(--acc);
-      color: var(--acc);
+      border: 1px solid var(--green);
+      color: var(--green);
       border-radius: 4px;
       cursor: pointer;
       font-family: var(--mono); font-size: 11px;
     }
-    .chats-retry:hover { background: var(--acc); color: var(--bg); }
+    .chats-retry:hover { background: var(--green); color: var(--bg); }
     .chat-row {
       display: flex; align-items: center; gap: 8px;
       padding: 10px 12px;
@@ -750,6 +799,23 @@
     .chats-foot button:hover { border-color: var(--green); color: var(--green); }
     .chats-foot .spacer { flex: 1; }
     .chats-foot .hint { color: var(--ink-2); font-family: var(--mono); font-size: 10px; }
+    /* Header status while the list refreshes in the background. */
+    .chats-sync {
+      display: none; align-items: center; gap: 6px;
+      font-family: var(--mono); font-size: 10px; letter-spacing: 0.04em;
+      color: var(--ink-2); white-space: nowrap;
+    }
+    .chats-sync.show { display: inline-flex; }
+    .chats-sync.err { color: #facc15; }
+    .chats-sync a { color: inherit; text-decoration: underline; cursor: pointer; }
+    .chat-row.skel { cursor: default; }
+    .chat-row.skel:hover { background: transparent; }
+    .chat-row.skel .chat-body { display: flex; flex-direction: column; gap: 7px; padding: 2px 0; }
+    .chat-row.skel .skel-line { width: 72%; height: 9px; }
+    .chat-row.skel .skel-line.short { width: 34%; height: 7px; }
+    .chat-row:nth-child(2n).skel .skel-line:not(.short) { width: 58%; }
+    .chat-row .chat-meta .saved { color: var(--lime); }
+    .chat-row.busy { opacity: 0.5; pointer-events: none; }
 
     /* ── First-run screen: shown only while the backend is missing/stale ── */
     .onboard {
@@ -1309,6 +1375,7 @@
     <div class="chats-overlay" id="chatsOverlay" aria-hidden="true">
       <div class="chats-head">
         <span class="title"><b>chats</b> // history</span>
+        <span class="chats-sync" id="chatsSync" role="status" aria-live="polite"></span>
         <button class="close-x" id="chatsCloseBtn" title="Back to current chat">×</button>
       </div>
       <div class="chats-search">

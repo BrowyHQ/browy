@@ -4,6 +4,16 @@ All notable changes to Browy will be documented in this file. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **Chats come straight from their Copilot session.** The side panel used to keep its own HTML copy of every chat and show that. Each chat's Copilot session is now the only record, and the panel just draws it: your message as you typed it, without the page details Browy sends along, then Browy's reply with every tool call, its arguments, how long it took and the start of what it returned (click a step for more). When a reply finishes, the panel redraws it from the session, so a chat looks the same now as when you open it again next week.
+- **Long chats open on their newest turns.** One chat from 15 October has 977 tool calls in a 7.6 MB log. A chat now opens on its last ten turns, with "load earlier" at the top for the rest. The backend reads the chat's log directly instead of resuming its session, about a third of a second for the biggest chat on the test machine (16.8 MB).
+- **The chats list opens at once.** It waited for the backend to go through every Copilot session on the computer (3,327 on one machine, for 100 Browy chats) before it appeared. It now opens straight away with the list you saw last and refreshes it in the background, with a spinner while it does. The backend also finds Browy's chats about three times faster. Opening a chat shows its last view, or a placeholder, until the session answers. If the backend doesn't answer, you get a message and a retry button instead of an empty screen.
+- **Opened chats show their tool calls properly.** A chat opened from the list named every tool call "tool", with no result.
+- **Chats from 0.1.13 and earlier are kept.** Some older chats have no record left in Copilot, because they predate it or the backend's cleanup removed them, only the copy the side panel saved. They stay in the list as read-only saved copies, and a message sent from one starts a new chat.
+- **The DevTools panel no longer prints the side panel's chats list.** Every list and chat the side panel loaded was sent to every Browy panel, so the DevTools panel printed them too.
+- **A status line for what Browy is recovering from.** A line under the side panel's info bar says when the backend is reconnecting, Copilot is restarting, the computer slept during a task, or Browy lost the tab it was working in, and goes away once things are back to normal.
+
 ### Fixed
 
 - **When a tool fails, the model now hears why.** Up to 0.1.13 every failure reached the model as "Tool execution failed", so it guessed at the cause and tried again; in one long run on 15 October that happened 11 times. The model now gets the actual error, such as a page that navigated away mid-call. A call that runs past the two-minute limit comes back as a timeout, with the reason.
@@ -18,9 +28,9 @@ All notable changes to Browy will be documented in this file. The format follows
 - **Copilot quitting no longer stalls a task for five minutes.** If the Copilot runtime exits or its connection drops mid-task, Browy ends the task at once with "Copilot quit unexpectedly, so this task stopped. The chat is saved.", starts Copilot again, and your next message carries on in the same chat. Up to 0.1.13 the task sat silent until the five-minute safety stop. After the computer wakes, Browy also checks that Copilot still answers and restarts it if not.
 - **A backend crash mid-task ends the task with a note, and the panel recovers by itself.** The side panel ends the task with "The backend restarted, so this task stopped. The chat is saved.", reconnects, and registers the chat again, so your next message works. Up to 0.1.13 it said "Host disconnected. Retrying…" with a link to reinstall, and left the half-finished reply with its tools still spinning. After the computer wakes, the panel also checks it can still reach the backend.
 
-### Changed
+### Upgrading
 
-- **A status line for what Browy is recovering from.** A line under the side panel's info bar says when the backend is reconnecting, Copilot is restarting, the computer slept during a task, or Browy lost the tab it was working in, and goes away once things are back to normal.
+Update both halves: run the install command again for the backend, and reload the extension. With a new extension and an old backend, the list still opens at once, but chats arrive whole rather than a page at a time and the backend lists them as slowly as before. With an old extension, the new backend answers the old way.
 
 ## [0.1.13]: Stop always works, and a dropped tool call gets run anyway
 *Released 2026-10-14*
