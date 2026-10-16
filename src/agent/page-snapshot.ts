@@ -167,6 +167,11 @@ export async function capturePageSnapshot(cdp: CdpLike): Promise<PageSnapshot> {
     const INTERACTIVE_TAGS = new Set(['a','button','input','select','textarea','details','summary','label']);
     const INTERACTIVE_ROLES = new Set(['button','link','checkbox','radio','tab','menuitem','combobox','option','switch','textbox','searchbox','listbox','menuitemcheckbox','menuitemradio','treeitem','slider','spinbutton']);
     const SKIP_INPUTS = new Set(['hidden']);
+    ${DISABLED_JS}
+    // Disabled for real, or carrying a disabled attribute the browser ignores
+    // (on a link, say). Up to 0.1.15 anything with the attribute was left
+    // out, so the model never saw a greyed-out Submit button.
+    const isOff = (el) => __browyDisabled(el) || el.hasAttribute('disabled');
 
     // ── Aria-live + focus observer (install once per document) ─────────────
     // We stash a small ring buffer on window.__browy_ax. Each capture drains
@@ -307,7 +312,6 @@ export async function capturePageSnapshot(cdp: CdpLike): Promise<PageSnapshot> {
       // nodeType, not instanceof Element: an element in a same-origin iframe
       // comes from that frame's realm and fails the instanceof check.
       if (!el || el.nodeType !== 1) return false;
-      if (el.hasAttribute('disabled')) return false;
       const tag = el.tagName.toLowerCase();
       if (INTERACTIVE_TAGS.has(tag)) {
         if (tag === 'input' && SKIP_INPUTS.has((el.getAttribute('type') || '').toLowerCase())) return false;
@@ -329,7 +333,9 @@ export async function capturePageSnapshot(cdp: CdpLike): Promise<PageSnapshot> {
       const cs = getComputedStyle(el);
       if (cs.display === 'none' || cs.visibility === 'hidden') return false;
       if (parseFloat(cs.opacity || '1') < 0.05) return false;
-      if (cs.pointerEvents === 'none' && el.tagName.toLowerCase() !== 'input') return false;
+      // Disabled buttons often get pointer-events: none (Bootstrap, Tailwind's
+      // disabled: styles) but are still on screen, greyed out.
+      if (cs.pointerEvents === 'none' && el.tagName.toLowerCase() !== 'input' && !__browyDisabled(el)) return false;
       return true;
     }
 
@@ -426,12 +432,14 @@ export async function capturePageSnapshot(cdp: CdpLike): Promise<PageSnapshot> {
           contained = true; break;
         }
       }
-      if (!contained || isField(el)) kept.push({ el, r });
+      if (!contained || isField(el)) kept.push({ el, r, off: isOff(el) });
     }
 
-    // Cap to a reasonable number to keep prompts bounded.
+    // Cap to a reasonable number to keep prompts bounded. Past the cap the
+    // disabled ones give way first, so they never push out one that works.
     const MAX_ELEMENTS = 150;
-    const final = kept.slice(0, MAX_ELEMENTS);
+    let room = MAX_ELEMENTS - kept.filter((k) => !k.off).length;
+    const final = kept.filter((k) => !k.off || room-- > 0).slice(0, MAX_ELEMENTS);
 
     // The focused element, looking through shadow roots (document.activeElement
     // stops at the outermost shadow host).
@@ -490,7 +498,7 @@ export async function capturePageSnapshot(cdp: CdpLike): Promise<PageSnapshot> {
       const pressed = pressedAttr === 'true' ? true : pressedAttr === 'false' ? false : undefined;
       const selectedAttr = el.getAttribute('aria-selected');
       const ariaSelected = selectedAttr === 'true' ? true : selectedAttr === 'false' ? false : undefined;
-      const disabled = el.hasAttribute('disabled') || el.getAttribute('aria-disabled') === 'true' || undefined;
+      const disabled = isOff(el) || el.getAttribute('aria-disabled') === 'true' || undefined;
       const current = el.getAttribute('aria-current') || undefined;
       const axName = axNameFor(el);
 
