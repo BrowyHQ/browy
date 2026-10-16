@@ -552,6 +552,19 @@ function occurrences(hay: string, needle: string, norm: (s: string) => string = 
 
 interface KeySpec { key: string; code: string; keyCode: number; text?: string }
 
+/** The key for one printable character, which types it (Shift upper-cases a
+ *  letter), or null when `ch` isn't one character. */
+function charKey(ch: string, shift: boolean): KeySpec | null {
+  if ([...ch].length !== 1 || /\p{C}/u.test(ch)) return null;
+  const up = ch.toUpperCase();
+  const key = shift && [...up].length === 1 ? up : ch;
+  if (key === ' ') return { key, code: 'Space', keyCode: 32, text: key };
+  if (/^[a-z]$/i.test(ch)) return { key, code: `Key${up}`, keyCode: up.charCodeAt(0), text: key };
+  if (/^[0-9]$/.test(ch)) return { key, code: `Digit${ch}`, keyCode: ch.charCodeAt(0), text: key };
+  // No US key code for the rest: '.' as 46 would also press Delete, '%' as 37 ArrowLeft.
+  return { key, code: '', keyCode: 0, text: key };
+}
+
 /** One key press. A key that types (has text) sends keyDown with that text,
  *  which Chrome turns into keydown + keypress; a separate char event on top
  *  types the character a second time. */
@@ -1089,12 +1102,13 @@ register({
       Space:     { key: ' ', code: 'Space', windowsVirtualKeyCode: 32, text: ' ' },
     };
     const norm = key.length === 1 ? key.toUpperCase() : key;
-    const mapped = KEY_MAP[norm] || (key.length === 1
-      ? { key, code: 'Key' + key.toUpperCase(), windowsVirtualKeyCode: key.toUpperCase().charCodeAt(0), text: (modifiers & 8) ? key.toUpperCase() : key }
-      : { key, code: key });
+    const named = KEY_MAP[norm];
+    const spec: KeySpec = named
+      ? { key: named.key, code: named.code, keyCode: named.windowsVirtualKeyCode ?? 0, text: named.text }
+      : charKey(key, (modifiers & 8) !== 0) ?? { key, code: key, keyCode: 0 };
     // Up to 0.1.13 a separate char event followed the keyDown, so every
     // printable key, Space and Enter went in twice.
-    await pressKey(ctx, { key: mapped.key, code: mapped.code, keyCode: mapped.windowsVirtualKeyCode ?? 0, text: mapped.text }, modifiers);
+    await pressKey(ctx, spec, modifiers);
     return JSON.stringify({ success: true, keys: combo });
   },
 });
@@ -1715,8 +1729,8 @@ register({
     }
 
     // Map common key names to CDP key codes
-    const keyMap: Record<string, { key: string; code: string; keyCode: number }> = {
-      'enter': { key: 'Enter', code: 'Enter', keyCode: 13 },
+    const keyMap: Record<string, KeySpec> = {
+      'enter': { key: 'Enter', code: 'Enter', keyCode: 13, text: '\r' },
       'escape': { key: 'Escape', code: 'Escape', keyCode: 27 },
       'esc': { key: 'Escape', code: 'Escape', keyCode: 27 },
       'tab': { key: 'Tab', code: 'Tab', keyCode: 9 },
@@ -1726,26 +1740,17 @@ register({
       'arrowdown': { key: 'ArrowDown', code: 'ArrowDown', keyCode: 40 },
       'arrowleft': { key: 'ArrowLeft', code: 'ArrowLeft', keyCode: 37 },
       'arrowright': { key: 'ArrowRight', code: 'ArrowRight', keyCode: 39 },
-      'space': { key: ' ', code: 'Space', keyCode: 32 },
+      'space': { key: ' ', code: 'Space', keyCode: 32, text: ' ' },
     };
 
-    const mapped = keyMap[mainKey.toLowerCase()] || { key: mainKey, code: `Key${mainKey.toUpperCase()}`, keyCode: mainKey.charCodeAt(0) };
     const modFlag = modifiers.reduce((n, m) => n | ({ control: 2, alt: 1, shift: 8, meta: 4 }[m] || 0), 0);
+    const mapped = keyMap[mainKey.toLowerCase()]
+      || charKey(mainKey, (modFlag & 8) !== 0)
+      || { key: mainKey, code: `Key${mainKey.toUpperCase()}`, keyCode: mainKey.charCodeAt(0) };
 
-    await ctx.cdp.send('Input.dispatchKeyEvent', {
-      type: 'keyDown',
-      key: mapped.key,
-      code: mapped.code,
-      windowsVirtualKeyCode: mapped.keyCode,
-      modifiers: modFlag,
-    } as any);
-    await ctx.cdp.send('Input.dispatchKeyEvent', {
-      type: 'keyUp',
-      key: mapped.key,
-      code: mapped.code,
-      windowsVirtualKeyCode: mapped.keyCode,
-      modifiers: modFlag,
-    } as any);
+    // Up to 0.1.15 the key went without its text, so press_key("a") typed
+    // nothing and Enter didn't submit a form.
+    await pressKey(ctx, mapped, modFlag);
 
     return JSON.stringify({ success: true, key });
   },
