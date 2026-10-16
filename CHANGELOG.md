@@ -2,11 +2,18 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.15]: the current Copilot CLI and SDK
+*Released 2026-10-16*
+
+A maintenance release before launch. Browy now ships the newest Copilot CLI and SDK, and the other packages it ships with are current too, with nothing left for `npm audit` to flag.
 
 ### Changed
 
-- **Copilot CLI 1.0.98 and Copilot SDK 1.0.22.** Browy now runs on the current Copilot CLI and SDK, up from CLI 1.0.97 and SDK 1.0.21. Neither release changes anything Browy relies on, so chats, Stop and the tools work as before, now with the CLI's latest fixes.
+- **Browy runs on Copilot CLI 1.0.98 and Copilot SDK 1.0.22.** They replace CLI 1.0.97 and SDK 1.0.21. Neither changes anything Browy relies on, so chats, Stop and the tools work as before, with the CLI's latest fixes.
+
+### Upgrading
+
+Run the install command again to update the backend. The extension changed only its version number, so there's nothing to reload.
 
 ## [0.1.14]: chats straight from Copilot, tools that handle real sites, and recovery from drops
 *Released 2026-10-16*
