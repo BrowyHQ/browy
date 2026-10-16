@@ -107,12 +107,21 @@ interface CdpLike {
   send: (method: string, params?: unknown) => Promise<unknown>;
 }
 
+/** In-page: `__browyDisabled(el)` is true when the browser itself won't let
+ *  anyone use `el`: its disabled property, or :disabled, which also covers a
+ *  control inside a disabled <fieldset>. aria-disabled doesn't count, since
+ *  clicks on such an element still go through. */
+const DISABLED_JS = `
+const __browyDisabled = (el) => { try { return el.disabled === true || el.matches(':disabled'); } catch (_) { return false; } };
+`;
+
 /** In-page helpers, prepended to an expression: `__browyFind(n)` returns the
  *  element the last snapshot indexed as [n], wherever it lives (the document,
  *  an open shadow root or a same-origin iframe), or null. The snapshot keeps
  *  a direct reference in window.__browyIdx; the attribute search is the
  *  fallback. `__browyDeepActive()` is the focused element, looking through
- *  shadow roots and same-origin iframes. */
+ *  shadow roots and same-origin iframes. `__browyDisabled(el)` comes from
+ *  DISABLED_JS. */
 export const FIND_JS = `
 const __browyFind = (n) => {
   const want = String(n);
@@ -146,7 +155,7 @@ const __browyDeepActive = () => {
   }
   return a;
 };
-`;
+${DISABLED_JS}`;
 
 const SNAPSHOT_CACHE = new WeakMap<object, PageSnapshot>();
 
@@ -744,6 +753,8 @@ export interface ResolvedElement {
   tag?: string;
   isEditable?: boolean;
   isSelect?: boolean;
+  /** The browser won't let it be used (see __browyDisabled), so a click does nothing. */
+  disabled?: boolean;
 }
 
 export async function resolveIndex(cdp: CdpLike, index: number): Promise<ResolvedElement> {
@@ -771,7 +782,7 @@ export async function resolveIndex(cdp: CdpLike, index: number): Promise<Resolve
     return JSON.stringify({
       found: true,
       rect: { x, y, w: r.width, h: r.height, cx: x + r.width/2, cy: y + r.height/2 },
-      tag, isEditable: editable, isSelect,
+      tag, isEditable: editable, isSelect, disabled: __browyDisabled(el),
     });
   })()`;
   const { result } = await cdp.send('Runtime.evaluate', {

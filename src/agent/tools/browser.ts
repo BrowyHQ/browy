@@ -353,6 +353,21 @@ async function dispatchClick(ctx: BrowserToolContext, cx: number, cy: number): P
   });
 }
 
+// Disabled elements are in the snapshot, so the model can tell the user why a
+// form won't send. The index tools refuse them with this error instead of
+// clicking, checking or filling something the page ignores.
+const DISABLED_HINT = 'Pages usually enable it once the required fields are filled.';
+const disabledError = (idx: number, tag?: string) => new Error(`[${idx}] (<${tag || '?'}>) is disabled. ${DISABLED_HINT}`);
+
+/** A page script's answer, unless it was {"error":"disabled","tag":...}:
+ *  then the disabled error for [idx]. */
+function refuseDisabled(idx: number, answer: string): string {
+  let r: { error?: string; tag?: string } | null = null;
+  try { r = JSON.parse(answer); } catch {}
+  if (r?.error === 'disabled') throw disabledError(idx, r.tag);
+  return answer;
+}
+
 register({
   def: {
     type: 'function', name: 'inspect_page',
@@ -383,6 +398,7 @@ register({
     if (!resolved.found || !resolved.rect) {
       return JSON.stringify({ success: false, error: resolved.reason || `index ${idx} not found — call inspect_page` });
     }
+    if (resolved.disabled) throw disabledError(idx, resolved.tag);
     await dispatchClick(ctx, resolved.rect.cx, resolved.rect.cy);
     // Brief wait for navigation/render to settle.
     await new Promise((r) => setTimeout(r, 500));
@@ -489,7 +505,8 @@ async function prepareField(ctx: BrowserToolContext, idx: number, all: boolean, 
     if (f.gone) return JSON.stringify({ error: 'gone' });
     if (!f.kind) return JSON.stringify({ error: 'not_editable', tag: f.tag });
     const el = f.el;
-    if (el.disabled || el.readOnly) return JSON.stringify({ error: 'readonly', tag: el.localName });
+    if (__browyDisabled(el)) return JSON.stringify({ error: 'disabled', tag: el.localName });
+    if (el.readOnly) return JSON.stringify({ error: 'readonly', tag: el.localName });
     try { Object.defineProperty(window, '__browyTyping', { value: { el, kind: f.kind }, configurable: true, writable: true, enumerable: false }); } catch (_) {}
     try { el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' }); } catch (_) {}
     if (f.kind === 'value') {
@@ -515,7 +532,8 @@ async function prepareField(ctx: BrowserToolContext, idx: number, all: boolean, 
   })()`);
   if (r.error === 'gone') throw new Error(`No element [${idx}]: the page changed since the last snapshot. Call inspect_page and use the new index.`);
   if (r.error === 'not_editable') throw new Error(`[${idx}] is a <${r.tag}>, not a text field or editor. Use the index of an input, textarea or contenteditable element.`);
-  if (r.error === 'readonly') throw new Error(`[${idx}] (<${r.tag}>) is disabled or read-only.`);
+  if (r.error === 'disabled') throw disabledError(idx, r.tag);
+  if (r.error === 'readonly') throw new Error(`[${idx}] (<${r.tag}>) is read-only.`);
   return r;
 }
 
@@ -669,6 +687,7 @@ register({
       const el = __browyFind(${idx});
       if (!el) return JSON.stringify({ error: 'index ${idx} not found: call inspect_page' });
       if (el.tagName !== 'SELECT') return JSON.stringify({ error: 'not a <select>; for custom dropdowns use click_index' });
+      if (__browyDisabled(el)) return JSON.stringify({ error: 'disabled', tag: 'select' });
       const want = ${JSON.stringify(value)};
       let chosen = null;
       for (const o of el.options) {
@@ -681,7 +700,7 @@ register({
       return JSON.stringify({ success: true, value: chosen.value, label: chosen.text });
     })()`;
     const r = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true }) as { result?: { value?: string } };
-    return String(r?.result?.value ?? '{}');
+    return refuseDisabled(idx, String(r?.result?.value ?? '{}'));
   },
 });
 
@@ -703,7 +722,7 @@ register({
 
 // ── Form-entry power tools (inspired by browser-use, Stagehand, Playwright) ─
 
-register({
+const checkIndex: ToolHandler = {
   def: {
     type: 'function', name: 'check_index',
     description: 'Toggle a checkbox or radio button at index [N]. Use checked="true" to set, "false" to uncheck. Dispatches input/change so React/Vue forms react. For checkboxes, omit `checked` to flip the current state.',
@@ -725,6 +744,7 @@ register({
       const type = (el.getAttribute('type') || '').toLowerCase();
       const isCheck = tag === 'input' && (type === 'checkbox' || type === 'radio');
       if (!isCheck) return JSON.stringify({ error: '<' + tag + ' type=' + type + '> is not a checkbox or radio' });
+      if (__browyDisabled(el)) return JSON.stringify({ error: 'disabled', tag });
       const target = ${want};
       const next = target === null ? !el.checked : target;
       if (el.checked === next && type !== 'radio') return JSON.stringify({ success: true, checked: el.checked, noop: true });
@@ -738,9 +758,10 @@ register({
       return JSON.stringify({ success: true, checked: el.checked, type });
     })()`;
     const r = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true }) as { result?: { value?: string } };
-    return String(r?.result?.value ?? '{}');
+    return refuseDisabled(idx, String(r?.result?.value ?? '{}'));
   },
-});
+};
+register(checkIndex);
 
 register({
   def: {
@@ -751,7 +772,9 @@ register({
     }, required: ['index'] },
   },
   async run(args, ctx) {
-    return runTool('check_index', { index: args.index, checked: 'true' }, ctx);
+    // check_index's own handler: through runTool its errors, like the
+    // disabled one, would come back looking like a result.
+    return checkIndex.run({ index: args.index, checked: 'true' }, ctx);
   },
 });
 
@@ -903,6 +926,10 @@ register({
           results.push({ index: f.index, ok: false, error: 'rich-text editor: fill it with type_index' });
           continue;
         }
+        if (__browyDisabled(el)) {
+          results.push({ index: f.index, ok: false, error: '[' + f.index + '] (<' + tag + '>) is disabled. ' + ${JSON.stringify(DISABLED_HINT)} });
+          continue;
+        }
         try {
           el.focus && el.focus();
           let action = f.action;
@@ -969,14 +996,17 @@ register({
       }
       if (!form) return JSON.stringify({ error: 'no <form> found' });
       const btn = form.querySelector('button[type="submit"], input[type="submit"], button:not([type])');
+      if (btn && __browyDisabled(btn)) return JSON.stringify({ error: 'disabled', index: Number(btn.getAttribute('data-browy-id')) || null, tag: btn.localName });
       if (btn) { try { btn.click(); return JSON.stringify({ success: true, via: 'click', text: (btn.innerText || btn.value || '').trim().slice(0, 60) }); } catch(_) {} }
       try { form.requestSubmit ? form.requestSubmit() : form.submit(); return JSON.stringify({ success: true, via: 'requestSubmit' }); }
       catch (e) { return JSON.stringify({ error: String(e?.message || e) }); }
     })()`;
     const r = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true }) as { result?: { value?: string } };
+    const inner = JSON.parse(String(r?.result?.value ?? '{}'));
+    // A disabled submit button ignores the click, and requestSubmit() would go around it.
+    if (inner.error === 'disabled') throw new Error(`The form's submit button ${inner.index ? `[${inner.index}] ` : ''}(<${inner.tag}>) is disabled. ${DISABLED_HINT}`);
     await new Promise((r) => setTimeout(r, 800));
     const after = await captureUrlTitle(ctx);
-    const inner = JSON.parse(String(r?.result?.value ?? '{}'));
     return JSON.stringify({
       ...inner,
       urlChanged: before.url !== after.url,
@@ -1039,13 +1069,18 @@ register({
       expression: `(() => { ${FIND_JS} ${FILE_INPUT_JS}
         const el = __browyFind(${Math.floor(idx)});
         if (!el) return 'gone';
-        return __browyFileInput(el) || el.localName;
+        if (__browyDisabled(el)) return 'disabled:' + el.localName;
+        const input = __browyFileInput(el);
+        if (input && __browyDisabled(input)) return 'disabled-input';
+        return input || el.localName;
       })()`,
       objectGroup: 'browy-upload',
     }) as { result?: { type?: string; value?: string; objectId?: string; subtype?: string } };
     try {
       const res = r?.result;
       if (res?.value === 'gone') throw new Error(`No element [${idx}]: the page changed since the last snapshot. Call inspect_page and use the new index.`);
+      if (typeof res?.value === 'string' && res.value.startsWith('disabled:')) throw disabledError(idx, res.value.slice('disabled:'.length));
+      if (res?.value === 'disabled-input') throw new Error(`The file input behind [${idx}] is disabled. ${DISABLED_HINT}`);
       if (!res?.objectId || res.subtype !== 'node') {
         throw new Error(`[${idx}] is a <${res?.value || '?'}> with no file input in or next to it. Find the file input or its upload button in inspect_page.`);
       }
@@ -2715,6 +2750,7 @@ register({
     if (!resolved.found || !resolved.rect) {
       return JSON.stringify({ success: false, error: resolved.reason || `index ${idx} not found — call inspect_page` });
     }
+    if (resolved.disabled) throw disabledError(idx, resolved.tag);
     // Real mouse-click at element center triggers Chrome's autofill flow,
     // unlike el.focus() which the saved-password manager ignores.
     const { cx, cy } = resolved.rect;
