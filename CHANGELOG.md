@@ -2,6 +2,13 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`press_key` now types the key it presses.** Up to 0.1.15 it sent the key without its character, so `press_key("a")` typed nothing and Enter could fail to submit a form. It now sends the character with the key, once, the way `press_keys` does. Both tools also send the right key codes, so a digit arrives as `Digit1` rather than `Key1`, and `press_key("Control+a")` selects all.
+- **Disabled buttons and fields now show up in the page snapshot.** Up to 0.1.15 the snapshot skipped anything with a disabled attribute, so the model couldn't see a greyed-out Submit or tell you why a form wouldn't send. They're listed now with a `disabled` mark, as in `[3]<button type=submit disabled>Subscribe</button>`. The index tools, from `click_index` to `submit_form`, refuse a disabled element with an error that says so, instead of acting as if they worked.
+
 ## [0.1.15]: the current Copilot CLI and SDK
 *Released 2026-10-16*
 
