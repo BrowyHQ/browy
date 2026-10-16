@@ -72,7 +72,7 @@
     "@github/copilot": "^1.0.98",
     "@github/copilot-sdk": "^1.0.22",
     "chalk": "^6.0.1",
-    "playwright-core": "^1.59.1",
+    "playwright-core": "^1.64.0",
     "ws": "^8.22.0"
   }
 }
