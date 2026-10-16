@@ -24,9 +24,9 @@ jobs:
     outputs:
       version: ${{ steps.ver.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
@@ -50,7 +50,7 @@ jobs:
         shell: bash
         run: ls -la release/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-release-${{ steps.ver.outputs.version }}
           # Sideload zip ships to GH Releases; CWS variant is dev-only
@@ -67,13 +67,13 @@ jobs:
     runs-on: macos-latest
     needs: build-windows
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: '${{ env.NODE_VERSION }}', cache: 'npm' }
       - run: npm ci
       - run: npm run dist:mac-x64
       - run: npm run dist:mac-arm
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mac-release-${{ needs.build-windows.outputs.version }}
           path: |
@@ -85,13 +85,13 @@ jobs:
     runs-on: ubuntu-24.04
     needs: build-windows
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: '${{ env.NODE_VERSION }}', cache: 'npm' }
       - run: npm ci
       - run: npm run dist:linux
       - run: npm run dist:linux-arm
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-release-${{ needs.build-windows.outputs.version }}
           path: |
@@ -107,16 +107,16 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: windows-release-${{ needs.build-windows.outputs.version }}
           path: artifacts
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: mac-release-${{ needs.build-windows.outputs.version }}
           path: artifacts
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: linux-release-${{ needs.build-windows.outputs.version }}
           path: artifacts
