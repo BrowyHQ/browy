@@ -69,8 +69,8 @@
   },
   "dependencies": {
     "@azure/identity": "^4.14.0",
-    "@github/copilot": "^1.0.98",
-    "@github/copilot-sdk": "^1.0.22",
+    "@github/copilot": "^1.0.103",
+    "@github/copilot-sdk": "^1.0.26",
     "playwright-core": "^1.64.0",
     "ws": "^8.22.0"
   }
