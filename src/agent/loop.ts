@@ -1514,10 +1514,11 @@ export class Agent {
 
   private async selectableModels(): Promise<import('../types.js').ModelOption[]> {
     if (!this.copilotClient) throw new Error('Copilot is not connected.');
-    const models: { id: string; name?: string; vendor?: string; provider?: string; policy?: { state: string } }[] =
+    const models: { id: string; name?: string; vendor?: string; provider?: string | { label?: string; id: string }; policy?: { state: string } }[] =
       await this.copilotClient.listModels();
     return models.filter((m) => m.policy?.state !== 'disabled').map((m) => ({
-      id: m.id, name: m.name || m.id, vendor: m.vendor || m.provider,
+      id: m.id, name: m.name || m.id,
+      vendor: m.vendor || (typeof m.provider === 'string' ? m.provider : m.provider?.label || m.provider?.id),
     }));
   }
 

@@ -129,27 +129,21 @@ jobs:
         run: |
           set -euxo pipefail
           TAG="v${VERSION}"
-          # Create the release if it doesn't already exist (first run after a
-          # fresh tag push); reruns hit the upload path. The notes are this
-          # version's CHANGELOG.md section, which is what people watching the
-          # repo's releases get by email.
+          assets=(artifacts/Browy-"$VERSION"-win-x64.zip artifacts/Browy-Extension-"$VERSION".zip
+                  artifacts/Browy-"$VERSION"-{darwin,linux}-{x64,arm64}.tar.gz install.ps1 install.sh)
+          for asset in "${assets[@]}"; do test -s "$asset"; done
+          # Don't point the latest installer URL at an incomplete release.
           if ! gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             NOTES="$(mktemp)"
-            if node scripts/release-notes.mjs "$VERSION" > "$NOTES"; then
-              TITLE="$(node scripts/release-notes.mjs "$VERSION" --title)"
-            else
-              TITLE="$TAG"
-              echo "Release $TAG. See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details." > "$NOTES"
-            fi
-            gh release create "$TAG" \
+            node scripts/release-notes.mjs "$VERSION" > "$NOTES"
+            TITLE="$(node scripts/release-notes.mjs "$VERSION" --title)"
+            gh release create "$TAG" --draft --verify-tag \
               --repo "${{ github.repository }}" \
               --title "$TITLE" \
               --notes-file "$NOTES"
           fi
-          # Always also include the install scripts from the source tree
-          # so the GH release has everything a user needs in one place.
-          gh release upload "$TAG" \
-            --repo "${{ github.repository }}" \
-            --clobber \
-            artifacts/* install.ps1 install.sh
+          gh release upload "$TAG" --repo "${{ github.repository }}" --clobber "${assets[@]}"
+          if [[ "$(gh release view "$TAG" --repo "${{ github.repository }}" --json isDraft --jq .isDraft)" == true ]]; then
+            gh release edit "$TAG" --repo "${{ github.repository }}" --draft=false
+          fi
           echo "Uploaded artifacts to ${TAG} → https://github.com/${{ github.repository }}/releases/tag/${TAG}"

@@ -218,7 +218,7 @@ Browser-driving tools go in `browser.ts`. Host-touching tools (shell, filesystem
 
 Releases are cut from `main` by the maintainer. Each release:
 
-1. Review the grouped Copilot Dependabot update and run `npm run release:update-copilot` to upgrade the CLI and SDK together within the supported ranges. To test a specific stable pair instead, use `npm run release:update-copilot -- <cli-version> <sdk-version>`. Review and commit `package.json` and `package-lock.json` together. Run `npm run typecheck`, `npm run test:unit` and `npm run test:browser-io`, then check streaming, a tool call, Stop and resume on the selected runtime.
+1. Review the grouped Copilot Dependabot update and run `npm run release:update-copilot`. It pins the current stable SDK and the exact companion CLI from its `copilotCliVersion`, then starts them together without a login or model request. It stops before an SDK major upgrade. To select a specific published pair, use `npm run release:update-copilot -- <cli-version> <sdk-version>`. Review and commit `package.json` and `package-lock.json` together. Run `npm run typecheck`, `npm run test:unit` and `npm run test:browser-io`, then check streaming, a tool call, Stop and resume on the selected runtime.
 2. Bumps `extension/manifest.json` and `package.json`.
 3. Adds a new section to [CHANGELOG.md](CHANGELOG.md), headed `## [0.X.Y]: <one-line headline>`, with `### Added` / `### Changed` / `### Fixed` / `### Removed` subsections per [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). That section becomes the GitHub release's title and notes (`scripts/release-notes.mjs`), and people who watch the repo's releases get it by email, so write it for users.
 4. Tags `v0.X.Y` and pushes the tag.
@@ -226,6 +226,8 @@ Releases are cut from `main` by the maintainer. Each release:
 6. The Chrome Web Store listing is updated separately, only when the extension code itself changes.
 
 You do not need to bump versions in your PR. The maintainer batches version bumps with releases.
+
+The current integration uses the `@github/copilot-sdk` 1.x API. The successor `@microsoft/copilot-sdk` uses a different protocol and session configuration. Follow the [SDK migration guide](https://github.com/microsoft/copilot-sdk/blob/main/docs/v2-breaking-changes.md) before changing that package, not just the CLI version.
 
 ---
 

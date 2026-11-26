@@ -2,7 +2,10 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.17]: Browser guidelines and file transfers in your signed-in tabs
+*Released 2026-11-26*
+
+Ask Browy to download a report from one signed-in tab and attach it to a form in another. It can work without switching the tab you're reading. In Settings, you can give it a standing instruction like "Fill the form, but ask before submitting it."
 
 ### Changed
 
@@ -10,10 +13,15 @@ All notable changes to Browy will be documented in this file. The format follows
 - **A page dialog no longer holds the chat until the browser call times out.** Browy can inspect an alert, confirmation or text prompt and answer it without repeating the click that opened it. Listing tabs also picks up popup windows opened during the task.
 - **Browy can attach a file even when the upload button creates its input on click.** It captures the picker for that click instead of operating the desktop. It never picks a file just because the page asked for one.
 - **Link downloads use your browser session.** Browy requests the file without a Save As dialog, gives duplicate filenames distinct names and reports whether Chrome finished or blocked the download. It leaves downloads you start yourself alone.
+- **Browy updates its copy of Copilot with the backend.** Each release lists the exact CLI and SDK versions it ships. You don't need to update the standalone CLI, and Browy won't install over it.
 
 ### Fixed
 
 - **A rejected model switch now keeps your chat and its previous model.** Settings waits for confirmation from the backend. If Copilot refuses a switch or you enter an unavailable ID with `/model`, Browy shows the error instead of saving that ID or clearing your conversation.
+
+### Upgrading
+
+Update both the backend and the extension for the new tools. If you load Browy unpacked, run the installer again and reload the extension. The installer includes the matching extension if your Chrome Web Store copy hasn't updated yet.
 
 ## [0.1.16]: press_key types its key, and disabled buttons show up
 *Released 2026-10-16*

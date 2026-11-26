@@ -1,6 +1,6 @@
 {
   "name": "browy",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "description": "The AI agent that lives in your browser. Drives real tabs through chat. Side panel + DevTools REPL.",
   "type": "module",
   "bin": {
@@ -71,8 +71,8 @@
   },
   "dependencies": {
     "@azure/identity": "^4.14.0",
-    "@github/copilot": "^1.0.114",
-    "@github/copilot-sdk": "^1.0.34",
+    "@github/copilot": "1.0.112",
+    "@github/copilot-sdk": "1.0.34",
     "playwright-core": "^1.64.0",
     "ws": "^8.22.0"
   }

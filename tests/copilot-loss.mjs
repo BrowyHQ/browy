@@ -91,7 +91,7 @@ class FakeClient {
     this.creates.push(config);
     return s;
   }
-  async listModels() { return [{ id: 'gpt-5-mini' }, { id: 'gpt-5' }]; }
+  async listModels() { return [{ id: 'gpt-5-mini', provider: { id: 'copilot', kind: 'copilot', label: 'GitHub Copilot' } }, { id: 'gpt-5' }]; }
   async listSessions() { return []; }
   async deleteSession(id) { this.deleted = [...(this.deleted || []), id]; onDisk.delete(id); }
   async ping() { if (!this.connected || this.pingHangs) throw new Error('Client not connected'); return {}; }
@@ -139,6 +139,7 @@ const ready = () => statuses.filter((s) => s === 'copilot_ready').length;
 
 try {
   await agent.initCopilot();
+  check('the model picker can search a provider label from the SDK', (await agent.listModels())[0].vendor === 'GitHub Copilot');
   agent.setBrowyProtocolSessionId('sp-loss');
 
   // A normal turn opens the chat.
