@@ -15,7 +15,7 @@
 
 <p align="center">
   <a href="https://youtu.be/bnellxgwJwY"><img src="https://img.youtube.com/vi/bnellxgwJwY/maxresdefault.jpg" alt="Video: Browy fills a 26-field form from the paper in your other tab" width="640" /></a><br />
-  <sub>65 seconds, real time: one sentence, 26 fields filled from a paper in another tab, and it stops before submit. <a href="https://browyhq.github.io/demo/paper-form/">Try the same form.</a></sub>
+  <sub>65 seconds, real time: one sentence, 26 fields filled from a paper in another tab, and it stops before submit. <a href="https://browyhq.github.io/launch/">Try it with the same paper, form and prompt.</a></sub>
 </p>
 
 > ⚠️ **Early access (v0.1.x).** Browy is in preview. APIs, tools, and on-disk schemas may change between minor releases. Breaking changes are documented in [CHANGELOG.md](CHANGELOG.md).

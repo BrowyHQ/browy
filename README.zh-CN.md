@@ -15,7 +15,7 @@
 
 <p align="center">
   <a href="https://youtu.be/bnellxgwJwY"><img src="https://img.youtube.com/vi/bnellxgwJwY/maxresdefault.jpg" alt="视频：Browy 根据另一个标签页里的论文，填写 26 个字段的表单" width="640" /></a><br />
-  <sub>65 秒，实时录制：一句话，从另一个标签页的论文里填好 26 个字段，并在提交前停下。<a href="https://browyhq.github.io/demo/paper-form/">试试同一个表单。</a></sub>
+  <sub>65 秒，实时录制：一句话，从另一个标签页的论文里填好 26 个字段，并在提交前停下。<a href="https://browyhq.github.io/zh-cn/launch/">用同一篇论文、同一张表单和同一句指令试一次。</a></sub>
 </p>
 
 > ⚠️ **早期版本（v0.1.x）。** Browy 处于预览阶段。API、工具和磁盘格式可能在小版本之间发生变化。破坏性变更会在
