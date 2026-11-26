@@ -27,7 +27,7 @@ async function build() {
     // The native host reports this in hello.ack so the extension can tell
     // which host it is talking to.
     define: { __BROWY_VERSION__: JSON.stringify(pkg.version) },
-    external: ['playwright-core', 'ws', '@azure/identity', '@github/copilot-sdk'],
+    external: ['playwright-core', 'ws', '@github/copilot-sdk'],
     logLevel: 'info',
   });
 

@@ -42,6 +42,8 @@ jobs:
           fi
 
       - run: npm ci
+      - name: Check shipped dependencies for high or critical advisories
+        run: npm audit --omit=dev --audit-level=high
       - run: npm run typecheck
       - run: npm run dist:win
       - run: npm run pack:extension

@@ -2,6 +2,19 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [0.1.18]: Browser guidelines and native file transfers, with a smaller backend
+*Released 2026-11-26*
+
+This is the recommended build for [the browser tools introduced in 0.1.17](https://github.com/BrowyHQ/browy/releases/tag/v0.1.17). Set a rule like "Ask before submitting", then let Browy fetch a report in one signed-in tab and attach it in another without switching the tab you're reading.
+
+### Security
+
+- **The installer no longer ships Azure Identity or its MSAL dependency.** A dependency audit flagged [an MSAL advisory](https://github.com/advisories/GHSA-xcx6-jx8p-x3h5). Browy signs in through the Copilot CLI and didn't call this library, so it was removed rather than replaced.
+
+### Upgrading
+
+Run the backend installer again. If you already have the 0.1.17 extension, it works with this backend. From an older version, update both halves; the installer includes the matching unpacked extension.
+
 ## [0.1.17]: Browser guidelines and file transfers in your signed-in tabs
 *Released 2026-11-26*
 
