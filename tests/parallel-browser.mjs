@@ -167,6 +167,7 @@ try {
   const secondWindow = browser.waitForEvent('page');
   await worker.evaluate(url => chrome.windows.create({ url, focused: false }), panel.url());
   const otherPanel = await secondWindow;
+  await otherPanel.waitForURL(panel.url(), { waitUntil: 'load' });
   await otherPanel.waitForFunction(() => sessionReady && parallelChats);
   assert.notEqual(await otherPanel.evaluate(() => BROWY_SESSION_ID), first);
   assert.ok(!(await otherPanel.locator('#msgs').textContent()).includes('Read the code from this page'));
