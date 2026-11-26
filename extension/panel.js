@@ -36,6 +36,7 @@ async function resetDevtoolsSession() {
   SESSION_ID = 'dt-' + Math.random().toString(36).slice(2, 10);
   try { await chrome.storage.local.set({ [DT_SID_KEY]: SESSION_ID }); } catch {}
   sendToHost({ type: 'chat.delete', id: old });
+  sendToHost({ type: 'session.end', sessionId: old });
   sendToHost({
     type: 'session.start',
     sessionId: SESSION_ID,
@@ -537,6 +538,7 @@ function sendToHost(msg) {
 
 port.onMessage.addListener((msg) => {
   if (!msg || typeof msg !== 'object') return;
+  if (msg.sessionId && msg.sessionId !== SESSION_ID) return;
   switch (msg.type) {
     case '__host_pending':
       lastHostNotice = null;
@@ -628,7 +630,7 @@ port.onMessage.addListener((msg) => {
       break;
 
     case 'chat.queued':
-      appendRow('dim', '·', 'browy is busy in another panel · this runs when that finishes');
+      appendRow('dim', '·', msg.tabId != null ? 'waiting for another chat to finish on this tab' : 'waiting for another chat to finish');
       break;
 
     case 'chat.error':

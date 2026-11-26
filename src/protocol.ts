@@ -91,6 +91,8 @@ export interface ChatSend {
   sessionId: string;
   text: string;
   policy?: BrowserPolicy;
+  /** Target when Send was pressed, before any wait for another chat. */
+  tabId?: number;
 }
 
 /** Snapshot of Settings from the requesting browser profile, not from a web page. */
@@ -229,12 +231,14 @@ export interface ServerHello {
   /** Server-side build info; useful for "you need to upgrade" hints. */
   serverVersion: string;
   browserPolicy?: true;
+  parallelChats?: true;
 }
 
 export interface SessionReady {
   type: 'session.ready';
   sessionId: string;
   model: string;
+  parallelChats?: true;
   /** Echoed back so client can confirm what was accepted. */
   capabilities: Capability[];
 }
@@ -286,6 +290,7 @@ export interface ChatQueued {
   sessionId: string;
   /** 1 means it runs next. */
   position: number;
+  tabId?: number;
 }
 
 export interface ChatError {
@@ -406,6 +411,7 @@ export interface SdkReady {
  *  `cause: 'stall'` means Copilot stopped answering rather than quit. */
 export interface HostStatus {
   type: 'host.status';
+  sessionId?: string;
   state: 'copilot_restarting' | 'copilot_ready' | 'copilot_failed';
   detail?: string;
   cause?: 'stall';

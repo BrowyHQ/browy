@@ -68,6 +68,10 @@ The headline reads: "The YC Startup Directory" on ycombinator.com/companies.
 
 Browy uses your **focused tab** by default. Switch tabs and the next message picks up the new context, and the tab strip updates in real time.
 
+To run two chats at once, send a task on one tab, switch to another tab, and choose **New chat** in the side panel. Open **Chats** to return to either task or stop it. A DevTools chat uses its inspected tab, even when you bring a different tab to the front.
+
+Each running chat uses its own Copilot worker. If both tasks start on the same tab, the second waits its turn. Closing the panel stops the tasks you started in that panel.
+
 ### 2. Multi-tab tasks: it follows your focus
 
 

@@ -403,6 +403,17 @@ export class Agent {
     this.config = config;
   }
 
+  /** A concurrent browser chat gets its own CLI, SDK handle, policy and turn.
+   *  Only per-chat history metadata keyed by the persisted ID is shared. */
+  createSessionWorker(): Agent {
+    const worker = new Agent({ ...this.config });
+    worker.interruptedChats = this.interruptedChats;
+    worker.recentActions = this.recentActions;
+    worker.previewTimePins = this.previewTimePins;
+    worker.wake = this.wake;
+    return worker;
+  }
+
   setActivityCallback(cb: ActivityCallback) {
     this.onActivity = cb;
   }
@@ -607,8 +618,13 @@ export class Agent {
     try { (await import('fs')).mkdirSync(BROWSERAGENT_WORKDIR, { recursive: true }); } catch {}
     const cliOptions = copilotClientOptions();
     console.log(`  Copilot CLI: ${resolveCopilotCli() || '(SDK bundled runtime)'}`);
-    this.copilotClient = new CopilotClient(cliOptions);
-    await this.copilotClient.start();
+    if (this.shuttingDown) throw new Error('Chat closed before Copilot started.');
+    const client = this.copilotClient = new CopilotClient(cliOptions);
+    await client.start();
+    if (this.shuttingDown) {
+      await client.forceStop();
+      throw new Error('Chat closed while Copilot was starting.');
+    }
     this.copilotStarted = true;
     this.watchCopilot(this.copilotClient);
     // Sweep stale BrowserAgent sessions left over from previous runs
@@ -712,6 +728,7 @@ export class Agent {
     this.emit({ type: 'host_status', state: 'copilot_restarting', detail: why, ...(cause === 'stall' ? { cause } : {}) });
     const restart = (async () => {
       await stopOld();
+      if (this.shuttingDown) return;
       const client = new CopilotClient(copilotClientOptions());
       try {
         await client.start();
@@ -720,7 +737,7 @@ export class Agent {
         throw e;
       }
       if (this.shuttingDown) {
-        void Promise.resolve().then(() => client.forceStop()).catch(() => {});
+        await client.forceStop();
         return;
       }
       this.copilotClient = client;
@@ -766,7 +783,8 @@ export class Agent {
 
     return allTools.map(tool => {
       const handler = async (args: Record<string, unknown>, invocation?: { requestId?: string }): Promise<ToolAnswer> => {
-        if (!self.turn || self.turn.stopped || self.browyProtocolSessionId !== owner || self.toolHandlersByName.get(tool.def.name) !== handler) {
+        const ctl = self.turn;
+        if (!ctl || ctl.stopped || self.browyProtocolSessionId !== owner || self.toolHandlersByName.get(tool.def.name) !== handler) {
           return toolFailure('This tool is not available in the active turn. No action was taken.');
         }
         const freshCtx = self.getBrowserContext();
@@ -785,6 +803,7 @@ export class Agent {
           // Test hook: make this tool fail, to check the model gets the reason.
           if (process.env.BROWY_TEST_THROW_TOOL === tool.def.name) throw new Error('test failure ZEBRA-42 (BROWY_TEST_THROW_TOOL)');
           result = await tool.run(args, freshCtx);
+          if (self.turn !== ctl || ctl.stopped) return toolFailure('This turn has stopped.');
           // The turn's deadline already answered and reported this call.
           if (requestId && self.abandonedTools.delete(requestId)) return result;
           const dur = Date.now() - t0;
@@ -792,6 +811,7 @@ export class Agent {
           self.emit({ type: 'tool_step', id, name: tool.def.name, status: 'end', result: result.slice(0, 200), durationMs: dur });
           self.recordRecentAction(tool.def.name, args, result, true, dur);
         } catch (err) {
+          if (self.turn !== ctl || ctl.stopped) return toolFailure('This turn has stopped.');
           if (requestId && self.abandonedTools.delete(requestId)) throw err;
           const dur = Date.now() - t0;
           const errMsg = err instanceof Error ? err.message : String(err);
@@ -966,8 +986,7 @@ export class Agent {
 
   private sessionPolicyKey = '';
 
-  private async ensureSession(guidelines: string) {
-    await this.modelChanges;
+  private async ensureSession(guidelines: string, ctl: TurnControl) {
     const policyKey = JSON.stringify([guidelines, [...this.disabledTools].sort(), [...this.enabledHostTools].sort(),
       !!this.contextOverride?.nativeAction]);
     if (this.copilotSession?.disconnected) {
@@ -981,6 +1000,7 @@ export class Agent {
       const old = this.copilotSession;
       console.log(`  ↻ reopening session ${old.sessionId} with the current settings`);
       const detached = await withDeadline(Promise.resolve().then(() => old.disconnect()).then(() => true), 10_000, false);
+      if (ctl.stopped || this.turn !== ctl) throw STOPPED;
       if (!detached && this.sessionPolicyKey !== policyKey) {
         throw new Error('Browy could not replace the previous chat settings. Your message was not sent.');
       }
@@ -988,13 +1008,16 @@ export class Agent {
       this.sessionSuspect = false;
     }
     if (this.copilotSession) return;
-    this.sessionOpening ??= this.openSession(guidelines).then(() => { this.sessionPolicyKey = policyKey; })
-      .finally(() => { this.sessionOpening = null; });
+    if (!this.sessionOpening) {
+      const opening = this.openSession(guidelines, ctl).then(() => { this.sessionPolicyKey = policyKey; })
+        .finally(() => { if (this.sessionOpening === opening) this.sessionOpening = null; });
+      this.sessionOpening = opening;
+    }
     await this.sessionOpening;
     if (this.sessionPolicyKey !== policyKey) throw new Error('Settings changed while the chat was opening. Send the message again.');
   }
 
-  private async openSession(guidelines: string) {
+  private async openSession(guidelines: string, ctl: TurnControl) {
     // Tools close over `self.getBrowserContext()` and read the current CDP at
     // call time, so we only need to build them once per session.
     const tools = this.buildCopilotTools(this.getBrowserContext());
@@ -1043,12 +1066,12 @@ export class Agent {
           streaming: true,
           onPermissionRequest: approveAll,
         });
-        this.adoptSession(client, session);
+        await this.adoptSession(client, session, ctl);
         return;
       } catch (e) {
         // A refused model or other resume error does not mean the chat is gone.
         const m = e instanceof Error ? e.message : String(e);
-        if (client !== this.copilotClient || !m.endsWith(`Session not found: ${wantId}`)) throw e;
+        if (ctl.stopped || this.turn !== ctl || client !== this.copilotClient || !m.endsWith(`Session not found: ${wantId}`)) throw e;
       }
     }
 
@@ -1070,15 +1093,15 @@ export class Agent {
       streaming: true,
       onPermissionRequest: approveAll,
     });
-    this.adoptSession(client, session);
+    await this.adoptSession(client, session, ctl);
   }
 
   /** Keep a chat handle that just opened, unless Copilot was lost while it
    *  opened, which leaves it dead on arrival. */
-  private adoptSession(client: any, session: any): void {
-    if (client !== this.copilotClient) {
-      Promise.resolve().then(() => session.disconnect()).catch(() => {});
-      throw new Error('Copilot quit while the chat was opening.');
+  private async adoptSession(client: any, session: any, ctl: TurnControl): Promise<void> {
+    if (client !== this.copilotClient || this.shuttingDown || this.turn !== ctl || ctl.stopped) {
+      await session.disconnect();
+      throw new Error('The turn ended while the chat was opening.');
     }
     this.copilotSession = session;
     // Opening a chat after a disconnect makes the SDK start a new CLI.
@@ -1093,7 +1116,15 @@ export class Agent {
     return { text, toolCalls: [], stopped: true, interrupted: ctl.interrupted };
   }
 
-  async chat(userText: string, guidelines = ''): Promise<ChatResult> {
+  private turnFinished: Promise<void> = Promise.resolve();
+
+  chat(userText: string, guidelines = ''): Promise<ChatResult> {
+    const result = this.runChat(userText, guidelines, this.modelChanges);
+    this.turnFinished = result.then(() => {}, () => {});
+    return result;
+  }
+
+  private async runChat(userText: string, guidelines: string, priorModelChanges: Promise<void>): Promise<ChatResult> {
     // Registered before the first await, so a Stop that lands while the turn
     // is still being set up is not lost.
     let halt: () => void = () => {};
@@ -1131,6 +1162,8 @@ export class Agent {
       }
     };
     try {
+      await Promise.race([priorModelChanges, halted]);
+      if (ctl.stopped) throw STOPPED;
       await step('waiting for Copilot to start', this.whenCopilotReady(), 60_000, undefined);
       // Copilot quit since the last turn and wasn't restarted then.
       if (!this.copilotClient && this.copilotStarted) {
@@ -1167,7 +1200,7 @@ export class Agent {
     this.emit({ type: 'status', status: 'thinking' });
 
     try {
-      const opened = await step('opening the chat', this.ensureSession(guidelines).then(() => true), 60_000, false);
+      const opened = await step('opening the chat', this.ensureSession(guidelines, ctl).then(() => true), 60_000, false);
       if (!opened) throw new Error('Copilot did not open this chat within a minute. Send your message again to retry.');
       // Genuine activity — drop any preview pin so this chat legitimately
       // floats back to the top of the list.
@@ -1400,7 +1433,7 @@ export class Agent {
           await step('restarting Copilot', this.restartCopilot(`no reply from Copilot for ${spanText(IDLE_MS)}`, false, 'stall').catch(() => {}), 60_000, undefined);
           if (!again) throw new Error(`Copilot sent nothing for ${spanText(IDLE_MS)}, twice, so Browy stopped. The chat is saved. Send a message to carry on.`);
           if (!this.copilotClient) throw new Error(`Copilot sent nothing for ${spanText(IDLE_MS)} and couldn't be restarted. The chat is saved. Send a message to try again.`);
-          const reopened = await step('reopening the chat', this.ensureSession(guidelines).then(() => true), 60_000, false);
+          const reopened = await step('reopening the chat', this.ensureSession(guidelines, ctl).then(() => true), 60_000, false);
           if (!reopened) throw new Error('Copilot did not reopen this chat within a minute. The chat is saved. Send a message to carry on.');
         }
       }
@@ -1495,8 +1528,11 @@ export class Agent {
 
   /** Apply picker requests in arrival order. Never delete or recreate a chat
    *  to switch models; if Copilot refuses, keep the last confirmed choice. */
-  setModel(id: string): Promise<void> {
+  setModel(id: string, persist = true): Promise<void> {
+    const priorTurn = this.turnFinished;
     const change = this.modelChanges.then(async () => {
+      await priorTurn;
+      if (this.shuttingDown) throw new Error('This Copilot worker has closed. Select the model again.');
       await this.whenCopilotReady();
       const models = await this.selectableModels();
       if (!models.length) throw new Error('Copilot has not reported any available models. Check your sign-in and try again.');
@@ -1505,8 +1541,9 @@ export class Agent {
       if (id === this.config.model) return;
       const session = this.copilotSession;
       if (session && !session.disconnected) await session.setModel(id);
+      if (this.shuttingDown) throw new Error('This Copilot worker has closed. Select the model again.');
       this.config.model = id;
-      savePrefs({ model: id });
+      if (persist) savePrefs({ model: id });
     });
     this.modelChanges = change.catch(() => {}); // the caller gets the rejection; later requests can proceed
     return change;
@@ -1960,32 +1997,57 @@ export class Agent {
   private contextOverride: BrowserToolContext | null = null;
   setBrowserContextOverride(ctx: BrowserToolContext | null) {
     this.contextOverride = ctx;
+    if (ctx) this.currentTabInfo = { url: '', title: '', brand: 'Browser', tabCount: 0 };
   }
 
   private emit(msg: WSMessage) {
     this.onActivity(msg);
   }
 
+  /** Release this conversation without deleting it or stopping the warm CLI. */
+  async detachChat(): Promise<void> {
+    const old = this.copilotSession;
+    const opening = this.sessionOpening;
+    this.sessionOpening = null;
+    this.browyProtocolSessionId = null;
+    this.copilotSession = null;
+    this.contextOverride = null;
+    this.toolHandlersByName.clear();
+    if (this.turn) {
+      this.turn.stopped = true;
+      this.turn.stop?.();
+      this.turn.halt();
+      this.turn = null;
+    }
+    const close = async () => {
+      if (opening) await opening.catch(() => {});
+      if (old && !old.disconnected) await old.disconnect();
+      return true;
+    };
+    if (!await withDeadline(close(), 5000, false)) {
+      if (this.shuttingDown) throw new Error('The previous chat did not detach.');
+      await this.restartCopilot('the previous chat did not detach', true);
+    }
+  }
+
   async disconnect() {
     this.shuttingDown = true;
-    // Detach our SDK session handle WITHOUT deleting it on disk so the next
-    // host start can resume it. Clear chat (history.clear) is the only path
-    // that intentionally deletes.
-    if (this.copilotSession) {
-      const old = this.copilotSession;
-      this.copilotSession = null;
-      try { await old.abort(); } catch {}
-      try { await old.disconnect(); } catch {}
+    if (this.turn) await this.abort();
+    const detached = await withDeadline(this.detachChat().then(() => true), 5000, false);
+    const client = this.copilotClient;
+    if (client) {
+      if (!detached || !await withDeadline(Promise.resolve(client.stop()).then(() => true), 5000, false)) {
+        console.warn('Copilot did not close cleanly; stopping its worker.');
+        await client.forceStop();
+      }
     }
-    if (this.copilotClient) {
-      try { await this.copilotClient.stop(); } catch {}
-    }
+    await this.copilotReady?.catch(() => {});
     if (this.rediscoverTimer) { clearInterval(this.rediscoverTimer); this.rediscoverTimer = null; }
+    if (this.connections.length) shutdownForeground();
     for (const conn of this.connections) {
       conn.browser.close().catch(() => {});
     }
     this.connections = [];
     this.activeConnection = null;
-    shutdownForeground();
   }
 }

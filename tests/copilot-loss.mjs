@@ -246,6 +246,18 @@ try {
   check('a refused switch preserves the chat and its confirmed model',
     rejected.includes('rejected by Copilot') && !cleared.disconnected && onDisk.has(cleared.sessionId)
     && agent.getModel() === cleared.model && savedModel() === cleared.model);
+  const turnsBefore = cleared.sent.length;
+  const inFlight = agent.chat('still using the selected model');
+  await until('in-flight message', () => cleared.sent.length > turnsBefore);
+  let pickerCalls = 0;
+  cleared.setModel = async () => { pickerCalls++; };
+  const nextModel = agent.setModel('gpt-5');
+  await tick();
+  check("a picker in another panel does not change a running turn's model", !pickerCalls && agent.getModel() === 'gpt-5-mini');
+  cleared.emit('session.idle');
+  await Promise.all([inFlight, nextModel]);
+  check('the accepted model applies after the turn', pickerCalls === 1 && agent.getModel() === 'gpt-5');
+  await agent.setModel('gpt-5-mini');
   agent.setBrowyProtocolSessionId('sp-unopened');
   const unknown = await agent.setModel('not-in-the-catalog').then(() => '', (e) => e.message);
   check('an unknown ID before the first turn cannot become the saved model',

@@ -18,7 +18,9 @@ const PROTOCOL = 2;
 let nativePort = null;
 let nativeReady = false;
 let supportsBrowserPolicy = false;
+let supportsParallelChats = false;
 const preparingChats = new Map();
+const browserTurns = new Map();
 let nativeServerVersion = null;
 /** Protocol the connected host reported in hello.ack. Clients compare it
  *  against their own minimum to decide whether to ask for a host update. */
@@ -46,6 +48,7 @@ const sessionToWindow = new Map();
 function ensureNativeHost() {
   if (nativePort) return nativePort;
   supportsBrowserPolicy = false;
+  supportsParallelChats = false;
   try {
     nativePort = chrome.runtime.connectNative(HOST_NAME);
   } catch (e) {
@@ -67,7 +70,10 @@ function ensureNativeHost() {
     return null;
   }
 
+  const connectedPort = nativePort;
   nativePort.onMessage.addListener((msg) => {
+    if (nativePort !== connectedPort) return;
+    if (msg?.type === 'chat.done' || (msg?.type === 'chat.error' && msg.code !== 'busy')) browserTurns.delete(msg.sessionId);
     if (msg?.type === 'chat.done' && msg.stopped) cancelSessionPickers(msg.sessionId);
     // Server → CDP/tab bridge (Phase E): SW handles these directly.
     if (msg && (msg.type === 'cdp.send' || msg.type === 'tab.new'
@@ -92,6 +98,7 @@ function ensureNativeHost() {
     if (msg.type === 'hello.ack') {
       nativeReady = true;
       supportsBrowserPolicy = msg.browserPolicy === true;
+      supportsParallelChats = msg.parallelChats === true;
       hostGaveUp = false;
       nativeServerVersion = msg.serverVersion;
       nativeProtocol = typeof msg.protocol === 'number' ? msg.protocol : 1;
@@ -104,12 +111,17 @@ function ensureNativeHost() {
 
   nativePort.onDisconnect.addListener(() => {
     const err = chrome.runtime.lastError;
+    if (nativePort !== connectedPort) return;
     const msg = (err && err.message) || 'native host disconnected';
     console.warn('[browy] native host disconnected:', msg);
     nativePort = null;
     nativeReady = false;
     sessionToClient.clear();
     preparingChats.clear();
+    browserTurns.clear();
+    sessionToTab.clear();
+    sessionToWindow.clear();
+    canceledSessions.clear();
     sessionDownloads.clear();
     sessionTabs.clear();
     gcDetachedDebuggers();
@@ -208,6 +220,10 @@ function restartNativeHost() {
     nativeReady = false;
     sessionToClient.clear();
     preparingChats.clear();
+    browserTurns.clear();
+    sessionToTab.clear();
+    sessionToWindow.clear();
+    canceledSessions.clear();
     sessionDownloads.clear();
     sessionTabs.clear();
     gcDetachedDebuggers();
@@ -267,6 +283,7 @@ chrome.runtime.onConnect.addListener((port) => {
 
   port.onMessage.addListener((msg) => {
     if (!msg || typeof msg !== 'object') return;
+    if (['session.end', 'chat.cancel', 'history.clear'].includes(msg.type) && sessionToClient.get(msg.sessionId) !== port.name) return;
 
     // Track session ↔ client routing on session.start
     if (msg.type === 'session.start' && msg.sessionId) {
@@ -315,16 +332,19 @@ chrome.runtime.onConnect.addListener((port) => {
         port.postMessage({ type: 'chat.error', code: 'no_session', sessionId: sid, message: 'Reconnect this chat before sending.' });
         return;
       }
-      if (preparingChats.has(sid)) {
+      if (preparingChats.has(sid) || browserTurns.has(sid)) {
         port.postMessage({ type: 'chat.error', code: 'busy', sessionId: sid, message: 'A message is already starting.' });
         return;
       }
       canceledSessions.delete(sid);
       preparingChats.set(sid, msg);
-      readBrowserPolicy().then((policy) => {
+      const target = sessionToTab.get(sid) ?? activeTabFor(sid).then((tab) => tab?.id);
+      Promise.all([readBrowserPolicy(), target]).then(([policy, tabId]) => {
         if (preparingChats.get(sid) !== msg) return;
         if (policy.guidelines && !supportsBrowserPolicy) throw new Error('Update the Browy backend to use your saved guidelines. This message was not sent.');
-        if (!sendToHost({ ...msg, policy })) throw new Error('The Browy backend is not connected.');
+        if (!Number.isInteger(tabId) || tabId < 0) throw new Error('No target tab for this chat. Select a tab and send again.');
+        if (!postToHost({ ...msg, policy, tabId })) throw new Error('The Browy backend is not connected.');
+        if (supportsParallelChats) browserTurns.set(sid, new Set());
       }).catch((e) => {
         if (preparingChats.get(sid) === msg) postToSessionClient(sid, { type: 'chat.error', sessionId: sid, message: e.message });
       }).finally(() => { if (preparingChats.get(sid) === msg) preparingChats.delete(sid); });
@@ -347,7 +367,7 @@ chrome.runtime.onConnect.addListener((port) => {
     // A panel's Stop went unanswered for ten seconds: the backend is wedged.
     // Restart it, which is what reloading the extension used to achieve.
     if (msg.type === '__restart_host') {
-      restartNativeHost();
+      if (!supportsParallelChats) restartNativeHost();
       return;
     }
     // "Is the backend there yet?" from the first-run screen. After a missing
@@ -396,7 +416,7 @@ chrome.runtime.onConnect.addListener((port) => {
     // Drop any sessions owned by this port
     for (const [sid, name] of sessionToClient) {
       if (name === port.name) {
-        sendToHost({ type: 'session.end', sessionId: sid });
+        postToHost({ type: 'session.end', sessionId: sid });
         sessionToClient.delete(sid);
         sessionToTab.delete(sid);
         sessionToWindow.delete(sid);
@@ -477,6 +497,10 @@ function detachMessage(reason, tabGone) {
 
 function sessionsUsingTab(tabId) {
   const out = new Set();
+  if (supportsParallelChats) {
+    for (const [sid, tabs] of browserTurns) if (tabs.has(tabId)) out.add(sid);
+    return out;
+  }
   for (const [sid, tabs] of sessionTabs) if (tabs.has(tabId)) out.add(sid);
   for (const [sid, t] of sessionToTab) if (t === tabId) out.add(sid);
   for (const call of pendingCdp.get(tabId) || []) if (call.sessionId) out.add(call.sessionId);
@@ -496,7 +520,8 @@ function postToSessionClient(sessionId, msg) {
 function beginDetach(tabId, reason) {
   let d = detaching.get(tabId);
   if (!d) {
-    d = { tabId, reason: null, tabGone: undefined, message: '', failed: new Map(), sessions: sessionsUsingTab(tabId) };
+    d = { tabId, reason: null, tabGone: undefined, message: '', failed: new Map(),
+      sessions: new Map([...sessionsUsingTab(tabId)].map(sid => [sid, browserTurns.get(sid)])) };
     d.settled = new Promise((resolve) => { d.resolve = resolve; });
     detaching.set(tabId, d);
     attachedTabs.delete(tabId);
@@ -511,7 +536,7 @@ function beginDetach(tabId, reason) {
 function countDetachFailure(d, sessionId) {
   if (!sessionId) return;
   d.failed.set(sessionId, (d.failed.get(sessionId) || 0) + 1);
-  d.sessions.add(sessionId);
+  if (!d.sessions.has(sessionId)) d.sessions.set(sessionId, browserTurns.get(sessionId));
 }
 
 async function finishDetach(d) {
@@ -527,7 +552,8 @@ async function finishDetach(d) {
   if (!d.tabGone) recentlyDetached.add(d.tabId);
   d.resolve(d);
   console.warn(`[browy] debugger detached from tab ${d.tabId}: ${d.reason}${d.tabGone ? ' (tab closed)' : ''}`);
-  for (const sid of d.sessions) {
+  for (const [sid, turn] of d.sessions) {
+    if (supportsParallelChats && (!turn || browserTurns.get(sid) !== turn)) continue;
     if (d.reason === 'canceled_by_user') canceledSessions.set(sid, d.message);
     postToHost({
       type: 'cdp.detached', sessionId: sid, tabId: d.tabId, reason: d.reason,
@@ -612,6 +638,7 @@ function gcDetachedDebuggers() {
  *  orphaned as a result. Use after session.end. */
 function releaseSessionTabs(sessionId) {
   preparingChats.delete(sessionId);
+  browserTurns.delete(sessionId);
   sessionTabs.delete(sessionId);
   sessionDownloads.delete(sessionId);
   cancelSessionPickers(sessionId);
@@ -666,7 +693,7 @@ async function ensureAttached(tabId) {
 
 /** One CDP call for a session: attach if needed, run it, and turn a lost
  *  debugger into an error that says what happened. */
-async function runCdpCall(sessionId, tabId, method, params, observePrompts) {
+async function runCdpCall(sessionId, tabId, method, params, observePrompts, check) {
   // A detach on this tab is still being sorted out: this call shares its fate.
   const settling = detaching.get(tabId);
   if (settling) {
@@ -679,6 +706,7 @@ async function runCdpCall(sessionId, tabId, method, params, observePrompts) {
     if (/no tab with given id/i.test(String(e?.message))) throw new Error(detachMessage('target_closed', true));
     throw e;
   }
+  check();
   addSessionTab(sessionId, tabId);
   if (recentlyDetached.delete(tabId)) {
     for (const sid of sessionsUsingTab(tabId)) postToSessionClient(sid, { type: '__debugger_attached', sessionId: sid, tabId });
@@ -686,9 +714,10 @@ async function runCdpCall(sessionId, tabId, method, params, observePrompts) {
   try {
     if (observePrompts) {
       await watchPage(tabId, sessionId);
+      check();
       const p = pagePrompts.get(tabId);
       if (p && p.type !== 'file') throw new Error(dialogNotice(p));
-      if (mayOpenChooser(method, params)) return await sendWithChooser(tabId, sessionId, method, params);
+      if (mayOpenChooser(method, params)) return await sendWithChooser(tabId, sessionId, method, params, false, check);
     }
     return await trackedSendCommand(tabId, sessionId, method, params);
   } catch (e) {
@@ -739,7 +768,7 @@ function mayOpenChooser(method, p) {
 }
 
 // Intercept only during a Browy gesture, never while the person browses the tab.
-async function sendWithChooser(tabId, sid, method, params, expectPicker = false) {
+async function sendWithChooser(tabId, sid, method, params, expectPicker, check) {
   if (chooserActions.has(tabId)) throw new Error('Another input action is running on this tab.');
   const action = { owner: sid, expectPicker };
   const opened = new Promise((resolve) => { action.opened = resolve; });
@@ -752,6 +781,7 @@ async function sendWithChooser(tabId, sid, method, params, expectPicker = false)
   let result;
   try {
     await Promise.race([trackedSendCommand(tabId, sid, 'Page.setInterceptFileChooserDialog', { enabled: true }), canceled]);
+    check();
     const sent = trackedSendCommand(tabId, sid, method, params);
     const dispatch = expectPicker ? sent.then((r) => {
       if (r?.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
@@ -819,7 +849,7 @@ function onPromptEvent(tabId, method, params) {
   }
 }
 
-async function attachToPicker(tabId, sid, p, files, trigger) {
+async function attachToPicker(tabId, sid, p, files, check, trigger) {
   if (!p.node || !Array.isArray(files) || !files.length || (!p.multiple && files.length !== 1)) {
     throw new Error('This picker does not accept that file selection.');
   }
@@ -836,6 +866,7 @@ async function attachToPicker(tabId, sid, p, files, trigger) {
     if (exceptionDetails || result.value !== true || pagePrompts.get(tabId) !== p) {
       throw new Error('The intended file input is no longer available on this page. No files attached.');
     }
+    check();
     await trackedSendCommand(tabId, sid, 'DOM.setFileInputFiles', { files, objectId: object.objectId });
     return { attached: files.length };
   } finally {
@@ -847,7 +878,7 @@ async function attachToPicker(tabId, sid, p, files, trigger) {
   }
 }
 
-async function nativeAction(tabId, sid, a) {
+async function nativeAction(tabId, sid, a, check) {
   if (a.kind === 'download' || a.kind === 'downloadStatus') {
     let ids = sessionDownloads.get(sid);
     let id = a.downloadId;
@@ -874,17 +905,19 @@ async function nativeAction(tabId, sid, a) {
       ...(item.state === 'complete' ? { success: true, path: item.filename, size: item.fileSize, content_type: item.mime } : {}) };
   }
   await ensureAttached(tabId);
+  check();
   addSessionTab(sid, tabId);
   await watchPage(tabId, sid);
+  check();
   const p = pagePrompts.get(tabId);
   const mine = p && (!p.owner || p.owner === sid);
   if (a.kind === 'pickFiles') {
     if (p && p.type !== 'file') throw new Error(dialogNotice(p));
     const picker = await sendWithChooser(tabId, sid, 'Runtime.callFunctionOn', {
       objectId: a.objectId, functionDeclaration: 'function() { this.click(); }', userGesture: true,
-    }, true);
+    }, true, check);
     if (pagePrompts.get(tabId) !== picker || !sessionToClient.has(sid)) throw new Error('The file picker changed before attachment.');
-    return attachToPicker(tabId, sid, picker, a.files, a.objectId);
+    return attachToPicker(tabId, sid, picker, a.files, check, a.objectId);
   }
   if (a.kind === 'inspect') {
     if (!mine) return { dialog: null };
@@ -893,7 +926,7 @@ async function nativeAction(tabId, sid, a) {
   }
   if (!mine || p.id !== a.id || p.answering) throw new Error('That prompt is no longer current on this tab. Inspect it again.');
   if (p.type === 'file') {
-    if (a.kind === 'attach') return attachToPicker(tabId, sid, p, a.files);
+    if (a.kind === 'attach') return attachToPicker(tabId, sid, p, a.files, check);
     if (a.kind !== 'dismiss') throw new Error('Use upload_file with chooser_id for this file picker.');
   } else {
     if (!['accept', 'dismiss'].includes(a.kind) || (a.text !== undefined && (a.kind !== 'accept' || p.type !== 'prompt'))) {
@@ -912,12 +945,12 @@ async function nativeAction(tabId, sid, a) {
 
 /** The tab a session acts on when it hasn't pinned one: the active tab of the
  *  panel's own window, or of the last-focused window when the panel didn't
- *  say (DevTools panels, older side panels) or its window has closed. */
+ *  name a window. A closed window is not permission to drive another one. */
 async function activeTabFor(sessionId) {
   const windowId = sessionToWindow.get(sessionId);
   if (windowId != null) {
-    const [own] = await chrome.tabs.query({ active: true, windowId }).catch(() => []);
-    if (own) return own;
+    const [own] = await chrome.tabs.query({ active: true, windowId });
+    return own || null;
   }
   const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
   return tab || null;
@@ -928,16 +961,22 @@ function tabSummary(t) {
 }
 
 async function handleBridgeRequest(msg) {
+  const host = nativePort;
+  const turn = browserTurns.get(msg.sessionId);
+  const check = () => {
+    if (nativePort !== host || !sessionToClient.has(msg.sessionId) ||
+        (supportsParallelChats && (!turn || browserTurns.get(msg.sessionId) !== turn))) throw new Error('This browser turn has ended.');
+    const canceled = canceledSessions.get(msg.sessionId);
+    if (canceled) throw new Error(canceled);
+  };
   const reply = (ok, payload) => {
     const out = { type: 'tool.result', sessionId: msg.sessionId, callId: msg.callId, ok };
     if (ok) out.result = payload; else out.error = String(payload?.message || payload);
-    postToHost(out);
+    if (nativePort === host) postToHost(out);
   };
   try {
+    check();
     if (msg.type === 'cdp.send' || msg.type === 'browser.native') {
-      // The user clicked Cancel on Chrome's debugging bar during this task.
-      const canceled = canceledSessions.get(msg.sessionId);
-      if (canceled) throw new Error(canceled);
       // Resolution order:
       //   1. explicit msg.tabId (caller pinned the tab)
       //   2. session-bound inspected tab (sessionToTab)
@@ -950,25 +989,25 @@ async function handleBridgeRequest(msg) {
         if (!t) throw new Error('no active tab');
         tabId = t.id;
       }
+      check();
+      turn?.add(tabId);
       if (msg.type === 'browser.native') {
-        if (!sessionToClient.has(msg.sessionId)) throw new Error('This browser session has ended.');
-        reply(true, await nativeAction(tabId, msg.sessionId, msg.action));
+        reply(true, await nativeAction(tabId, msg.sessionId, msg.action, check));
       } else {
-        const result = await runCdpCall(msg.sessionId, tabId, msg.method, msg.params, msg.observePrompts);
+        const result = await runCdpCall(msg.sessionId, tabId, msg.method, msg.params, msg.observePrompts, check);
         reply(true, { tabId, result });
       }
     } else if (msg.type === 'tab.new') {
       const opts = { url: msg.url || 'about:blank', active: msg.active !== false };
       const windowId = sessionToWindow.get(msg.sessionId);
-      let t;
-      try { t = await chrome.tabs.create(windowId != null ? { ...opts, windowId } : opts); }
-      catch { t = await chrome.tabs.create(opts); }
+      const t = await chrome.tabs.create(windowId != null ? { ...opts, windowId } : opts);
       reply(true, tabSummary(t));
     } else if (msg.type === 'tab.activate') {
       const t = await chrome.tabs.update(Number(msg.tabId), { active: true });
       reply(true, tabSummary(t));
     } else if (msg.type === 'tab.close') {
       const tab = await chrome.tabs.get(Number(msg.tabId));
+      check();
       await chrome.tabs.remove(tab.id);
       // Report the tab the browser shows next in that window, so the agent
       // carries on there rather than jumping to another window.
@@ -991,7 +1030,7 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
   const tabId = source.tabId;
   if (!source.sessionId) onPromptEvent(tabId, method, params);
   for (const [sessionId, tabs] of sessionTabs) {
-    if (tabs.has(tabId)) {
+    if (tabs.has(tabId) && (!supportsParallelChats || browserTurns.get(sessionId)?.has(tabId))) {
       postToHost({ type: 'cdp.event', sessionId, tabId, method, params });
     }
   }

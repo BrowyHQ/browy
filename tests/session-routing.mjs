@@ -71,24 +71,21 @@ check('devtools panel derives a unique port name',
 check('background emits __session_conflict', bg.includes('__session_conflict'));
 check('side panel handles __session_conflict', sidepanel.includes('__session_conflict'));
 
-// ── switching chats must end the outgoing session ──────────────────────────
-// Without this the runner keeps a SessionState and ExtensionContext alive for
-// every chat ever opened in the panel, and sessionToClient grows one dead
-// entry per new chat.
-
-const endCalls = (sidepanel.match(/type:\s*'session\.end'/g) || []).length;
-check('side panel ends the outgoing session on chat switch (2 call sites)',
-  endCalls >= 2);
-
-for (const fn of ['startNewChat', 'switchToChat']) {
-  const i = sidepanel.indexOf(`async function ${fn}`);
-  const body = i === -1 ? '' : sidepanel.slice(i, i + 2600);
-  check(`${fn} sends session.end for the previous id`,
-    body.includes("type: 'session.end'"));
-}
+// A host from before parallel chats must keep its original switch behavior.
+const leave = sidepanel.slice(sidepanel.indexOf('function leaveChat()'), sidepanel.indexOf('\n}', sidepanel.indexOf('function leaveChat()')) + 2);
+const switches = new Function('parallelChats', 'sessionReady', 'busy', `
+  const BROWY_SESSION_ID = 'sp-1', chat = {}, liveChats = new Map([['sp-1', chat]]), view = {}, sent = [];
+  let loadToken = 0, pendingChat, resendOnReady, lastChatText, currentAction, previewingId, pendingHostMsgs = [];
+  const browyPost = m => sent.push(m.type), onRouteLost = () => {}, dropPendingRpcs = () => {},
+    resetLive = () => {}, setBusy = () => {}, setTtl = () => {};
+  ${leave}
+  leaveChat(); return { sent: sent.join(','), parked: chat.view === view };
+`);
+check('a new host keeps the running chat registered when the panel switches', switches(true, true, true).parked);
+check('an old host stops and releases the previous chat', switches(false, true, true).sent === 'chat.cancel,session.end');
 
 if (failures.length) {
   console.error('FAIL:\n  - ' + failures.join('\n  - '));
   process.exit(1);
 }
-console.log('PASS — session routing contract (13 assertions)');
+console.log('PASS: session routing and chat switching');

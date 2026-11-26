@@ -202,6 +202,12 @@ const detachedFor = (tabId) => toHost.filter((m) => m.type === 'cdp.detached' &&
 
 // A late answer must not start a host that has gone.
 {
+  const second = { name: 'sidepanel-other', onMessage: event(), onDisconnect: event(), postMessage() {} };
+  chrome.runtime.onConnect.fire(second);
+  const before = toHost.length;
+  for (const type of ['chat.cancel', 'session.end']) second.onMessage.fire({ type, sessionId: 'sp-1' });
+  check("another port cannot stop or steal the first port's session", toHost.length === before);
+  second.onDisconnect.fire();
   cdp('c9', 13);
   await tick(5);
   const port = nativePort;

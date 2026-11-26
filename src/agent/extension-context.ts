@@ -54,7 +54,7 @@ interface ExtTabState {
 }
 
 /**
- * One ExtensionContext per session. Holds the pending-call map and the
+ * One ExtensionContext per turn. Holds the pending-call map and the
  * "active tab" for that session. Routed messages from the runner are
  * delivered via handleToolResult / handleCdpEvent.
  */
@@ -71,6 +71,7 @@ export class ExtensionContext {
    *  after that reattaches. Cleared when a turn starts. */
   private notices = new Map<number, { message: string; tabGone: boolean }>();
   private callSeq = 0;
+  private closed: string | null = null;
 
   constructor(
     private sessionId: string,
@@ -78,6 +79,7 @@ export class ExtensionContext {
     /** Test hook: shortens every call deadline. */
     private timeoutOverrideMs?: number,
     private nativeIO = false,
+    private claimTab?: (tabId: number) => void,
   ) {}
 
   // ── Inbound from runner ─────────────────────────────────────────────────
@@ -92,6 +94,7 @@ export class ExtensionContext {
   }
 
   handleCdpEvent(msg: CdpEventFromClient): void {
+    if (this.closed || ((this.claimTab || msg.tabId != null) && msg.tabId !== this.activeTabId)) return;
     const subs = this.cdpListeners.get(msg.method);
     if (!subs) return;
     for (const cb of subs) {
@@ -122,16 +125,29 @@ export class ExtensionContext {
   }
 
   /** A new turn: what happened to tabs before it is old news. */
-  beginTurn(): void {
+  beginTurn(tabId?: number): void {
     this.notices.clear();
     // Resolve the current tab on first use, even if guidelines ruled out
     // taking the usual automatic snapshot at the start of this turn.
-    this.activeTabId = null;
+    this.activeTabId = tabId ?? null;
+  }
+
+  async startingTab(): Promise<number> {
+    const t = await this.sendAndWait<TabInfo | null>({
+      type: 'tab.getActive', sessionId: this.sessionId, callId: this.nextCallId('tab'),
+    }, 'tab.getActive');
+    if (!t || !Number.isSafeInteger(t.tabId) || t.tabId < 0) throw new Error('No target tab for this chat.');
+    return t.tabId;
+  }
+
+  private checkTab(id: number) {
+    if (this.closed) throw new Error(this.closed);
+    this.claimTab?.(id);
   }
 
   private forgetTab(tabId: number): void {
     this.knownTabs.delete(tabId);
-    if (this.activeTabId === tabId) this.activeTabId = null;
+    if (this.activeTabId === tabId && !this.claimTab) this.activeTabId = null;
   }
 
   /** Reject every in-flight call, e.g. when the user presses Stop. */
@@ -142,6 +158,7 @@ export class ExtensionContext {
 
   /** Reject every in-flight call. Called when the session/transport closes. */
   dispose(reason = 'session closed'): void {
+    this.closed = reason;
     this.cancelPending(reason);
     this.cdpListeners.clear();
   }
@@ -149,10 +166,13 @@ export class ExtensionContext {
   // ── Helpers ─────────────────────────────────────────────────────────────
 
   private nextCallId(prefix: string): string {
-    return `${prefix}-${++this.callSeq}-${Date.now().toString(36)}`;
+    return `${prefix}-${this.instanceId}-${++this.callSeq}`;
   }
 
+  private readonly instanceId = crypto.randomUUID();
+
   private sendAndWait<T = unknown>(envelope: Extract<ServerMessage, { callId: string }>, method: string, timeoutMs = TAB_TIMEOUT_MS, tabId?: number): Promise<T> {
+    if (this.closed) return Promise.reject(new Error(this.closed));
     const callId = envelope.callId;
     const limit = this.timeoutOverrideMs ?? timeoutMs;
     return new Promise<T>((resolve, reject) => {
@@ -185,7 +205,8 @@ export class ExtensionContext {
 
     const cdp = {
       send: async (method: string, params?: unknown) => {
-        const target = pinnedTabId ?? self.activeTabId;
+        const target = pinnedTabId ?? self.activeTabId ?? (self.claimTab ? await self.startingTab() : null);
+        if (target !== null) self.checkTab(target);
         const notice = target != null ? self.notices.get(target) : undefined;
         if (notice) {
           self.notices.delete(target!);
@@ -207,6 +228,7 @@ export class ExtensionContext {
         const own = Number((params as { timeout?: unknown } | undefined)?.timeout);
         const limit = Number.isFinite(own) && own > 0 ? Math.max(CDP_TIMEOUT_MS, own + 15_000) : CDP_TIMEOUT_MS;
         const wrapped = await self.sendAndWait<{ tabId: number; result: unknown }>(envelope, method, limit, target ?? undefined);
+        if (self.claimTab && wrapped?.tabId !== target) throw new Error('The browser answered for a different tab. Its result was discarded.');
         // Remember whichever tab the SW actually used so subsequent calls pin
         // to the same tab (avoids races if the user switches tabs mid-flow).
         if (pinnedTabId === undefined && self.activeTabId === target && wrapped && typeof wrapped.tabId === 'number') {
@@ -233,11 +255,12 @@ export class ExtensionContext {
       title: async () => info.title,
       goto: async (url: string) => {
         await self.activate(info.tabId);
-        await cdp.send('Page.navigate', { url });
+        await self.build(info.tabId).cdp.send('Page.navigate', { url });
         return null;
       },
       bringToFront: async () => { await self.activate(info.tabId); },
       close: async () => {
+        self.checkTab(info.tabId);
         const callId = self.nextCallId('tab');
         // Short deadline: extensions before 0.1.11 don't know tab.close and
         // never answer it.
@@ -248,7 +271,7 @@ export class ExtensionContext {
         );
         self.knownTabs.delete(info.tabId);
         if (self.activeTabId === info.tabId) {
-          self.activeTabId = next && typeof next.tabId === 'number' ? next.tabId : null;
+          self.activeTabId = next?.tabId ?? (self.claimTab ? info.tabId : null);
         }
       },
     });
@@ -258,18 +281,16 @@ export class ExtensionContext {
       pinTarget: async () => {
         let id = pinnedTabId ?? self.activeTabId;
         if (id == null) {
-          const tab = await self.sendAndWait<TabInfo | null>({
-            type: 'tab.getActive', sessionId: self.sessionId, callId: self.nextCallId('tab'),
-          }, 'tab.getActive');
-          if (!tab) throw new Error('No active browser tab.');
-          id = tab.tabId;
+          id = await self.startingTab();
           if (self.activeTabId == null) self.activeTabId = id;
         }
+        self.checkTab(id);
         return self.build(id);
       },
       ...(this.nativeIO ? {
-        nativeAction: (action: NativeBrowserAction) => {
-          const tabId = pinnedTabId ?? self.activeTabId ?? undefined;
+        nativeAction: async (action: NativeBrowserAction) => {
+          const tabId = pinnedTabId ?? self.activeTabId ?? (self.claimTab ? await self.startingTab() : undefined);
+          if (tabId !== undefined) self.checkTab(tabId);
           return self.sendAndWait({
             type: 'browser.native', sessionId: self.sessionId, callId: self.nextCallId('native'), tabId, action,
           }, action.kind, TAB_TIMEOUT_MS, tabId);
@@ -284,6 +305,7 @@ export class ExtensionContext {
               'tab.new',
             );
             const state: ExtTabState = { tabId: info.tabId, url: info.url, title: info.title };
+            self.checkTab(info.tabId);
             self.knownTabs.set(info.tabId, state);
             self.activeTabId = info.tabId;
             return makePage(state) as any;
@@ -303,11 +325,22 @@ export class ExtensionContext {
       getActivePageIndex: () => (self.activeTabId == null ? -1 : Array.from(self.knownTabs.keys()).indexOf(self.activeTabId)),
       setActivePage: async (page: any, background) => {
         if (page && typeof page._tabId === 'number') {
-          if (background) self.activeTabId = page._tabId;
+          if (background) {
+            self.checkTab(page._tabId);
+            self.activeTabId = page._tabId;
+          }
           else await self.activate(page._tabId);
         }
       },
       getActiveTabInfo: async () => {
+        if (self.claimTab) {
+          const id = pinnedTabId ?? self.activeTabId ?? await self.startingTab();
+          self.checkTab(id);
+          const all = await self.refreshTabs();
+          const tab = all.find((t) => t.tabId === id);
+          if (!tab) throw new Error(detachMessage('target_closed', true));
+          return { url: tab.url, title: tab.title, tabCount: all.length, brand: 'Browser' };
+        }
         const callId = self.nextCallId('tab');
         try {
           const t = await self.sendAndWait<TabInfo | null>(
@@ -363,6 +396,7 @@ export class ExtensionContext {
   }
 
   private async activate(tabId: number): Promise<void> {
+    this.checkTab(tabId);
     const callId = this.nextCallId('tab');
     await this.sendAndWait<TabInfo>(
       { type: 'tab.activate', sessionId: this.sessionId, callId, tabId } as any,

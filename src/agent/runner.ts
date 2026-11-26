@@ -5,13 +5,8 @@
 // dispatches incoming ClientMessages to the underlying Agent and translates
 // Agent events back into ServerMessages routed to the right transport.
 //
-// Phase A scope:
-//   - Single shared Agent (existing playwright-driven one). Multi-Agent
-//     (per-session BrowserToolContext) comes in Phase E.
-//   - One in-flight chat at a time across all transports. Sufficient for
-//     v0.3 since a user is one human pressing one Enter at a time.
-//   - Capability negotiation is recorded but not yet enforced on tools
-//     (that gates tool registry filtering, also Phase E).
+// Browser turns reserve their target tabs. Independent turns can use separate
+// Copilot workers; clients without a concrete browser target still serialize.
 
 import type { Agent } from './loop.js';
 import { ExtensionContext } from './extension-context.js';
@@ -23,7 +18,6 @@ import type {
   Capability,
   BrowserPolicy,
   SessionStart,
-  CdpDetached,
   InterruptReason,
 } from '../protocol.js';
 import { PROTOCOL_VERSION } from '../protocol.js';
@@ -47,18 +41,22 @@ interface SessionState {
   transport: Transport;
   capabilities: Set<Capability>;
   policy: BrowserPolicy;
-  /** Set true while a chat is in flight; prevents overlapping requests. */
-  inFlight: boolean;
-  /** Phase E: present when session declared cdp.activeTab. */
-  extContext?: ExtensionContext;
+  inspectedTabId?: number;
+  turn?: CurrentTurn;
+  worker?: Agent;
+  ready?: Promise<void>;
 }
 
-/** The chat the agent is running. `released` means Stop freed its panel
- *  before agent.chat() returned, so its eventual result is dropped. */
 interface CurrentTurn {
-  sessionId: string;
-  settled: boolean;
-  released: boolean;
+  session: SessionState;
+  text: string;
+  policy: BrowserPolicy;
+  context?: ExtensionContext;
+  target?: number;
+  tabs: Set<number>;
+  phase: 'targeting' | 'waiting' | 'starting' | 'running';
+  queued?: boolean;
+  stopping?: boolean;
   interrupted?: InterruptReason;
 }
 
@@ -87,18 +85,14 @@ export class Runner {
   /** Transport.id → set of session ids hosted on it (for cleanup). */
   private transportSessions = new Map<string, Set<string>>();
 
-  /** The session currently driving the Agent. Used to route activity
-   *  events back to the originator. */
-  private activeSessionId: string | null = null;
-
-  /** Chats sent from other panels while the agent was busy, oldest first.
-   *  Until 0.1.11 they were refused with "agent is busy on another panel",
-   *  and the user had to notice and send the message again. */
-  private waiting: Array<{ sessionId: string; text: string; policy: BrowserPolicy }> = [];
-
-  /** The chat the agent is running. `released` means Stop freed its panel
-   *  before agent.chat() returned, so its eventual result is dropped. */
-  private currentTurn: CurrentTurn | null = null;
+  private primaryOwner?: SessionState;
+  private primaryReady?: Promise<void>;
+  private retiring = new Map<string, Promise<void>>();
+  private deleting = new Set<string>();
+  private running = new Set<CurrentTurn>();
+  private waiting: CurrentTurn[] = [];
+  private closing = false;
+  private wake?: WakeWatch;
 
   /** Latched Copilot SDK readiness, replayed to clients that attach late. */
   private sdkReady: { ok: boolean; detail?: string } | null = null;
@@ -107,13 +101,11 @@ export class Runner {
     this.agent = agent;
     this.opts = opts;
 
-    // Subscribe to agent activity ONCE. Route every event to the active
-    // session (chat-scoped events) AND broadcast to all sessions
-    // (status/tabs/models — UI-wide concerns).
-    this.agent.setActivityCallback((wsMsg) => this.onAgentEvent(wsMsg));
+    agent.setActivityCallback((msg) => this.onAgentEvent(msg));
 
     if (opts.wakeWatch !== false) {
       const wake = opts.wakeWatch ?? new WakeWatch().start();
+      this.wake = wake;
       wake.onWake((gapMs) => this.onWake(gapMs));
       this.agent.setWakeWatch?.(wake);
     }
@@ -126,7 +118,7 @@ export class Runner {
 
     transport.onMessage((msg) => {
       this.handleClientMessage(transport, msg).catch((err) => {
-        const sid = (msg as any).sessionId;
+        const sid = 'sessionId' in msg && msg.sessionId;
         if (sid) {
           transport.send({
             type: 'chat.error',
@@ -141,8 +133,8 @@ export class Runner {
     transport.onClose(() => {
       const ids = this.transportSessions.get(transport.id);
       if (ids) {
-        for (const id of ids) this.closeSession(id, 'transport closed');
         this.transportSessions.delete(transport.id);
+        for (const id of ids) this.closeSession(id, 'transport closed');
       }
     });
   }
@@ -151,51 +143,120 @@ export class Runner {
    *  turn: nobody can see it any more, and its browser calls would be routed
    *  to a context that no longer exists. */
   private closeSession(id: string, reason: string): void {
-    this.waiting = this.waiting.filter((w) => w.sessionId !== id);
-    if (this.activeSessionId === id) void this.agent.abort().catch(() => {});
-    this.sessions.get(id)?.extContext?.dispose(reason);
+    const s = this.sessions.get(id);
+    if (!s) return;
     this.sessions.delete(id);
+    this.transportSessions.get(s.transport.id)?.delete(id);
+    const turn = s.turn;
+    if (turn) turn.context?.dispose(reason);
+    this.retireWorker(s, !!turn && this.running.has(turn));
+    if (turn) this.release(turn);
   }
 
-  /** Start the oldest waiting chat whose panel is still open. */
-  private runNextWaiting(): void {
-    while (this.waiting.length) {
-      const next = this.waiting.shift()!;
-      if (!this.sessions.has(next.sessionId)) continue;
-      void this.onChatSend(next.sessionId, next.text, undefined, next.policy).catch(() => {});
-      return;
+  private retireWorker(s: SessionState, discard = false): void {
+    const worker = s.worker;
+    if (!worker) return;
+    s.worker = undefined;
+    s.ready = undefined;
+    worker.setActivityCallback(() => {});
+    const primary = worker === this.agent;
+    if (primary) this.primaryOwner = undefined;
+    if (primary && this.closing) return; // shutdown owns the prewarmed client
+    const cleanup = primary && !discard ? worker.detachChat() : worker.disconnect();
+    const done = cleanup
+      .finally(() => { if (this.retiring.get(s.id) === done) this.retiring.delete(s.id); });
+    done.catch((e) => console.warn(`Could not close worker for ${s.id}:`, e));
+    this.retiring.set(s.id, done);
+    if (primary && discard) {
+      // The old call might still return. Never lend its Agent to a new turn.
+      this.agent = worker.createSessionWorker();
+      this.agent.setActivityCallback((msg) => this.onAgentEvent(msg));
+      this.primaryReady = this.agent.initCopilot();
+      this.primaryReady.catch((e) => console.warn('Replacement Copilot worker failed to start:', e));
+    } else if (primary) {
+      this.primaryReady = done;
     }
   }
 
-  /** Free the panel of a turn that ignored Stop. Its result, if it ever
-   *  comes, is dropped (see onChatSend). */
-  private releaseStuckTurn(turn: CurrentTurn | null): void {
-    if (!turn || turn.settled || turn.released || this.currentTurn !== turn) return;
-    turn.released = true;
-    console.log(`  ■ chat ${turn.sessionId}: still running ${(this.opts.stopGraceMs ?? 3000) / 1000} s after Stop; freeing the panel`);
-    const s = this.sessions.get(turn.sessionId);
-    const note = turn.interrupted ? INTERRUPT_NOTES[turn.interrupted] : '';
-    s?.transport.send({ type: 'event.activity', sessionId: turn.sessionId, event: 'status.idle' });
-    s?.transport.send({
-      type: 'chat.done', sessionId: turn.sessionId, text: note ? withNote('', note) : '', toolCalls: [], stopped: true,
-      ...(turn.interrupted ? { interrupted: turn.interrupted } : {}),
+  private assignWorker(s: SessionState): Agent {
+    if (s.worker) return s.worker;
+    const owner = this.primaryOwner;
+    if (!owner?.turn || !this.running.has(owner.turn)) {
+      if (owner) this.retireWorker(owner);
+      this.primaryOwner = s;
+      s.worker = this.agent;
+      s.ready = this.primaryReady;
+    } else {
+      s.worker = this.agent.createSessionWorker();
+      s.ready = s.worker.initCopilot();
+    }
+    const worker = s.worker;
+    worker.setActivityCallback((msg) => {
+      if (s.worker === worker) this.onAgentEvent(msg, s);
     });
-    if (s) s.inFlight = false;
-    if (this.activeSessionId === turn.sessionId) this.activeSessionId = null;
-    this.currentTurn = null;
-    this.runNextWaiting();
+    return worker;
   }
 
-  /** End the running turn the way Stop does, for a reason the panel is told:
-   *  the computer slept, or the Copilot runtime quit. */
-  private interruptTurn(reason: InterruptReason): void {
-    const turn = this.currentTurn;
-    if (!turn || turn.settled || turn.released) return;
-    turn.interrupted ??= reason;
-    console.log(`  ■ chat ${turn.sessionId}: stopping it, ${reason === 'sleep' ? 'the computer slept' : 'Copilot quit'}`);
-    void this.agent.interrupt(reason).catch(() => {});
-    this.sessions.get(turn.sessionId)?.extContext?.cancelPending(INTERRUPT_NOTES[reason]);
-    setTimeout(() => this.releaseStuckTurn(turn), this.opts.stopGraceMs ?? 3000);
+  private release(turn: CurrentTurn): void {
+    turn.context?.dispose('This turn has ended. No further browser actions.');
+    turn.session.turn = undefined;
+    this.waiting = this.waiting.filter((w) => w !== turn);
+    this.running.delete(turn);
+    this.drain();
+  }
+
+  private conflicts(turn: CurrentTurn, other: CurrentTurn, tab = turn.target): boolean {
+    return tab === undefined || other.target === undefined ||
+      (other.session.transport === turn.session.transport && (other.target === tab || other.tabs.has(tab)));
+  }
+
+  private drain(): void {
+    if (this.closing) return;
+    for (const turn of [...this.waiting]) {
+      if (turn.phase !== 'waiting' || !this.transportSessions.has(turn.session.transport.id)) continue;
+      const ahead = this.waiting.slice(0, this.waiting.indexOf(turn));
+      const position = 1 + ahead.filter((other) => this.conflicts(turn, other)).length;
+      if (position > 1 || [...this.running].some((other) => this.conflicts(turn, other))) {
+        if (!turn.queued) turn.session.transport.send({ type: 'chat.queued', sessionId: turn.session.id,
+          position, tabId: turn.target });
+        turn.queued = true;
+        continue;
+      }
+      this.waiting.splice(this.waiting.indexOf(turn), 1);
+      this.running.add(turn);
+      if (turn.target !== undefined) turn.tabs.add(turn.target);
+      turn.phase = 'starting';
+      void this.runTurn(turn);
+    }
+  }
+
+  private claimTab(turn: CurrentTurn, tabId: number): void {
+    if (!this.running.has(turn) || turn.stopping) throw new Error('This turn has stopped.');
+    if ([...this.running].some((other) => other !== turn && this.conflicts(turn, other, tabId))) {
+      throw new Error('Another Browy chat is using this tab. No action was taken. Pick a different tab or try after that chat finishes.');
+    }
+    turn.tabs.add(tabId);
+  }
+
+  private stopTurn(turn: CurrentTurn, reason?: InterruptReason): void {
+    if (turn.stopping) return;
+    turn.stopping = true;
+    turn.interrupted = reason;
+    turn.context?.dispose(reason ? INTERRUPT_NOTES[reason] : 'Stopped by the user.');
+    const s = turn.session;
+    const finish = () => {
+      if (s.turn !== turn) return;
+      const note = reason === 'sleep' && turn.phase !== 'running' ? SLEPT_IN_LINE_NOTE : reason && INTERRUPT_NOTES[reason];
+      s.transport.send({ type: 'event.activity', sessionId: s.id, event: 'status.idle' });
+      s.transport.send({ type: 'chat.done', sessionId: s.id, text: note ? withNote('', note) : '',
+        toolCalls: [], stopped: true, ...(reason ? { interrupted: reason } : {}) });
+      if (this.running.has(turn)) this.retireWorker(s, true);
+      this.release(turn);
+    };
+    if (turn.phase !== 'running' || !s.worker) { finish(); return; }
+    const stopping = reason ? s.worker.interrupt(reason) : s.worker.abort();
+    stopping.catch((e) => console.warn(`Could not stop ${s.id}:`, e));
+    setTimeout(finish, this.opts.stopGraceMs ?? 3000).unref();
   }
 
   /** The computer slept (or this process was frozen) for `gapMs`. Whatever
@@ -204,22 +265,30 @@ export class Runner {
    *  that unasked could do it twice. */
   private onWake(gapMs: number): void {
     console.log(`  💤 ${Math.round(gapMs / 1000)} s went by without this process running: the computer slept or the process was paused`);
-    for (const w of this.waiting.splice(0)) {
-      const s = this.sessions.get(w.sessionId);
-      s?.transport.send({ type: 'event.activity', sessionId: w.sessionId, event: 'status.idle' });
-      s?.transport.send({
-        type: 'chat.done', sessionId: w.sessionId, text: withNote('', SLEPT_IN_LINE_NOTE), toolCalls: [], stopped: true, interrupted: 'sleep',
-      });
-    }
-    this.interruptTurn('sleep');
+    for (const turn of [...this.waiting.splice(0), ...this.running]) this.stopTurn(turn, 'sleep');
     // Network connections rarely survive a sleep. Check the one to Copilot
     // now rather than on the next message.
-    void this.agent.checkCopilot?.().catch(() => {});
+    for (const worker of new Set([this.agent, ...[...this.sessions.values()].flatMap((s) => s.worker ? [s.worker] : [])])) {
+      void worker.checkCopilot?.().catch((e) => console.warn('Copilot wake check failed:', e));
+    }
+  }
+
+  async shutdown(): Promise<void> {
+    this.closing = true;
+    this.wake?.stop();
+    for (const id of this.sessions.keys()) this.closeSession(id, 'Host shutting down.');
+    try { await Promise.all(this.retiring.values()); }
+    finally { await this.agent.disconnect(); }
   }
 
   // ── Inbound dispatch ─────────────────────────────────────────────────────
 
   private async handleClientMessage(transport: Transport, msg: ClientMessage): Promise<void> {
+    const owner = 'sessionId' in msg && msg.sessionId ? this.sessions.get(msg.sessionId) : undefined;
+    if (owner && owner.transport !== transport) {
+      transport.send({ type: 'chat.error', sessionId: owner.id, code: 'busy', message: 'This chat is open on another connection.' });
+      return;
+    }
     switch (msg.type) {
       case 'hello':
         transport.send({
@@ -227,6 +296,7 @@ export class Runner {
           protocol: PROTOCOL_VERSION,
           serverVersion: this.opts.serverVersion,
           browserPolicy: true,
+          parallelChats: true,
         });
         return;
 
@@ -235,57 +305,22 @@ export class Runner {
 
       case 'session.end': {
         this.closeSession(msg.sessionId, 'session.end');
-        this.transportSessions.get(transport.id)?.delete(msg.sessionId);
         return;
       }
 
       case 'chat.send':
-        return this.onChatSend(msg.sessionId, msg.text, transport, msg.policy);
+        return this.onChatSend(msg.sessionId, msg.text, transport, msg.policy, msg.tabId);
 
       case 'chat.cancel': {
-        const sid = (msg as any).sessionId;
-        // A chat still waiting its turn is simply taken out of the line.
-        const before = this.waiting.length;
-        this.waiting = this.waiting.filter((w) => w.sessionId !== sid);
-        if (this.waiting.length !== before) {
-          const s = this.sessions.get(sid);
-          s?.transport.send({ type: 'event.activity', sessionId: sid, event: 'status.idle' });
-          s?.transport.send({ type: 'chat.done', sessionId: sid, text: '', toolCalls: [], stopped: true });
-          return;
-        }
-        // Only the session driving the agent can stop it. Otherwise one
-        // panel could abort another panel's stream.
-        if (this.activeSessionId && this.activeSessionId === sid) {
-          const turn = this.currentTurn;
-          const stopping = this.agent.abort();
-          // Release any browser call the turn was waiting on; the SDK abort
-          // has already been requested, so the turn does not carry on.
-          this.sessions.get(sid)?.extContext?.cancelPending('Stopped by the user.');
-          // Normally the turn ends within a second. If it is stuck somewhere
-          // Stop can't reach, free the panel anyway: until 0.1.13 that meant
-          // reloading the extension.
-          setTimeout(() => this.releaseStuckTurn(turn), this.opts.stopGraceMs ?? 3000);
-          await stopping;
-        }
+        if (owner?.turn) this.stopTurn(owner.turn);
         return;
       }
 
       case 'history.clear': {
-        // Refuse if another session has a chat in flight — clearing rebinds
-        // the agent's session id, which would abort their stream mid-flight.
-        const callerSid = (msg as any).sessionId;
-        if (this.activeSessionId && this.activeSessionId !== callerSid) {
-          const s = this.sessions.get(callerSid);
-          s?.transport.send({
-            type: 'chat.error', sessionId: callerSid, code: 'busy',
-            message: 'agent is busy on another session — try again in a moment',
-          });
-          return;
+        if (owner && !await this.deleteIdleChat(owner.id)) {
+          transport.send({ type: 'chat.error', sessionId: owner.id, code: owner.turn ? 'busy' : 'internal',
+            message: owner.turn ? 'Stop this chat before clearing it.' : 'Could not clear this chat.' });
         }
-        if (callerSid) {
-          this.agent.setBrowyProtocolSessionId(callerSid);
-        }
-        await this.agent.clearHistory();
         return;
       }
 
@@ -352,11 +387,13 @@ export class Runner {
       case 'chat.history': {
         const route = this.replyRoute(msg);
         try {
+          await this.retiring.get(msg.id);
+          const worker = this.sessions.get(msg.id)?.worker ?? this.agent;
           if (msg.items) {
-            const page = await this.agent.getHistory(String(msg.id || ''), { limit: msg.limit, before: msg.before });
+            const page = await worker.getHistory(msg.id, { limit: msg.limit, before: msg.before });
             transport.send({ type: 'chat.history.result', id: msg.id, ...page, ...route });
           } else {
-            const messages = await this.agent.getChatMessages(msg.id);
+            const messages = await worker.getChatMessages(msg.id);
             transport.send({ type: 'chat.history.result', id: msg.id, messages, ...route });
           }
         } catch (e) {
@@ -367,34 +404,34 @@ export class Runner {
       }
 
       case 'chat.delete': {
-        // Refuse only while the agent is mid-turn on the chat being deleted —
-        // deleting a different, idle chat is always safe.
-        if (this.activeSessionId && this.activeSessionId === msg.id) {
-          transport.send({ type: 'chat.delete.result', id: msg.id, ok: false });
-          return;
-        }
-        const ok = await this.agent.deleteChat(msg.id);
+        const ok = await this.deleteIdleChat(msg.id);
         transport.send({ type: 'chat.delete.result', id: msg.id, ok });
         return;
       }
 
       case 'tool.result': {
-        const s = this.sessions.get((msg as any).sessionId);
-        s?.extContext?.handleToolResult(msg);
+        owner?.turn?.context?.handleToolResult(msg);
         return;
       }
       case 'cdp.event': {
-        const s = this.sessions.get((msg as any).sessionId);
-        s?.extContext?.handleCdpEvent(msg);
+        owner?.turn?.context?.handleCdpEvent(msg);
         return;
       }
       case 'cdp.detached': {
-        const s = this.sessions.get(msg.sessionId);
         console.log(`  ⚠ chat ${msg.sessionId}: the debugger came off tab ${msg.tabId} (${msg.reason}${msg.tabGone ? ', tab closed' : ''})`);
-        s?.extContext?.handleDetached(msg as CdpDetached);
+        owner?.turn?.context?.handleDetached(msg);
         return;
       }
     }
+  }
+
+  private async deleteIdleChat(id: string): Promise<boolean> {
+    if (this.sessions.get(id)?.turn || this.deleting.has(id)) return false;
+    this.deleting.add(id);
+    try {
+      await this.retiring.get(id);
+      return await (this.sessions.get(id)?.worker ?? this.agent).deleteChat(id);
+    } finally { this.deleting.delete(id); }
   }
 
   /** Where a chat.list / chat.history reply goes. A 0.1.14 side panel names
@@ -410,19 +447,13 @@ export class Runner {
   }
 
   private async onSessionStart(transport: Transport, msg: SessionStart): Promise<void> {
-    const state: SessionState = {
+    const state: SessionState = this.sessions.get(msg.sessionId) ?? {
       id: msg.sessionId,
       transport,
       capabilities: new Set(msg.capabilities),
       policy: { guidelines: '', disabledTools: msg.disabledTools ?? [], enabledHostTools: msg.enabledHostTools ?? [] },
-      inFlight: false,
+      inspectedTabId: msg.inspectedTabId,
     };
-
-    // Phase E: if the client can drive an active tab via CDP, build the
-    // extension context. Tools will be routed through it on chat.send.
-    if (state.capabilities.has('cdp.activeTab')) {
-      state.extContext = new ExtensionContext(msg.sessionId, transport, undefined, state.capabilities.has('browser.nativeIO'));
-    }
 
     this.sessions.set(msg.sessionId, state);
     this.transportSessions.get(transport.id)?.add(msg.sessionId);
@@ -432,6 +463,7 @@ export class Runner {
       sessionId: msg.sessionId,
       model: this.agent.getModel(),
       capabilities: Array.from(state.capabilities),
+      parallelChats: true,
     });
 
     // Push initial state so the new client renders without waiting for a tick.
@@ -458,13 +490,13 @@ export class Runner {
     }).catch(() => {});
   }
 
-  private async onChatSend(sessionId: string, text: string, transport?: Transport, settings?: BrowserPolicy): Promise<void> {
+  private async onChatSend(sessionId: string, text: string, transport: Transport, settings?: BrowserPolicy, tabId?: number): Promise<void> {
     const session = this.sessions.get(sessionId);
-    if (!session || (transport && transport !== session.transport)) {
+    if (!session) {
       // Until 0.1.13 this dropped the message without a word, and the panel
       // waited forever. Say so; the side panel registers again and resends.
       console.log(`  ▶ chat ${sessionId}: no such session on this host, so the panel is told to reconnect`);
-      transport?.send({
+      transport.send({
         type: 'chat.error', sessionId, code: 'no_session',
         message: "Browy's backend lost track of this chat. Reconnect and send the message again.",
       });
@@ -476,74 +508,64 @@ export class Runner {
       session.transport.send({ type: 'chat.error', sessionId, message: 'Invalid browser settings. No actions taken.' });
       return;
     }
-    if (session.inFlight) {
+    if (session.turn || this.deleting.has(sessionId)) {
       session.transport.send({
-        type: 'chat.error', sessionId, code: 'aborted',
-        message: 'another chat is already in flight on this session',
+        type: 'chat.error', sessionId, code: session.turn ? 'busy' : 'internal',
+        message: this.deleting.has(sessionId) ? 'This chat is being cleared.' : 'This chat already has a message running or queued.',
       });
       return;
     }
-    // Single-Agent serialization: never start a chat while ANOTHER session is
-    // driving the agent. Calling agent.chat() from B while A is mid-stream
-    // would (a) re-bind the SDK session id mid-run and abort A's stream, and
-    // (b) misroute A's deltas to B because activeSessionId would have
-    // flipped. B waits in line instead and starts as soon as A ends.
-    if (this.activeSessionId && this.activeSessionId !== sessionId) {
-      if (this.waiting.some((w) => w.sessionId === sessionId)) {
-        session.transport.send({
-          type: 'chat.error', sessionId, code: 'busy',
-          message: 'this chat already has a message waiting to run',
-        });
-        return;
-      }
-      this.waiting.push({ sessionId, text, policy });
-      session.transport.send({ type: 'chat.queued', sessionId, position: this.waiting.length });
-      console.log(`  ▶ chat ${sessionId}: waiting behind ${this.activeSessionId} (position ${this.waiting.length})`);
-      return;
-    }
-    session.inFlight = true;
-    this.activeSessionId = sessionId;
-    const turn: CurrentTurn = { sessionId, settled: false, released: false };
-    this.currentTurn = turn;
-    const t0 = Date.now();
-    console.log(`  ▶ chat ${sessionId}: started`);
-    // Bind the agent's Copilot SDK session to this protocol id so reloads
-    // resume the same on-disk conversation.
-    this.agent.setBrowyProtocolSessionId(sessionId);
-    // Phase E: swap the agent's tool context to this session's. Single-Agent
-    // shared across sessions is fine for v0.3 because we serialize chats.
-    if (session.extContext) {
-      session.extContext.beginTurn();
-      this.agent.setBrowserContextOverride(session.extContext.build());
-    } else {
-      this.agent.setBrowserContextOverride(null);
-    }
-    let outcome = 'done';
+    const turn: CurrentTurn = { session, text, policy, tabs: new Set(), phase: 'targeting' };
+    session.turn = turn;
+    this.waiting.push(turn);
     try {
-      this.agent.setDisabledTools(policy.disabledTools);
-      this.agent.setEnabledHostTools(policy.enabledHostTools);
-      const result = await this.agent.chat(text, policy.guidelines.trim());
-      const { text: response, toolCalls, stopped } = result;
-      turn.settled = true;
-      // Stop already freed the panel; this late result belongs to nobody.
-      if (turn.released) return;
-      const interrupted = result.interrupted ?? (stopped ? turn.interrupted : undefined);
-      if (interrupted) {
-        outcome = `stopped (${interrupted === 'sleep' ? 'the computer slept' : 'Copilot quit'})`;
-        // Browser calls the cut-short turn started have nobody to answer.
-        session.extContext?.cancelPending(INTERRUPT_NOTES[interrupted]);
-        session.transport.send({
-          type: 'chat.done', sessionId, text: withNote(response, INTERRUPT_NOTES[interrupted]), toolCalls, stopped: true, interrupted,
-        });
-        return;
+      if (session.capabilities.has('cdp.activeTab')) {
+        turn.context = new ExtensionContext(sessionId, transport, undefined, session.capabilities.has('browser.nativeIO'),
+          (id) => this.claimTab(turn, id));
+        turn.target = session.inspectedTabId ?? tabId ?? await turn.context.startingTab();
+        if (!Number.isSafeInteger(turn.target) || turn.target < 0) throw new Error('No target tab for this chat.');
       }
-      if (stopped) outcome = 'stopped';
-      session.transport.send({ type: 'chat.done', sessionId, text: response, toolCalls, ...(stopped ? { stopped } : {}) });
+      if (session.turn !== turn) return;
+      turn.phase = 'waiting';
+      this.drain();
     } catch (err) {
-      turn.settled = true;
-      if (turn.released) return;
-      outcome = 'error';
+      if (session.turn !== turn) return;
+      transport.send({ type: 'chat.error', sessionId, message: err instanceof Error ? err.message : String(err) });
+      this.release(turn);
+    }
+  }
+
+  private async runTurn(turn: CurrentTurn): Promise<void> {
+    const { session, policy } = turn;
+    const sessionId = session.id;
+    const t0 = Date.now();
+    try {
+      await this.retiring.get(sessionId);
+      if (session.turn !== turn) return;
+      const worker = this.assignWorker(session);
+      await session.ready;
+      if (session.turn !== turn) return;
+      const model = this.agent.getModel();
+      if (worker !== this.agent && worker.getModel() !== model) await worker.setModel(model, false);
+      if (session.turn !== turn) return;
+      worker.setBrowyProtocolSessionId(sessionId);
+      turn.context?.beginTurn(turn.target);
+      worker.setBrowserContextOverride(turn.context?.build() ?? null);
+      worker.setDisabledTools(policy.disabledTools);
+      worker.setEnabledHostTools(policy.enabledHostTools);
+      turn.phase = 'running';
+      console.log(`  ▶ chat ${sessionId}: started${turn.target === undefined ? '' : ` on tab ${turn.target}`}`);
+      const result = await worker.chat(turn.text, policy.guidelines.trim());
+      if (session.turn !== turn) return;
+      const interrupted = result.interrupted ?? turn.interrupted;
+      const stopped = interrupted || result.stopped || turn.stopping;
+      session.transport.send({ type: 'chat.done', sessionId, toolCalls: result.toolCalls,
+        text: interrupted ? withNote(result.text, INTERRUPT_NOTES[interrupted]) : result.text,
+        ...(stopped ? { stopped: true } : {}), ...(interrupted ? { interrupted } : {}) });
+    } catch (err) {
+      if (session.turn !== turn) return;
       const m = err instanceof Error ? err.message : String(err);
+      if (turn.phase === 'starting' && session.worker === this.agent) this.retireWorker(session, true);
       const code = looksLikeAuthError(m) ? 'auth' : 'internal';
       session.transport.send({ type: 'chat.error', sessionId, message: m, code });
       if (code === 'auth') {
@@ -553,24 +575,23 @@ export class Runner {
         });
       }
     } finally {
-      turn.settled = true;
-      if (turn.released) {
-        console.log(`  ■ chat ${sessionId}: the turn freed by Stop finally ended after ${Math.round((Date.now() - t0) / 1000)} s`);
-      } else {
-        console.log(`  ■ chat ${sessionId}: ${outcome} in ${Math.round((Date.now() - t0) / 1000)} s`);
-        session.inFlight = false;
-        if (this.activeSessionId === sessionId) this.activeSessionId = null;
-        if (this.currentTurn === turn) this.currentTurn = null;
-        this.runNextWaiting();
+      if (session.turn === turn) {
+        console.log(`  ■ chat ${sessionId}: ended after ${Math.round((Date.now() - t0) / 1000)} s`);
+        if (session.worker !== this.agent || turn.stopping) this.retireWorker(session);
+        this.release(turn);
       }
     }
   }
 
   // ── Outbound: translate Agent activity → BrowyProtocol ──────────────────
 
-  private onAgentEvent(ws: WSMessage): void {
-    const translated = translateWsToProtocol(ws, this.activeSessionId);
+  private onAgentEvent(ws: WSMessage, owner?: SessionState): void {
+    const translated = translateWsToProtocol(ws, owner?.turn?.phase === 'running' ? owner.id : null);
     if (!translated) return;
+    if (owner && translated.type === 'host.status') {
+      owner.transport.send({ ...translated, sessionId: owner.id });
+      return;
+    }
     if ('sessionId' in translated && translated.sessionId) {
       // Session-scoped: route to originating session only.
       const session = this.sessions.get(translated.sessionId as string);

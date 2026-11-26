@@ -179,6 +179,10 @@ function setLive(on) { dot.classList.toggle('live', on); }
 // Those are only read now, for chats whose session has no event log any
 // more: they show as read-only saved copies.
 let BROWY_SESSION_ID = null;
+let parallelChats = false;
+let previewingId = null;
+const liveChats = new Map();
+const finishedChats = new Map();
 const SID_KEY    = 'browy.sessionId';
 const CHAT_PREFIX = 'browy.chat.';
 const META_PREFIX = 'browy.chatMeta.';
@@ -198,24 +202,49 @@ const panelWindowId = (chrome.windows && chrome.windows.getCurrent)
   ? chrome.windows.getCurrent().then((w) => (w && w.id != null ? w.id : null)).catch(() => null)
   : Promise.resolve(null);
 
-async function startSession() {
+async function startSession(id = BROWY_SESSION_ID) {
   const windowId = await panelWindowId;
+  if (id !== BROWY_SESSION_ID) return;
   browyPost({
     type: 'session.start',
-    sessionId: BROWY_SESSION_ID,
+    sessionId: id,
     capabilities: ['cdp.activeTab'],
     ...(windowId != null ? { windowId } : {}),
   });
 }
 
 async function loadStoredSessionId() {
+  const win = await panelWindowId;
+  const key = SID_KEY + '.' + win;
+  if (win != null && chrome.storage.session) {
+    const saved = await chrome.storage.session.get([key, SID_KEY + '.initialized']).catch(e => {
+      console.warn('Could not read the window chat:', e); return {};
+    });
+    if (saved[key]) return saved[key];
+    if (saved[SID_KEY + '.initialized']) {
+      const fresh = newSessionId();
+      await rememberSessionId(fresh);
+      return fresh;
+    }
+  }
   try {
     const r = await chrome.storage.local.get([SID_KEY]);
-    if (r && typeof r[SID_KEY] === 'string' && r[SID_KEY]) return r[SID_KEY];
+    if (r && typeof r[SID_KEY] === 'string' && r[SID_KEY]) {
+      await rememberSessionId(r[SID_KEY]);
+      return r[SID_KEY];
+    }
   } catch {}
   const fresh = newSessionId();
-  try { await chrome.storage.local.set({ [SID_KEY]: fresh }); } catch {}
+  await rememberSessionId(fresh);
   return fresh;
+}
+
+async function rememberSessionId(id) {
+  const win = await panelWindowId;
+  try {
+    await Promise.all([win != null && chrome.storage.session?.set({ [SID_KEY + '.' + win]: id, [SID_KEY + '.initialized']: true }),
+      chrome.storage.local.set({ [SID_KEY]: id })]);
+  } catch (e) { console.warn('Could not remember the selected chat:', e); }
 }
 
 /** The HTML copy 0.1.13 and earlier kept of a chat, if any. */
@@ -425,7 +454,7 @@ function browyTranslate(msg) {
     case 'chat.done':
       return { type: 'response', text: msg.text || pendingChat, toolCalls: msg.toolCalls || [], stopped: !!msg.stopped };
     case 'chat.queued':
-      return { type: 'queued', position: msg.position };
+      return { type: 'queued', position: msg.position, tabId: msg.tabId };
     case 'chat.error':
       if (msg.code === 'auth') return { type: 'copilot_status', state: 'unauth', detail: msg.message, _fromError: true };
       return { type: 'status', status: 'error', detail: msg.message };
@@ -586,7 +615,7 @@ function flushPendingHostMsgs() {
   if (!sessionReady) return;
   while (pendingHostMsgs.length) {
     const m = pendingHostMsgs.shift();
-    browyPost(m);
+    if (m.sessionId === BROWY_SESSION_ID) browySend({ type: 'chat', text: m.text });
   }
 }
 const wsShim = {
@@ -1002,6 +1031,7 @@ function useSuggestion(text) {
 
 // Everything the panel does when the host goes away, whatever the reason.
 function markHostDown() {
+  forgetLiveChats();
   sessionReady = false;
   sdkReady = false;
   setLive(false);
@@ -1097,6 +1127,7 @@ const connStatus = (() => {
         // No answer: the port died without telling us. Start a new one.
         pongTimer = null;
         endTurnForRestart();
+        forgetLiveChats();
         try { bgPort && bgPort.disconnect(); } catch {}
         bgPort = null;
         sessionReady = false;
@@ -1118,6 +1149,7 @@ const connStatus = (() => {
     /** The port to the service worker closed, which takes the host with it. */
     portLost() {
       endTurnForRestart();
+      forgetLiveChats();
     },
     /** Sees every message first. True means it was handled here. */
     onMessage(raw) {
@@ -1194,6 +1226,8 @@ function connect() {
   }
   ws = wsShim;
   bgPort.onMessage.addListener((raw) => {
+    if (trackChat(raw)) return;
+    if (raw.sessionId && raw.sessionId !== BROWY_SESSION_ID) return;
     if (connStatus.onMessage(raw)) return;
     if (raw.type === '__host_ready') {
       reconnectAttempts = 0;
@@ -1273,16 +1307,38 @@ function connect() {
       // than fighting over the routing, and keep whatever is on screen: the
       // conversation the user can see has not been sent anywhere yet.
       onRouteLost('conflict');
-      onHistoryConflict();
       (async () => {
+        const old = BROWY_SESSION_ID;
         BROWY_SESSION_ID = newSessionId();
-        try { await chrome.storage.local.set({ [SID_KEY]: BROWY_SESSION_ID }); } catch {}
+        if (previewingId === old) {
+          onHistoryConflict();
+        } else {
+          loadToken++;
+          dropPendingRpcs();
+          resetLive();
+          view = newView(BROWY_SESSION_ID, 'empty');
+          paintEmpty();
+          setChatTitle('');
+        }
+        for (const m of pendingHostMsgs) {
+          if (m.sessionId !== old) continue;
+          m.sessionId = BROWY_SESSION_ID;
+          const chat = liveChats.get(old);
+          if (chat) { liveChats.delete(old); liveChats.set(BROWY_SESSION_ID, chat); }
+          if (!liveTurn) {
+            const turn = ensureLiveTurn();
+            turn.dataset.text = m.text;
+            turn.appendChild(userBubble(m.text));
+          }
+        }
+        await rememberSessionId(BROWY_SESSION_ID);
         startSession();
       })();
       return;
     }
     if (raw.type === 'session.ready') {
       sessionReady = true;
+      parallelChats = raw.parallelChats === true;
       restartingHost = false;
       onRouteReady(raw.sessionId);
       // Safety net: any real message from the host proves it's alive, so
@@ -1322,9 +1378,6 @@ function connect() {
       } catch {}
       return;
     }
-    // Events for a chat this panel is no longer showing, e.g. the tail of a
-    // turn after "new chat", must not land in the current conversation.
-    if (raw.sessionId && raw.sessionId !== BROWY_SESSION_ID) return;
     // The backend had no record of this chat, so it dropped the message.
     // Until 0.1.13 it said nothing and the panel waited forever. Register
     // again and send the message once more.
@@ -1430,7 +1483,7 @@ function handle(m) {
   }
   if (m.type === 'status') {
     if (m.status === 'thinking') { setBusy(true); ensureLiveBubble(); }
-    if (m.status === 'idle')     { setBusy(false); currentAction = null; setTtl(); /* finalization deferred to response handler to avoid duplicate bubbles */ }
+    if (m.status === 'idle')     { if (!liveChats.has(BROWY_SESSION_ID)) setBusy(false); currentAction = null; setTtl(); }
     if (m.status === 'error')    { setBusy(false); setError(true); finalizeLiveBubble(); endLiveTurn(); currentAction = null; setTtl(); }
   }
   if (m.type === 'delta') {
@@ -1488,10 +1541,9 @@ function handle(m) {
     clearAuthBannerOnSuccess();
   }
   if (m.type === 'queued') {
-    // Another window's chat is running. This one starts when it ends.
     ensureLiveBubble();
     if (liveBody && !liveText) {
-      liveBody.innerHTML = '<span class="note">Browy is working in another window. This starts as soon as that finishes.</span>';
+      liveBody.textContent = m.tabId != null ? 'Waiting for another chat to finish on this tab.' : 'Waiting for another chat to finish.';
     }
   }
   if (m.type === 'browsers_status') {
@@ -2265,6 +2317,10 @@ function finishLiveTurn(turnEl, { stopped }) {
   turnEl.classList.remove('live');
   const text = turnEl.dataset.text || '';
   const id = BROWY_SESSION_ID;
+  if (turnEl.dataset.resumed && !stopped) {
+    loadChat(id);
+    return;
+  }
   // Stop answers at once; the runtime records the abort a moment later.
   setTimeout(() => rerenderTurn(turnEl, { id, text, stopped }), stopped ? 1500 : 0);
 }
@@ -2354,15 +2410,66 @@ function addAuthErrorBubble(detail) {
 }
 
 // ── Input ───────────────────────────────────────────────────────
+function rememberFinished(id, chat, note, stopped) {
+  finishedChats.set(id, { title: chat.title, at: chat.at, note, stopped });
+  if (finishedChats.size > 20) finishedChats.delete(finishedChats.keys().next().value);
+}
+
+function forgetLiveChats() {
+  for (const [id, chat] of liveChats) {
+    if (id !== BROWY_SESSION_ID) rememberFinished(id, chat, 'The backend disconnected. This task stopped.', true);
+  }
+  liveChats.clear();
+  parallelChats = false;
+  resendOnReady = lastChatText = null;
+  pendingHostMsgs.length = 0;
+  onRouteLost('offline');
+  dropPendingRpcs('offline');
+}
+
+// Keep a small progress preview for parked chats. Copilot's session remains
+// the transcript; hidden deltas and tool calls never go through the renderer.
+function trackChat(raw) {
+  const id = raw.sessionId;
+  const chat = liveChats.get(id);
+  if (!chat) return false;
+  const hidden = id !== BROWY_SESSION_ID;
+  if (raw.type === 'chat.queued') chat.status = 'waiting for tab';
+  else if (raw.type === 'event.activity' && raw.event === 'status.thinking') chat.status = 'running';
+  else if (raw.type === 'chat.tool_call') chat.status = raw.tool;
+  else if (raw.type === 'chat.delta') {
+    chat.preview = (chat.preview + (raw.text || '')).slice(-4096);
+  } else if (raw.type === 'chat.done' || raw.type === 'chat.error') {
+    if (raw.code === 'busy') { if (!hidden) flash(raw.message); return true; }
+    if (!hidden && raw.code === 'no_session' && lastChatText && !lastChatResent) return false;
+    liveChats.delete(id);
+    if (hidden) {
+      const note = raw.type === 'chat.error' ? raw.message : raw.interrupted ? raw.text : raw.stopped ? STOPPED_NOTE : '';
+      rememberFinished(id, chat, (note || '').slice(-1024), !!note);
+      browyPost({ type: 'session.end', sessionId: id });
+    } else {
+      setBusy(false);
+      if (raw.type === 'chat.error' && raw.code !== 'auth') {
+        addBub('a err', escapeHtml(raw.message || 'This chat could not run.'));
+      }
+    }
+  } else return hidden;
+  if (raw.type !== 'chat.delta' && chatsOverlay.classList.contains('open')) renderChatRows();
+  return hidden;
+}
+
 function send() {
   const t = inp.value.trim();
-  if (!t || busy || !ws || ws.readyState !== 1) return;
+  if (!t || busy || liveChats.has(BROWY_SESSION_ID) || !ws || ws.readyState !== 1) return;
   // A read-only saved copy can't carry on: the message starts a new chat.
   if (view.mode === 'saved') {
     inp.value = ''; autoSize();
     startNewChat().then(() => { inp.value = t; send(); });
     return;
   }
+  finishedChats.delete(BROWY_SESSION_ID);
+  liveChats.set(BROWY_SESSION_ID, { text: t, title: chatTitle(BROWY_SESSION_ID, view.items) || t.slice(0, 60),
+    at: Date.now(), status: 'running', preview: '' });
   ws.send(JSON.stringify({ type: 'chat', text: t }));
   // Placeholders for a chat still loading make way for the message.
   msgs.querySelectorAll('.skel-bub, .hist-fail').forEach((n) => n.remove());
@@ -2385,6 +2492,15 @@ function send() {
   }
 }
 function stop() {
+  if (!busy) return;
+  const id = BROWY_SESSION_ID;
+  if (pendingHostMsgs.some((m) => m.sessionId === id)) {
+    pendingHostMsgs.length = 0;
+    liveChats.delete(id);
+    setBusy(false);
+    handle({ type: 'response', text: '', stopped: true });
+    return;
+  }
   if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'stop' }));
   // The backend confirms a Stop within a second or two, and frees a stuck
   // turn itself after three. Silence for ten means the backend itself is
@@ -2393,7 +2509,17 @@ function stop() {
   clearTimeout(stopWatch);
   stopWatch = setTimeout(() => {
     stopWatch = null;
-    if (!busy) return;
+    if (!busy || BROWY_SESSION_ID !== id) return;
+    if (parallelChats) {
+      browyPost({ type: 'session.end', sessionId: id });
+      liveChats.delete(id);
+      setBusy(false);
+      handle({ type: 'response', text: pendingChat, stopped: true });
+      sessionReady = false;
+      startSession();
+      flash('Stop went unanswered. Reconnecting this chat.');
+      return;
+    }
     restartingHost = true;
     browyPost({ type: '__restart_host' });
     markStopped();
@@ -2403,39 +2529,43 @@ function stop() {
   }, 10_000);
 }
 
+function leaveChat() {
+  const id = BROWY_SESSION_ID;
+  const chat = liveChats.get(id);
+  if (parallelChats && sessionReady && chat) {
+    chat.view = view;
+  } else if (id) {
+    if (busy) browyPost({ type: 'chat.cancel', sessionId: id });
+    browyPost({ type: 'session.end', sessionId: id });
+    liveChats.delete(id);
+  }
+  sessionReady = false;
+  previewingId = null;
+  onRouteLost('stale');
+  loadToken++;
+  dropPendingRpcs();
+  pendingHostMsgs.length = 0;
+  pendingChat = '';
+  resendOnReady = lastChatText = null;
+  resetLive();
+  setBusy(false);
+  currentAction = null;
+  setTtl();
+}
+
 // Start a brand new chat. The current chat stays in its Copilot session and
 // shows up under "chats" in the history overlay. The new id gets its own
 // session on disk with the first message.
 async function startNewChat() {
-  // Tell the host to forget the active SDK handle WITHOUT deleting it on disk
-  // (so the previous chat is preserved in the chats overlay). The new SID's
-  // SDK session is created lazily on the next chat.send via
-  // setBrowyProtocolSessionId → ensureSession on the host.
-  if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'stop' }));
-  // End the outgoing session properly. Without this the runner keeps its
-  // SessionState and ExtensionContext alive for every chat ever opened in this
-  // panel, and the background's sessionToClient map grows one dead entry per
-  // new chat, all cleaned up only when the panel finally closes.
-  const previousId = BROWY_SESSION_ID;
-  // Mint a new SID and rebind.
+  leaveChat();
   BROWY_SESSION_ID = newSessionId();
-  loadToken++;
-  dropPendingRpcs();
-  if (previousId && previousId !== BROWY_SESSION_ID) {
-    browyPost({ type: 'session.end', sessionId: previousId });
-  }
-  try { await chrome.storage.local.set({ [SID_KEY]: BROWY_SESSION_ID }); } catch {}
-  resetLive();
   view = newView(BROWY_SESSION_ID, 'empty', view.paged);
   view.total = 0;
   paintEmpty();
-  // The old chat's last events are filtered out once the id changes, so its
-  // idle never arrives here. The new chat starts free.
-  if (busy) setBusy(false);
   setChatTitle('');
   try { setControlsState(hostState); } catch {}
-  // Tell the host to start the new session.
   startSession();
+  await rememberSessionId(BROWY_SESSION_ID);
 }
 
 // Open a chat from the history overlay. Its Copilot session is the record:
@@ -2443,26 +2573,42 @@ async function startNewChat() {
 // renders the session's newest turns.
 async function switchToChat(id) {
   if (!id || id === BROWY_SESSION_ID) { closeChatsOverlay(); return; }
-  // Stop whatever the outgoing chat was doing; the new one resumes on demand.
-  if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'stop' }));
-  const previousId = BROWY_SESSION_ID;
+  leaveChat();
   BROWY_SESSION_ID = id;
-  loadToken++;
-  dropPendingRpcs();
-  if (previousId && previousId !== id) {
-    browyPost({ type: 'session.end', sessionId: previousId });
-  }
-  try { await chrome.storage.local.set({ [SID_KEY]: id }); } catch {}
-  resetLive();
-  if (busy) setBusy(false);
+  previewingId = id;
   try { setControlsState(hostState); } catch {}
   closeChatsOverlay();
+  const chat = liveChats.get(id);
+  if (chat) {
+    // Still registered on this port. Restore synchronously so an arriving
+    // delta or terminal message always sees the correct chat on screen.
+    sessionReady = true;
+    onRouteReady(id);
+    view = chat.view;
+    view.loading = false;
+    paintTurns(view.items);
+    setChatTitle(chat.title);
+    const turn = ensureLiveTurn();
+    turn.dataset.text = chat.text;
+    turn.dataset.resumed = '1';
+    turn.appendChild(userBubble(chat.text));
+    if (chat.preview) appendDelta(chat.preview);
+    else ensureLiveBubble();
+    pendingChat = chat.preview;
+    currentAction = chat.status;
+    setTtl();
+    setBusy(true);
+    await rememberSessionId(id);
+    return;
+  }
+  startSession();
+  await rememberSessionId(id);
+  if (BROWY_SESSION_ID !== id) return;
   await paintFromCache(id);
   if (BROWY_SESSION_ID !== id) return;
-  // Register the chat with the host first, so the history reply is routed
-  // to this panel and the chat is ready to resume.
-  startSession();
-  loadChat(id);
+  await loadChat(id);
+  const finished = finishedChats.get(id);
+  if (BROWY_SESSION_ID === id && finished?.note) setHistBar({ kind: 'note', note: finished.note, earlier: view.start });
 }
 
 // ── Chats overlay ───────────────────────────────────────────────────────
@@ -2668,7 +2814,7 @@ function chatsNotice(text, withRetry) {
 
 function renderChatRows() {
   renderChatsSync();
-  if (!chatsCache) {
+  if (!chatsCache && !liveChats.size && !finishedChats.size) {
     // Nothing to show yet. Never render that as "no chats": an empty list
     // used to look exactly like the history had been wiped.
     if (sdkFailedDetail) { chatsHint.textContent = 'error'; chatsNotice('// backend failed to start: ' + sdkFailedDetail, true); return; }
@@ -2684,13 +2830,18 @@ function renderChatRows() {
     }
     return;
   }
-  const rows = chatsCache.map((c) => ({
+  const rows = (chatsCache || []).map((c) => ({
     id: c.id,
     // "Untitled chat" ×N is useless for picking a chat out of a list. When the
     // SDK has no usable summary, fall back to when the chat happened.
     title: (c.summary || '').trim() || describeUndatedChat(c.startTime || c.modifiedTime),
     updated: c.modifiedTime || c.startTime || 0,
   }));
+  for (const [id, chat] of [...finishedChats, ...liveChats]) {
+    const i = rows.findIndex((r) => r.id === id);
+    if (i !== -1) rows.splice(i, 1);
+    rows.unshift({ id, title: chat.title, updated: chat.at, status: chat.status || (chat.stopped ? 'stopped' : 'finished') });
+  }
   // Saved copies once a complete list has shown their session is gone: until
   // then a chat missing from a quick reply may simply not be listed yet.
   // One known to be gone stays while a refresh is still partial.
@@ -2737,11 +2888,12 @@ function chatRow(meta) {
   m.className = 'chat-meta';
   const dot = id === BROWY_SESSION_ID ? '<span class="dot">● current</span> · ' : '';
   const saved = meta.saved ? '<span class="saved">saved copy · read-only</span> · ' : '';
-  m.innerHTML = dot + saved + escapeHtml(fmtRelTime(meta.updated));
+  m.innerHTML = dot + saved + (meta.status ? escapeHtml(meta.status) + ' · ' : '') + escapeHtml(fmtRelTime(meta.updated));
   body.appendChild(title); body.appendChild(m);
   row.appendChild(body);
   const del = document.createElement('button');
   del.className = 'chat-del'; del.title = 'Delete this chat';
+  del.disabled = liveChats.has(id);
   del.innerHTML = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 4h10M6 4V2h4v2M5 4l1 10h4l1-10"/></svg>';
   del.addEventListener('click', async (e) => {
     e.stopPropagation();
@@ -2763,6 +2915,7 @@ function chatRow(meta) {
       return;
     }
     await deleteChatStorage(id);
+    finishedChats.delete(id);
     if (chatsCache) chatsCache = chatsCache.filter((c) => c.id !== id);
     if (savedCopies) savedCopies = savedCopies.filter((c) => c.id !== id);
     goneIds.delete(id);

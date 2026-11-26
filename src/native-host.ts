@@ -250,11 +250,11 @@ async function main() {
       runner.notifyAuth('unauth', m);
     });
 
-  runner.attach(transport);
   transport.onClose(() => {
     log('transport closed; exiting');
-    agent.disconnect().finally(() => process.exit(0));
+    runner.shutdown().then(() => process.exit(0), (e) => { log('worker shutdown failed:', String(e)); process.exit(1); });
   });
+  runner.attach(transport);
 
   // NOTE: we deliberately do NOT call agent.connect() here.
   //

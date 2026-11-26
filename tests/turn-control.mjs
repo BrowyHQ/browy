@@ -11,6 +11,7 @@
 // Run: node tests/turn-control.mjs
 
 import * as esbuild from 'esbuild';
+import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -72,10 +73,12 @@ const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
 // ── one agent, several panels ──────────────────────────────────────────────
 
-function fakeAgent({ stuck = false } = {}) {
+function fakeAgent({ stuck = false, workers = [] } = {}) {
   const a = {
     chats: [], policies: [], aborts: 0, interrupts: [], current: null, resolvers: [], ctx: null,
-    setActivityCallback() {}, setBrowyProtocolSessionId() {}, setBrowserContextOverride(ctx) { a.ctx = ctx; },
+    workers, createSessionWorker: () => fakeAgent({ stuck, workers }), async initCopilot() {},
+    async detachChat() { a.ctx = null; }, async disconnect() { if (a.current) await a.abort(); a.closed = true; },
+    setActivityCallback(cb) { a.emit = cb; }, setBrowyProtocolSessionId(id) { a.id = id; }, setBrowserContextOverride(ctx) { a.ctx = ctx; },
     setDisabledTools(names) { a.disabled = names; }, setEnabledHostTools() {}, getModel: () => 'm', listModels: async () => [],
     chat(text, guidelines) {
       a.policies.push([guidelines, a.disabled]);
@@ -98,6 +101,7 @@ function fakeAgent({ stuck = false } = {}) {
       if (r) r({ text: 'partial', toolCalls: [], stopped: true, interrupted: reason });
     },
   };
+  workers.push(a);
   return a;
 }
 
@@ -108,7 +112,7 @@ function harness(opts = {}) {
   let deliver;
   runner.attach({ id: 'native', send: (m) => out.push(m), onMessage: (cb) => { deliver = cb; }, onClose() {}, close() {} });
   const send = async (m) => { deliver(m); await tick(); };
-  return { agent, out, send, of: (sid, type) => out.filter((m) => m.sessionId === sid && m.type === type) };
+  return { runner, agent, out, send, of: (sid, type) => out.filter((m) => m.sessionId === sid && m.type === type) };
 }
 
 {
@@ -162,7 +166,7 @@ function harness(opts = {}) {
   await h.send({ type: 'chat.send', sessionId: 'sp-b', text: 'second' });
   await h.send({ type: 'session.end', sessionId: 'sp-a' });
   check('closing a panel mid-turn stops its turn', h.agent.aborts === 1);
-  check('and the next window in line gets the agent', h.agent.chats.join() === 'first,second');
+  check('and the next window in line runs', h.agent.workers.flatMap(w => w.chats).join() === 'first,second');
 }
 
 // ── Stop always frees the panel (0.1.13) ───────────────────────────────────
@@ -178,11 +182,12 @@ function harness(opts = {}) {
   const done = h.of('sp-a', 'chat.done');
   check('Stop frees the panel of a turn that ignores it', done.length === 1 && done[0].stopped === true, JSON.stringify(done));
   await h.send({ type: 'chat.send', sessionId: 'sp-a', text: 'second' });
-  check('and the next message runs', h.agent.chats.join() === 'first,second', h.agent.chats.join());
+  const replacement = h.agent.workers.at(-1);
+  check('and the next message runs on a different worker', replacement !== h.agent && replacement.chats.join() === 'second');
   h.agent.resolveAt(0, 'late first');
   await tick();
   check("the freed turn's late result is dropped", h.of('sp-a', 'chat.done').length === 1, JSON.stringify(h.of('sp-a', 'chat.done')));
-  h.agent.resolveAt(1, 'second done');
+  replacement.finish('second done');
   await tick();
   const all = h.of('sp-a', 'chat.done');
   check('the next turn still finishes normally', all.length === 2 && all[1].text === 'second done', JSON.stringify(all));
@@ -267,7 +272,7 @@ const failure = (p) => p.then(() => null, (e) => e);
   // The runner hands cdp.detached to the chat's own context.
   const h = harness();
   await h.send({ type: 'session.start', sessionId: 'sp-a', capabilities: ['cdp.activeTab'] });
-  await h.send({ type: 'chat.send', sessionId: 'sp-a', text: 'go' });
+  await h.send({ type: 'chat.send', sessionId: 'sp-a', tabId: 5, text: 'go' });
   const first = h.agent.ctx.cdp.send('Runtime.evaluate', {});
   const call1 = h.out.find((m) => m.type === 'cdp.send');
   await h.send({ type: 'tool.result', sessionId: 'sp-a', callId: call1.callId, ok: true, result: { tabId: 5, result: {} } });
@@ -338,6 +343,114 @@ const failure = (p) => p.then(() => null, (e) => e);
   const done = h.of('sp-a', 'chat.done')[0];
   check('a turn cut short by Copilot quitting says so',
     done?.interrupted === 'copilot' && done?.text === '_Copilot quit unexpectedly, so this task stopped. The chat is saved. Send a message to carry on._', JSON.stringify(done));
+}
+
+{
+  const { agent, runner, send, of, out } = harness();
+  const start = (id) => send({ type: 'session.start', sessionId: id, capabilities: ['cdp.activeTab', 'browser.nativeIO'] });
+  const chat = (sessionId, tabId) => send({ type: 'chat.send', sessionId, tabId, text: sessionId,
+    policy: { guidelines: sessionId, disabledTools: ['tool-' + tabId], enabledHostTools: [] } });
+  for (const id of ['sp-a', 'dt-b', 'sp-c', 'sp-d']) await start(id);
+  assert.equal(agent.workers.length, 1, 'opening four panels does not launch four CLIs');
+  await chat('sp-a', 10);
+  await chat('sp-c', 10);
+  await chat('sp-d', 10);
+  await chat('dt-b', 20);
+  const [a, b] = agent.workers;
+  assert.ok(a.current && b.current, 'distinct tabs are both executing before either finishes');
+  assert.deepEqual([a.id, b.id], ['sp-a', 'dt-b']);
+  assert.deepEqual(b.policies, [['dt-b', ['tool-20']]]);
+  assert.deepEqual([of('sp-c', 'chat.queued')[0].position, of('sp-d', 'chat.queued')[0].position], [1, 2]);
+  await start('sp-a'); // a duplicate registration must not overwrite live state
+  for (const w of [a, b]) w.emit({ type: 'delta', text: w.id });
+  assert.deepEqual(out.filter(m => m.type === 'chat.delta').map(m => [m.sessionId, m.text]), [['sp-a', 'sp-a'], ['dt-b', 'dt-b']]);
+  b.emit({ type: 'host_status', state: 'copilot_restarting' });
+  assert.equal(out.at(-1).sessionId, 'dt-b');
+
+  const old = b.ctx;
+  const count = out.length;
+  await assert.rejects(old.setActivePage({ _tabId: 10 }, true), /Another Browy chat/);
+  await assert.rejects(old.setActivePage({ _tabId: 10 }, false), /Another Browy chat/);
+  assert.equal(out.length, count, 'a contested switch never reaches the browser');
+  const pending = b.ctx.cdp.send('Runtime.evaluate', {});
+  const request = out.at(-1);
+  assert.equal(request.tabId, 20);
+  await send({ type: 'tool.result', sessionId: 'sp-a', callId: request.callId, ok: true, result: { tabId: 10, result: 'wrong' } });
+  await send({ type: 'tool.result', sessionId: 'dt-b', callId: request.callId, ok: true, result: { tabId: 20, result: 'right' } });
+  assert.equal(await pending, 'right');
+  await send({ type: 'chat.delete', id: 'sp-c' });
+  assert.equal(out.at(-1).ok, false);
+
+  let foreign, closed;
+  const foreignOut = [];
+  runner.attach({ id: 'other', send: m => foreignOut.push(m), onMessage: cb => { foreign = cb; }, onClose: cb => { closed = cb; } });
+  for (const type of ['session.start', 'chat.cancel', 'session.end']) foreign({ type, sessionId: 'sp-a', capabilities: [] });
+  assert.equal(foreignOut.filter(m => m.code === 'busy').length, 3);
+  closed();
+  await send({ type: 'chat.cancel', sessionId: 'dt-b' });
+  assert.ok(a.current && !a.aborts && b.closed && of('dt-b', 'chat.done')[0].stopped);
+  await assert.rejects(old.nativeAction({ kind: 'inspect' }), /stopped|ended/i);
+  await assert.rejects(old.cdp.send('Runtime.evaluate', {}), /stopped|ended/i);
+  a.finish('done a');
+  await tick();
+  assert.equal(a.id, 'sp-c');
+  assert.equal(a.chats.join(), 'sp-a,sp-c');
+  a.finish('done c');
+  await tick();
+  assert.equal(a.id, 'sp-d');
+  await runner.shutdown();
+  assert.ok(a.closed && b.closed);
+}
+
+{
+  const h = harness();
+  await h.send({ type: 'session.start', sessionId: 'old', capabilities: ['cdp.activeTab'] });
+  await h.send({ type: 'chat.send', sessionId: 'old', text: 'legacy' });
+  const query = h.of('old', 'tab.getActive')[0];
+  assert.ok(query, 'legacy extension resolves its target once');
+  await h.send({ type: 'chat.cancel', sessionId: 'old' });
+  await h.send({ type: 'tool.result', sessionId: 'old', callId: query.callId, ok: true, result: { tabId: 4 } });
+  assert.equal(h.agent.chats.length, 0, 'stopping while resolving a tab cannot dispatch a late turn');
+}
+
+{
+  const { agent, send, of, runner } = harness();
+  for (const [id, tab] of [['a', 1], ['b', 2]]) {
+    await send({ type: 'session.start', sessionId: id, inspectedTabId: tab, capabilities: ['cdp.activeTab'] });
+  }
+  await send({ type: 'chat.send', sessionId: 'a', text: 'a' });
+  const fork = agent.createSessionWorker;
+  let ready;
+  agent.createSessionWorker = () => {
+    const w = fork();
+    w.initCopilot = () => new Promise(resolve => { ready = resolve; });
+    return w;
+  };
+  await send({ type: 'chat.send', sessionId: 'b', text: 'do not run' });
+  const child = agent.workers[1];
+  await send({ type: 'session.end', sessionId: 'b' });
+  ready();
+  await tick();
+  assert.ok(child.closed && !child.chats.length && agent.current);
+  child.emit({ type: 'delta', text: 'stale' });
+  assert.equal(of('b', 'chat.delta').length, 0);
+  await runner.shutdown();
+}
+
+{
+  let now = 0;
+  const wake = new WakeWatch(1000, 10000, () => now);
+  const { agent, of, send, runner } = harness({ wakeWatch: wake });
+  for (const [id, tabId] of [['a', 1], ['b', 2], ['c', 1]]) {
+    await send({ type: 'session.start', sessionId: id, capabilities: ['cdp.activeTab'] });
+    await send({ type: 'chat.send', sessionId: id, tabId, text: id });
+  }
+  now += 60000;
+  wake.check();
+  await tick();
+  for (const id of ['a', 'b', 'c']) assert.equal(of(id, 'chat.done')[0]?.interrupted, 'sleep');
+  assert.deepEqual(agent.workers.map(w => w.chats), [['a'], ['b']]);
+  await runner.shutdown();
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });
