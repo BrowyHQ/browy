@@ -36,4 +36,10 @@ const next = rest.search(/^## \[/m);
 const body = (next === -1 ? rest : rest.slice(0, next))
   .replace(/^\s*\*Released [^*\n]+\*\s*/, '')
   .trim();
-console.log(`${body}\n\n**Install or update:** https://browyhq.github.io/install/`);
+const lock = JSON.parse(fs.readFileSync(path.join(root, 'package-lock.json'), 'utf8'));
+// Old notes can be regenerated from a newer checkout; don't attribute today's
+// runtime to those releases.
+const bundled = lock.version === version
+  ? `\n\nBundled runtime: Copilot CLI ${lock.packages['node_modules/@github/copilot'].version}, SDK ${lock.packages['node_modules/@github/copilot-sdk'].version}.`
+  : '';
+console.log(`${body}${bundled}\n\n**Install or update:** https://browyhq.github.io/install/`);

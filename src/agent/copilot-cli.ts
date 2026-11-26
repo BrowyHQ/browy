@@ -58,9 +58,12 @@ export function resolveCopilotCli(
 /** Options for `new CopilotClient(...)`: the CLI above as the SDK's stdio
  *  runtime. Empty when no CLI was found, which leaves the SDK's own runtime
  *  lookup and its error message in charge. */
-export function copilotClientOptions(): { connection?: unknown } {
-  const cliPath = resolveCopilotCli();
+export function copilotClientOptions(startDir?: string, env: NodeJS.ProcessEnv = process.env) {
+  const cliPath = resolveCopilotCli(startDir, env);
   if (!cliPath) return {};
-  const { RuntimeConnection } = createRequire(import.meta.url)('@github/copilot-sdk');
-  return { connection: RuntimeConnection.forStdio({ path: cliPath }) };
+  const { RuntimeConnection } = createRequire(import.meta.url)('@github/copilot-sdk') as typeof import('@github/copilot-sdk');
+  // Use the binary this release tested, not a newer CLI from the user's cache.
+  // A user-supplied executable keeps its own launch behavior.
+  const pin = cliPath !== env.COPILOT_CLI_PATH && !cliPath.endsWith('.js');
+  return { connection: RuntimeConnection.forStdio({ path: cliPath, ...(pin ? { args: ['--no-auto-update'] } : {}) }) };
 }

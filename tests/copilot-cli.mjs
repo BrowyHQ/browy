@@ -11,7 +11,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveCopilotCli } from '../src/agent/copilot-cli.ts';
+import { copilotClientOptions, resolveCopilotCli } from '../src/agent/copilot-cli.ts';
 
 const failures = [];
 const check = (name, actual, expected) => {
@@ -58,6 +58,11 @@ try {
   check('COPILOT_CLI_PATH wins', resolveCopilotCli(dist, { COPILOT_CLI_PATH: override }, 'win32', 'x64'), override);
   check('a COPILOT_CLI_PATH that does not exist is ignored',
     resolveCopilotCli(dist, { COPILOT_CLI_PATH: path.join(tmp, 'gone.exe') }, 'win32', 'x64'), exe);
+  touch(...scope('app'), `copilot-${process.platform}-${process.arch}`, process.platform === 'win32' ? 'copilot.exe' : 'copilot');
+  const local = copilotClientOptions(dist, {});
+  check('the bundled native runtime ignores automatic CLI updates', local.connection.args?.includes('--no-auto-update'), true);
+  const custom = copilotClientOptions(dist, { COPILOT_CLI_PATH: override });
+  check('an explicit CLI override is not given release-specific flags', custom.connection.args?.length || 0, 0);
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });
 }

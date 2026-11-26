@@ -165,6 +165,15 @@ if (cliDirVersion !== cliVersion || !exists(cliBin)) {
   log(`fetched @github/copilot-${cliPlatform}@${cliVersion} for this target`);
 }
 if (!exists(cliBin)) throw new Error(`[stage:${target}] Copilot CLI binary missing: ${cliBin}`);
+const locked = JSON.parse(fs.readFileSync(path.join(stage, 'package-lock.json'), 'utf8')).packages;
+for (const name of ['copilot', 'copilot-sdk', `copilot-${cliPlatform}`]) {
+  const key = `node_modules/@github/${name}`;
+  const actual = JSON.parse(fs.readFileSync(path.join(stage, key, 'package.json'), 'utf8')).version;
+  const expected = locked[key]?.version;
+  if (actual !== expected || (name === `copilot-${cliPlatform}` && actual !== cliVersion)) {
+    throw new Error(`[stage:${target}] @github/${name} is ${actual}; expected ${expected} (CLI ${cliVersion})`);
+  }
+}
 if (!isWin) fs.chmodSync(cliBin, 0o755);
 log(`Copilot CLI ${cliVersion}: @github/copilot-${cliPlatform} (${dirSizeMB(cliDir).toFixed(1)}MB)`);
 
