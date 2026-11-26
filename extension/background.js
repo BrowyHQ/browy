@@ -17,6 +17,8 @@ const PROTOCOL = 2;
 /** chrome.runtime.Port to the native host. Lazily created on first need. */
 let nativePort = null;
 let nativeReady = false;
+let supportsBrowserPolicy = false;
+const preparingChats = new Map();
 let nativeServerVersion = null;
 /** Protocol the connected host reported in hello.ack. Clients compare it
  *  against their own minimum to decide whether to ask for a host update. */
@@ -43,6 +45,7 @@ const sessionToWindow = new Map();
 
 function ensureNativeHost() {
   if (nativePort) return nativePort;
+  supportsBrowserPolicy = false;
   try {
     nativePort = chrome.runtime.connectNative(HOST_NAME);
   } catch (e) {
@@ -65,10 +68,11 @@ function ensureNativeHost() {
   }
 
   nativePort.onMessage.addListener((msg) => {
+    if (msg?.type === 'chat.done' && msg.stopped) cancelSessionPickers(msg.sessionId);
     // Server → CDP/tab bridge (Phase E): SW handles these directly.
     if (msg && (msg.type === 'cdp.send' || msg.type === 'tab.new'
               || msg.type === 'tab.activate' || msg.type === 'tab.list'
-              || msg.type === 'tab.getActive' || msg.type === 'tab.close')) {
+              || msg.type === 'tab.getActive' || msg.type === 'tab.close' || msg.type === 'browser.native')) {
       handleBridgeRequest(msg);
       return;
     }
@@ -87,6 +91,7 @@ function ensureNativeHost() {
     // Broadcast events (no sessionId): fan out to every client.
     if (msg.type === 'hello.ack') {
       nativeReady = true;
+      supportsBrowserPolicy = msg.browserPolicy === true;
       hostGaveUp = false;
       nativeServerVersion = msg.serverVersion;
       nativeProtocol = typeof msg.protocol === 'number' ? msg.protocol : 1;
@@ -104,6 +109,10 @@ function ensureNativeHost() {
     nativePort = null;
     nativeReady = false;
     sessionToClient.clear();
+    preparingChats.clear();
+    sessionDownloads.clear();
+    sessionTabs.clear();
+    gcDetachedDebuggers();
     // Distinguish three cases so the UI can show the right CTA:
     //   __host_missing — manifest absent, user needs to run the installer
     //   __host_stale   — manifest exists but allowed_origins doesn't include
@@ -198,6 +207,10 @@ function restartNativeHost() {
     nativePort = null;
     nativeReady = false;
     sessionToClient.clear();
+    preparingChats.clear();
+    sessionDownloads.clear();
+    sessionTabs.clear();
+    gcDetachedDebuggers();
     try { old.disconnect(); } catch {}
   }
   broadcastToClients({ type: '__host_pending' });
@@ -234,28 +247,19 @@ if (typeof globalThis !== 'undefined') {
   globalThis.__browyTestables = { isSessionOwnedByAnotherClient };
 }
 
-// ── chrome.downloads: silent auto-save (Phase E.1) ──────────────────────────
-//
-// Many sites (Overleaf, etc.) trigger a Save-As dialog that the agent can't
-// dismiss. We listen for every download created in any tab and override the
-// suggested filename via onDeterminingFilename — passing { conflictAction:
-// 'uniquify' } silently routes it to the default Downloads folder without a
-// prompt. This works regardless of the user's "Ask where to save each file"
-// browser setting because suggest() takes precedence.
-try {
-  chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
-    try {
-      const safe = (item.filename || 'download').replace(/[\\/:*?"<>|]+/g, '_');
-      suggest({ filename: 'Browy/' + safe, conflictAction: 'uniquify' });
-    } catch {
-      try { suggest(); } catch {}
-    }
-  });
-} catch (e) {
-  console.warn('[browy] downloads listener failed:', e);
+// Only extension storage supplies standing rules and opt-ins, never a page or
+// a field copied from chat. Take a fresh snapshot for each message.
+async function readBrowserPolicy() {
+  const { settings, 'browy.guidelines': saved = '' } = await chrome.storage.local.get(['settings', 'browy.guidelines']);
+  if (typeof saved !== 'string' || saved.length > 4000) throw new Error('Invalid saved guidelines. Check Browy Settings.');
+  const hostTools = new Set(['run_script', 'read_file', 'write_file', 'bash', 'grep', 'glob', 'web_fetch']);
+  const disabledTools = [], enabledHostTools = [];
+  for (const [k, v] of Object.entries(settings?.tools || {})) {
+    if (hostTools.has(k)) { if (v === true) enabledHostTools.push(k); }
+    else if (v === false) disabledTools.push(k);
+  }
+  return { guidelines: saved.trim(), disabledTools, enabledHostTools };
 }
-
-
 
 chrome.runtime.onConnect.addListener((port) => {
   // Expected names: "sidepanel", "devtools-panel", "console-bridge-<rand>"
@@ -277,6 +281,8 @@ chrome.runtime.onConnect.addListener((port) => {
         return;
       }
       sessionToClient.set(msg.sessionId, port.name);
+      // The worker, not a particular panel, implements these requests.
+      if (msg.capabilities?.includes('cdp.activeTab')) msg.capabilities = [...new Set([...msg.capabilities, 'browser.nativeIO'])];
       // Bind the session to a specific tab so agent tools target THIS panel's
       // inspected tab rather than whichever tab happens to be foregrounded.
       if (msg.inspectedTabId != null) {
@@ -289,29 +295,10 @@ chrome.runtime.onConnect.addListener((port) => {
       // session.start. The host keeps no preference state of its own — the
       // extension is the source of truth, so reloads + multiple panels
       // always converge on the user's most recent setting.
-      if (msg.disabledTools === undefined) {
-        chrome.storage.local.get(['settings']).then(({ settings }) => {
-          const toolsMap = settings && settings.tools;
-          // Names used for the opt-in tools (must match OPT_IN_TOOLS in
-          // src/agent/tool-policy.ts and the optIn entries in options.js).
-          const HOST_TOOL_NAMES = new Set([
-            'run_script', 'read_file', 'write_file', 'bash', 'grep', 'glob', 'web_fetch',
-          ]);
-          let disabled = [];
-          let enabledHost = [];
-          if (toolsMap && typeof toolsMap === 'object') {
-            for (const [k, v] of Object.entries(toolsMap)) {
-              if (HOST_TOOL_NAMES.has(k)) {
-                if (v === true) enabledHost.push(k);
-              } else if (v === false) {
-                disabled.push(k);
-              }
-            }
-          }
-          sendToHost({ ...msg, disabledTools: disabled, enabledHostTools: enabledHost });
-        }).catch(() => sendToHost(msg));
-        return;
-      }
+      readBrowserPolicy().then(({ disabledTools, enabledHostTools }) => {
+        if (sessionToClient.get(msg.sessionId) === port.name) sendToHost({ ...msg, disabledTools, enabledHostTools });
+      }).catch((e) => postToSessionClient(msg.sessionId, { type: 'chat.error', sessionId: msg.sessionId, message: `Could not read Browy Settings: ${e.message}` }));
+      return;
     }
     if (msg.type === 'session.end' && msg.sessionId) {
       sessionToClient.delete(msg.sessionId);
@@ -322,7 +309,35 @@ chrome.runtime.onConnect.addListener((port) => {
     }
     // A new message is the go-ahead to use the browser again after the user
     // clicked Cancel on Chrome's debugging bar.
-    if (msg.type === 'chat.send' && msg.sessionId) canceledSessions.delete(msg.sessionId);
+    if (msg.type === 'chat.send' && msg.sessionId) {
+      const sid = msg.sessionId;
+      if (sessionToClient.get(sid) !== port.name) {
+        port.postMessage({ type: 'chat.error', code: 'no_session', sessionId: sid, message: 'Reconnect this chat before sending.' });
+        return;
+      }
+      if (preparingChats.has(sid)) {
+        port.postMessage({ type: 'chat.error', code: 'busy', sessionId: sid, message: 'A message is already starting.' });
+        return;
+      }
+      canceledSessions.delete(sid);
+      preparingChats.set(sid, msg);
+      readBrowserPolicy().then((policy) => {
+        if (preparingChats.get(sid) !== msg) return;
+        if (policy.guidelines && !supportsBrowserPolicy) throw new Error('Update the Browy backend to use your saved guidelines. This message was not sent.');
+        if (!sendToHost({ ...msg, policy })) throw new Error('The Browy backend is not connected.');
+      }).catch((e) => {
+        if (preparingChats.get(sid) === msg) postToSessionClient(sid, { type: 'chat.error', sessionId: sid, message: e.message });
+      }).finally(() => { if (preparingChats.get(sid) === msg) preparingChats.delete(sid); });
+      return;
+    }
+    if (msg.type === 'chat.cancel' && msg.sessionId) {
+      canceledSessions.set(msg.sessionId, 'Stopped by the user. No further browser actions for this turn.');
+      cancelSessionPickers(msg.sessionId);
+      if (preparingChats.delete(msg.sessionId)) {
+        port.postMessage({ type: 'chat.done', sessionId: msg.sessionId, text: '', toolCalls: [], stopped: true });
+        return;
+      }
+    }
 
     // Internal client → SW commands (not forwarded)
     if (msg.type === '__ping') {
@@ -430,6 +445,10 @@ const DEBUGGER_VERSION = '1.3';
 
 /** Map<tabId, Set<call>>: CDP calls still running, so a detach can fail them. */
 const pendingCdp = new Map();
+const pageWatches = new Map();
+const pagePrompts = new Map();
+const chooserActions = new Map();
+const sessionDownloads = new Map();
 /** Map<tabId, detach>: detaches still being sorted out (see beginDetach). */
 const detaching = new Map();
 /** Tabs that lost the debugger and still exist; reattaching one is news. */
@@ -481,6 +500,7 @@ function beginDetach(tabId, reason) {
     d.settled = new Promise((resolve) => { d.resolve = resolve; });
     detaching.set(tabId, d);
     attachedTabs.delete(tabId);
+    forgetPrompts(tabId);
     setTimeout(() => { finishDetach(d).catch((e) => console.warn('[browy] detach report failed:', e)); }, DETACH_SETTLE_MS);
   }
   if (reason && !d.reason) d.reason = reason;
@@ -524,7 +544,7 @@ function trackedSendCommand(tabId, sessionId, method, params) {
   return new Promise((resolve, reject) => {
     let calls = pendingCdp.get(tabId);
     if (!calls) { calls = new Set(); pendingCdp.set(tabId, calls); }
-    const call = { sessionId, done: false, fail: null };
+    const call = { sessionId, method, done: false, fail: null };
     const settle = (fn) => {
       if (call.done) return;
       call.done = true;
@@ -584,14 +604,27 @@ function gcDetachedDebuggers() {
       });
     } catch {}
     attachedTabs.delete(tabId);
+    forgetPrompts(tabId);
   }
 }
 
 /** Remove a session from the tab map AND detach any tabs that become
  *  orphaned as a result. Use after session.end. */
 function releaseSessionTabs(sessionId) {
+  preparingChats.delete(sessionId);
   sessionTabs.delete(sessionId);
+  sessionDownloads.delete(sessionId);
+  cancelSessionPickers(sessionId);
   gcDetachedDebuggers();
+}
+
+function cancelSessionPickers(sessionId) {
+  for (const action of chooserActions.values()) {
+    if (action.owner === sessionId) action.cancel('The upload action ended. No files attached.');
+  }
+  for (const [tabId, p] of pagePrompts) {
+    if (p.owner === sessionId) pagePrompts.delete(tabId);
+  }
 }
 
 // Defensive periodic sweep — catches anything missed by the explicit
@@ -610,6 +643,13 @@ try {
 } catch {}
 
 async function ensureAttached(tabId) {
+  const tab = await chrome.tabs.get(tabId).catch((e) => {
+    if (/no tab with/i.test(e.message)) throw new Error(detachMessage('target_closed', true));
+    throw e;
+  });
+  if ([tab.url, tab.pendingUrl].some((url) => url?.startsWith('chrome-extension://'))) {
+    throw new Error("Browy can't drive extension pages, including its own Settings. Only the user changes browser permissions and guidelines.");
+  }
   if (attachedTabs.has(tabId)) return;
   await new Promise((resolve, reject) => {
     chrome.debugger.attach({ tabId }, DEBUGGER_VERSION, () => {
@@ -626,7 +666,7 @@ async function ensureAttached(tabId) {
 
 /** One CDP call for a session: attach if needed, run it, and turn a lost
  *  debugger into an error that says what happened. */
-async function runCdpCall(sessionId, tabId, method, params) {
+async function runCdpCall(sessionId, tabId, method, params, observePrompts) {
   // A detach on this tab is still being sorted out: this call shares its fate.
   const settling = detaching.get(tabId);
   if (settling) {
@@ -644,6 +684,12 @@ async function runCdpCall(sessionId, tabId, method, params) {
     for (const sid of sessionsUsingTab(tabId)) postToSessionClient(sid, { type: '__debugger_attached', sessionId: sid, tabId });
   }
   try {
+    if (observePrompts) {
+      await watchPage(tabId, sessionId);
+      const p = pagePrompts.get(tabId);
+      if (p && p.type !== 'file') throw new Error(dialogNotice(p));
+      if (mayOpenChooser(method, params)) return await sendWithChooser(tabId, sessionId, method, params);
+    }
     return await trackedSendCommand(tabId, sessionId, method, params);
   } catch (e) {
     if (e?.detach) throw e;
@@ -656,6 +702,212 @@ async function runCdpCall(sessionId, tabId, method, params) {
     }
     throw e;
   }
+}
+
+function forgetPrompts(tabId) {
+  pageWatches.delete(tabId);
+  pagePrompts.delete(tabId);
+  chooserActions.get(tabId)?.cancel('The tab disconnected. No files attached.');
+  chooserActions.delete(tabId);
+}
+
+function watchPage(tabId, sid) {
+  let watch = pageWatches.get(tabId);
+  if (!watch) {
+    watch = trackedSendCommand(tabId, sid, 'Page.enable', {}).catch((error) => {
+      if (pageWatches.get(tabId) === watch) pageWatches.delete(tabId);
+      throw error;
+    });
+    pageWatches.set(tabId, watch);
+  }
+  // Chrome can attach but not answer Page.enable when a dialog predates
+  // this debugger. It doesn't reveal what we'd be accepting in that case.
+  let timer;
+  return Promise.race([watch, new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('Chrome has not exposed the tab to Browy. If a dialog was already open before Browy connected, close it once; Browy can handle subsequent page dialogs.')), 2000);
+  })]).finally(() => clearTimeout(timer));
+}
+
+function dialogNotice(p) {
+  return `A page ${p.type} is open. Use handle_dialog with action "inspect" before deciding how to answer. Don't repeat the action that opened it.`;
+}
+
+function mayOpenChooser(method, p) {
+  return (method === 'Input.dispatchMouseEvent' && ['mousePressed', 'mouseReleased'].includes(p?.type))
+    || (method === 'Input.dispatchKeyEvent' && ['Enter', ' '].includes(p?.key))
+    || (method === 'Runtime.evaluate' && p?.userGesture === true);
+}
+
+// Intercept only during a Browy gesture, never while the person browses the tab.
+async function sendWithChooser(tabId, sid, method, params, expectPicker = false) {
+  if (chooserActions.has(tabId)) throw new Error('Another input action is running on this tab.');
+  const action = { owner: sid, expectPicker };
+  const opened = new Promise((resolve) => { action.opened = resolve; });
+  const canceled = new Promise((_, reject) => {
+    action.cancel = (why) => reject(new Error(why));
+  });
+  chooserActions.set(tabId, action);
+  const timer = setTimeout(() => action.cancel(expectPicker ? 'No HTML file chooser appeared for the requested upload control. No files attached.'
+    : 'No answer to the browser gesture. Inspect the tab before doing anything else.'), expectPicker ? 5000 : 60_000);
+  let result;
+  try {
+    await Promise.race([trackedSendCommand(tabId, sid, 'Page.setInterceptFileChooserDialog', { enabled: true }), canceled]);
+    const sent = trackedSendCommand(tabId, sid, method, params);
+    const dispatch = expectPicker ? sent.then((r) => {
+      if (r?.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || r.exceptionDetails.text);
+      return opened;
+    }) : sent;
+    result = await Promise.race([dispatch, canceled]);
+  } finally {
+    try {
+      if (chooserActions.get(tabId) === action) {
+        // Chrome may acknowledge mouseReleased before it delivers the picker
+        // event. Keep the owner until Chrome acknowledges the reset as well.
+        const reset = trackedSendCommand(tabId, sid, 'Page.setInterceptFileChooserDialog', { enabled: false })
+          .finally(() => { if (chooserActions.get(tabId) === action) chooserActions.delete(tabId); });
+        if (pagePrompts.has(tabId) && pagePrompts.get(tabId).type !== 'file') {
+          // Don't hold the model that can answer a JS dialog behind the renderer.
+          reset.catch((e) => console.warn('[browy] could not release file chooser interception:', e));
+        } else {
+          await Promise.race([reset, canceled]);
+        }
+      }
+    } finally { clearTimeout(timer); }
+  }
+  if (action.picker) {
+    if (expectPicker) return action.picker;
+    throw new Error(action.picker.node
+      ? `An upload picker opened. No files attached. Call upload_file with chooser_id "${action.picker.id}" and the files the user authorized. Do not click again.`
+      : 'This picker has no HTML file input. Use await_user and let the user open it from the page.');
+  }
+  return result;
+}
+
+function onPromptEvent(tabId, method, params) {
+  if (!pageWatches.has(tabId)) return;
+  const prev = pagePrompts.get(tabId);
+  if (method === 'Page.javascriptDialogOpening') {
+    const p = { id: crypto.randomUUID(), type: params.type, message: String(params.message).slice(0, 1000),
+      url: params.url, frameId: params.frameId };
+    pagePrompts.set(tabId, p);
+    chooserActions.get(tabId)?.cancel(dialogNotice(p));
+    // A click/evaluate which opened the dialog cannot return until it is
+    // answered. Release the caller, not the dialog. Never retry that click.
+    for (const call of [...(pendingCdp.get(tabId) || [])]) {
+      if (!['Page.enable', 'Page.handleJavaScriptDialog', 'Page.setInterceptFileChooserDialog'].includes(call.method)) call.fail(dialogNotice(p));
+    }
+  } else if (method === 'Page.javascriptDialogClosed' && prev?.type !== 'file') {
+    pagePrompts.delete(tabId);
+  } else if (method === 'Page.fileChooserOpened') {
+    const action = chooserActions.get(tabId);
+    if (!action) return;
+    if (action.picker) {
+      pagePrompts.delete(tabId);
+      action.cancel('More than one file picker opened. No files attached.');
+      return;
+    }
+    const p = { id: crypto.randomUUID(), type: 'file', owner: action.owner, node: params.backendNodeId,
+      frameId: params.frameId, multiple: params.mode === 'selectMultiple' };
+    pagePrompts.set(tabId, p);
+    action.picker = p;
+    action.opened();
+  } else if (method === 'Page.frameNavigated' || method === 'Page.frameDetached') {
+    const main = method === 'Page.frameNavigated' && !params.frame.parentId;
+    const action = chooserActions.get(tabId);
+    if (main && action?.expectPicker) action.cancel('The page navigated before the picker was handled. Inspect the new page.');
+    if (prev?.type === 'file' && (main || (params.frame?.id ?? params.frameId) === prev.frameId)) pagePrompts.delete(tabId);
+  }
+}
+
+async function attachToPicker(tabId, sid, p, files, trigger) {
+  if (!p.node || !Array.isArray(files) || !files.length || (!p.multiple && files.length !== 1)) {
+    throw new Error('This picker does not accept that file selection.');
+  }
+  p.answering = true;
+  const objectGroup = `browy-picker-${p.id}`;
+  try {
+    const { object } = await trackedSendCommand(tabId, sid, 'DOM.resolveNode', { backendNodeId: p.node, objectGroup });
+    const { result, exceptionDetails } = await trackedSendCommand(tabId, sid, 'Runtime.callFunctionOn', {
+      objectId: object.objectId,
+      functionDeclaration: `function(trigger) { return (!trigger || trigger.ownerDocument === this.ownerDocument)
+        && this.localName === 'input' && this.type === 'file' && !this.matches(':disabled') && !this.webkitdirectory; }`,
+      arguments: trigger ? [{ objectId: trigger }] : [], returnByValue: true,
+    });
+    if (exceptionDetails || result.value !== true || pagePrompts.get(tabId) !== p) {
+      throw new Error('The intended file input is no longer available on this page. No files attached.');
+    }
+    await trackedSendCommand(tabId, sid, 'DOM.setFileInputFiles', { files, objectId: object.objectId });
+    return { attached: files.length };
+  } finally {
+    if (pagePrompts.get(tabId) === p) pagePrompts.delete(tabId);
+    if (attachedTabs.has(tabId)) {
+      trackedSendCommand(tabId, sid, 'Runtime.releaseObjectGroup', { objectGroup })
+        .catch((e) => console.warn('[browy] could not release upload handle:', e));
+    }
+  }
+}
+
+async function nativeAction(tabId, sid, a) {
+  if (a.kind === 'download' || a.kind === 'downloadStatus') {
+    let ids = sessionDownloads.get(sid);
+    let id = a.downloadId;
+    if (a.kind === 'download') {
+      const url = new URL(a.url);
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+        throw new Error('Use an HTTP or HTTPS download URL without embedded credentials.');
+      }
+      if (a.filename !== undefined && (typeof a.filename !== 'string' || a.filename.split(/[\\/]/).some(
+        (s) => !s || s === '.' || s === '..' || /[<>:"|?*\x00-\x1f]/.test(s)))) {
+        throw new Error('Use a filename relative to Downloads, without parent directories.');
+      }
+      if (!ids) { ids = new Set(); sessionDownloads.set(sid, ids); }
+      id = await chrome.downloads.download({ url: url.href, ...(a.filename ? { filename: a.filename } : {}),
+        saveAs: false, conflictAction: 'uniquify' });
+      ids.add(id);
+    } else if (!ids?.has(id)) {
+      throw new Error('No download with this ID was started by this chat.');
+    }
+    const [item] = await chrome.downloads.search({ id });
+    if (!item) throw new Error(`Download ${id} is no longer available in the browser.`);
+    return { downloadId: id, state: item.state, danger: item.danger, paused: item.paused,
+      ...(item.error ? { error: item.error } : {}),
+      ...(item.state === 'complete' ? { success: true, path: item.filename, size: item.fileSize, content_type: item.mime } : {}) };
+  }
+  await ensureAttached(tabId);
+  addSessionTab(sid, tabId);
+  await watchPage(tabId, sid);
+  const p = pagePrompts.get(tabId);
+  const mine = p && (!p.owner || p.owner === sid);
+  if (a.kind === 'pickFiles') {
+    if (p && p.type !== 'file') throw new Error(dialogNotice(p));
+    const picker = await sendWithChooser(tabId, sid, 'Runtime.callFunctionOn', {
+      objectId: a.objectId, functionDeclaration: 'function() { this.click(); }', userGesture: true,
+    }, true);
+    if (pagePrompts.get(tabId) !== picker || !sessionToClient.has(sid)) throw new Error('The file picker changed before attachment.');
+    return attachToPicker(tabId, sid, picker, a.files, a.objectId);
+  }
+  if (a.kind === 'inspect') {
+    if (!mine) return { dialog: null };
+    return { dialog: p.type === 'file' ? { id: p.id, type: p.type, multiple: p.multiple, supported: !!p.node }
+      : { id: p.id, type: p.type, message: p.message, url: p.url } };
+  }
+  if (!mine || p.id !== a.id || p.answering) throw new Error('That prompt is no longer current on this tab. Inspect it again.');
+  if (p.type === 'file') {
+    if (a.kind === 'attach') return attachToPicker(tabId, sid, p, a.files);
+    if (a.kind !== 'dismiss') throw new Error('Use upload_file with chooser_id for this file picker.');
+  } else {
+    if (!['accept', 'dismiss'].includes(a.kind) || (a.text !== undefined && (a.kind !== 'accept' || p.type !== 'prompt'))) {
+      throw new Error('Use accept or dismiss. Only an accepted text prompt takes a value.');
+    }
+    p.answering = true;
+    try {
+      await trackedSendCommand(tabId, sid, 'Page.handleJavaScriptDialog', {
+        accept: a.kind === 'accept', ...(a.text !== undefined ? { promptText: a.text } : {}),
+      });
+    } finally { p.answering = false; }
+  }
+  if (pagePrompts.get(tabId) === p) pagePrompts.delete(tabId);
+  return { handled: a.kind, type: p.type };
 }
 
 /** The tab a session acts on when it hasn't pinned one: the active tab of the
@@ -672,7 +924,7 @@ async function activeTabFor(sessionId) {
 }
 
 function tabSummary(t) {
-  return { tabId: t.id, url: t.url || '', title: t.title || '', active: !!t.active, windowId: t.windowId };
+  return { tabId: t.id, url: t.url || '', title: t.title || '', active: !!t.active, windowId: t.windowId, openerTabId: t.openerTabId };
 }
 
 async function handleBridgeRequest(msg) {
@@ -682,7 +934,7 @@ async function handleBridgeRequest(msg) {
     postToHost(out);
   };
   try {
-    if (msg.type === 'cdp.send') {
+    if (msg.type === 'cdp.send' || msg.type === 'browser.native') {
       // The user clicked Cancel on Chrome's debugging bar during this task.
       const canceled = canceledSessions.get(msg.sessionId);
       if (canceled) throw new Error(canceled);
@@ -698,8 +950,13 @@ async function handleBridgeRequest(msg) {
         if (!t) throw new Error('no active tab');
         tabId = t.id;
       }
-      const result = await runCdpCall(msg.sessionId, tabId, msg.method, msg.params);
-      reply(true, { tabId, result });
+      if (msg.type === 'browser.native') {
+        if (!sessionToClient.has(msg.sessionId)) throw new Error('This browser session has ended.');
+        reply(true, await nativeAction(tabId, msg.sessionId, msg.action));
+      } else {
+        const result = await runCdpCall(msg.sessionId, tabId, msg.method, msg.params, msg.observePrompts);
+        reply(true, { tabId, result });
+      }
     } else if (msg.type === 'tab.new') {
       const opts = { url: msg.url || 'about:blank', active: msg.active !== false };
       const windowId = sessionToWindow.get(msg.sessionId);
@@ -721,7 +978,8 @@ async function handleBridgeRequest(msg) {
       const tabs = await chrome.tabs.query({});
       reply(true, tabs.map(tabSummary));
     } else if (msg.type === 'tab.getActive') {
-      const t = await activeTabFor(msg.sessionId);
+      const pinned = sessionToTab.get(msg.sessionId);
+      const t = pinned != null ? await chrome.tabs.get(pinned) : await activeTabFor(msg.sessionId);
       reply(true, t ? tabSummary(t) : null);
     }
   } catch (e) {
@@ -731,6 +989,7 @@ async function handleBridgeRequest(msg) {
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
   const tabId = source.tabId;
+  if (!source.sessionId) onPromptEvent(tabId, method, params);
   for (const [sessionId, tabs] of sessionTabs) {
     if (tabs.has(tabId)) {
       postToHost({ type: 'cdp.event', sessionId, tabId, method, params });
@@ -756,29 +1015,6 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   for (const [sid, t] of sessionToTab) {
     if (t === tabId) sessionToTab.delete(sid);
   }
-});
-
-// ── OAuth / sign-in popup auto-attach ─────────────────────────────────────
-//
-// Many sign-in flows open a child window via window.open (Google OAuth,
-// GitHub OAuth, SSO redirects). chrome.debugger does NOT auto-attach to
-// child tabs, so the agent loses sight of the popup. Listen for new tabs
-// whose openerTabId is one we already track, and attach the debugger to
-// them too so they show up in tab.list / inspect_page.
-chrome.tabs.onCreated.addListener((tab) => {
-  try {
-    if (!tab || tab.id == null) return;
-    if (tab.openerTabId == null) return;
-    if (!attachedTabs.has(tab.openerTabId)) return;
-    // Inherit every session that was watching the opener so the agent's
-    // current sessions see CDP events from the popup too.
-    for (const [sid, tabs] of sessionTabs) {
-      if (tabs.has(tab.openerTabId)) tabs.add(tab.id);
-    }
-    // Attach lazily — wait for the popup's first commit so attach doesn't
-    // race with the tab's initial about:blank.
-    setTimeout(() => { ensureAttached(tab.id).catch(() => {}); }, 250);
-  } catch {}
 });
 
 // ── Toolbar action ─────────────────────────────────────────────────────────

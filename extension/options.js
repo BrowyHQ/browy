@@ -32,6 +32,8 @@ const toolGroupsEl = $('toolGroups');
 const toolSearchEl = $('toolSearch');
 const toolCountEl  = $('toolCount');
 const toolEnableAllEl = $('toolEnableAll');
+const guidelinesEl = $('guidelines');
+const saveGuidelinesEl = $('saveGuidelines');
 
 let port = null;
 let allModels = [];
@@ -72,6 +74,7 @@ const TOOL_REGISTRY = [
   { cat: 'interact', name: 'check_index',     desc: 'toggle a checkbox by index' },
   { cat: 'interact', name: 'set_radio_index', desc: 'set a radio group by index' },
   { cat: 'interact', name: 'upload_index',    desc: 'attach a file to an input by index' },
+  { cat: 'interact', name: 'handle_dialog',   desc: 'inspect and answer a page dialog' },
   { cat: 'interact', name: 'press_keys',      desc: 'send keystrokes (Tab, Enter, Ctrl+A…)' },
   { cat: 'interact', name: 'fill_form',       desc: 'bulk fill all inputs in a form' },
   { cat: 'interact', name: 'submit_form',     desc: 'submit a form' },
@@ -87,8 +90,9 @@ const TOOL_REGISTRY = [
   { cat: 'devtools', name: 'get_console_logs',    desc: 'read recent console.* output' },
   { cat: 'devtools', name: 'get_network_requests', desc: 'recent network activity (Network panel-style)' },
   { cat: 'devtools', name: 'get_cookies',         desc: 'cookies for the current origin' },
-  { cat: 'devtools', name: 'download_file',       desc: 'trigger a file download' },
-  { cat: 'devtools', name: 'upload_file',         desc: 'upload a file via picker' },
+  { cat: 'devtools', name: 'download_file',       desc: 'download a link using your browser' },
+  { cat: 'devtools', name: 'download_status',     desc: 'check a download started by this chat' },
+  { cat: 'devtools', name: 'upload_file',         desc: 'attach named files to an input or a captured upload picker' },
 
   // ── Host tools (opt-in, OFF by default) ───────────────────────────────
   // These reach the user's machine, not the browser tab. Most come from the
@@ -451,5 +455,17 @@ if (toolEnableAllEl) {
 }
 
 extId.textContent = chrome.runtime.id;
+chrome.storage.local.get('browy.guidelines').then((items) => {
+  guidelinesEl.value = items['browy.guidelines'] ?? '';
+  guidelinesEl.disabled = saveGuidelinesEl.disabled = false;
+}).catch((e) => showToast(`Could not load guidelines: ${e.message}`, 'err'));
+saveGuidelinesEl.addEventListener('click', async () => {
+  saveGuidelinesEl.disabled = true;
+  try {
+    await chrome.storage.local.set({ 'browy.guidelines': guidelinesEl.value.trim() });
+    showToast('guidelines saved for your next message');
+  } catch (e) { showToast(`Could not save guidelines: ${e.message}`, 'err'); }
+  finally { saveGuidelinesEl.disabled = false; }
+});
 loadToolPrefs().then(renderTools);
 connect();

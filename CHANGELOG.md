@@ -2,6 +2,15 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- **You can give Browy standing instructions in Settings.** They apply from your next message, even in a chat you reopen. Browy can work across the tabs a task needs without bringing each one to the front.
+- **A page dialog no longer holds the chat until the browser call times out.** Browy can inspect an alert, confirmation or text prompt and answer it without repeating the click that opened it. Listing tabs also picks up popup windows opened during the task.
+- **Browy can attach a file even when the upload button creates its input on click.** It captures the picker for that click instead of operating the desktop. It never picks a file just because the page asked for one.
+- **Link downloads use your browser session.** Browy requests the file without a Save As dialog, gives duplicate filenames distinct names and reports whether Chrome finished or blocked the download. It leaves downloads you start yourself alone.
+
 ## [0.1.16]: press_key types its key, and disabled buttons show up
 *Released 2026-10-16*
 

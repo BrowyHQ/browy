@@ -21,6 +21,7 @@ import type {
   ClientMessage,
   ServerMessage,
   Capability,
+  BrowserPolicy,
   SessionStart,
   CdpDetached,
   InterruptReason,
@@ -45,6 +46,7 @@ interface SessionState {
   id: string;
   transport: Transport;
   capabilities: Set<Capability>;
+  policy: BrowserPolicy;
   /** Set true while a chat is in flight; prevents overlapping requests. */
   inFlight: boolean;
   /** Phase E: present when session declared cdp.activeTab. */
@@ -92,7 +94,7 @@ export class Runner {
   /** Chats sent from other panels while the agent was busy, oldest first.
    *  Until 0.1.11 they were refused with "agent is busy on another panel",
    *  and the user had to notice and send the message again. */
-  private waiting: Array<{ sessionId: string; text: string }> = [];
+  private waiting: Array<{ sessionId: string; text: string; policy: BrowserPolicy }> = [];
 
   /** The chat the agent is running. `released` means Stop freed its panel
    *  before agent.chat() returned, so its eventual result is dropped. */
@@ -160,7 +162,7 @@ export class Runner {
     while (this.waiting.length) {
       const next = this.waiting.shift()!;
       if (!this.sessions.has(next.sessionId)) continue;
-      void this.onChatSend(next.sessionId, next.text).catch(() => {});
+      void this.onChatSend(next.sessionId, next.text, undefined, next.policy).catch(() => {});
       return;
     }
   }
@@ -224,6 +226,7 @@ export class Runner {
           type: 'hello.ack',
           protocol: PROTOCOL_VERSION,
           serverVersion: this.opts.serverVersion,
+          browserPolicy: true,
         });
         return;
 
@@ -237,7 +240,7 @@ export class Runner {
       }
 
       case 'chat.send':
-        return this.onChatSend(msg.sessionId, msg.text, transport);
+        return this.onChatSend(msg.sessionId, msg.text, transport, msg.policy);
 
       case 'chat.cancel': {
         const sid = (msg as any).sessionId;
@@ -402,27 +405,18 @@ export class Runner {
       id: msg.sessionId,
       transport,
       capabilities: new Set(msg.capabilities),
+      policy: { guidelines: '', disabledTools: msg.disabledTools ?? [], enabledHostTools: msg.enabledHostTools ?? [] },
       inFlight: false,
     };
 
     // Phase E: if the client can drive an active tab via CDP, build the
     // extension context. Tools will be routed through it on chat.send.
     if (state.capabilities.has('cdp.activeTab')) {
-      state.extContext = new ExtensionContext(msg.sessionId, transport);
+      state.extContext = new ExtensionContext(msg.sessionId, transport, undefined, state.capabilities.has('browser.nativeIO'));
     }
 
     this.sessions.set(msg.sessionId, state);
     this.transportSessions.get(transport.id)?.add(msg.sessionId);
-
-    // Apply user's per-tool toggles BEFORE the next ensureSession() runs.
-    // Empty list = no overrides; presence of names means user has disabled
-    // them via the extension Settings page.
-    if (msg.disabledTools !== undefined) {
-      this.agent.setDisabledTools(msg.disabledTools);
-    }
-    if (msg.enabledHostTools !== undefined) {
-      this.agent.setEnabledHostTools(msg.enabledHostTools);
-    }
 
     transport.send({
       type: 'session.ready',
@@ -455,9 +449,9 @@ export class Runner {
     }).catch(() => {});
   }
 
-  private async onChatSend(sessionId: string, text: string, transport?: Transport): Promise<void> {
+  private async onChatSend(sessionId: string, text: string, transport?: Transport, settings?: BrowserPolicy): Promise<void> {
     const session = this.sessions.get(sessionId);
-    if (!session) {
+    if (!session || (transport && transport !== session.transport)) {
       // Until 0.1.13 this dropped the message without a word, and the panel
       // waited forever. Say so; the side panel registers again and resends.
       console.log(`  ▶ chat ${sessionId}: no such session on this host, so the panel is told to reconnect`);
@@ -465,6 +459,12 @@ export class Runner {
         type: 'chat.error', sessionId, code: 'no_session',
         message: "Browy's backend lost track of this chat. Reconnect and send the message again.",
       });
+      return;
+    }
+    const policy = settings ?? session.policy;
+    if (typeof policy.guidelines !== 'string' || policy.guidelines.length > 4000 ||
+        ![policy.disabledTools, policy.enabledHostTools].every((v) => Array.isArray(v) && v.every((n) => typeof n === 'string'))) {
+      session.transport.send({ type: 'chat.error', sessionId, message: 'Invalid browser settings. No actions taken.' });
       return;
     }
     if (session.inFlight) {
@@ -487,7 +487,7 @@ export class Runner {
         });
         return;
       }
-      this.waiting.push({ sessionId, text });
+      this.waiting.push({ sessionId, text, policy });
       session.transport.send({ type: 'chat.queued', sessionId, position: this.waiting.length });
       console.log(`  ▶ chat ${sessionId}: waiting behind ${this.activeSessionId} (position ${this.waiting.length})`);
       return;
@@ -511,7 +511,9 @@ export class Runner {
     }
     let outcome = 'done';
     try {
-      const result = await this.agent.chat(text);
+      this.agent.setDisabledTools(policy.disabledTools);
+      this.agent.setEnabledHostTools(policy.enabledHostTools);
+      const result = await this.agent.chat(text, policy.guidelines.trim());
       const { text: response, toolCalls, stopped } = result;
       turn.settled = true;
       // Stop already freed the panel; this late result belongs to nobody.

@@ -153,6 +153,8 @@ If you are adding a tool, you almost certainly only touch `src/agent/tools/brows
 
 ## Tests
 
+`npm run test:browser-io` runs the real extension worker and host tools on local fixture pages in a temporary Chromium profile. Set `BROWY_TEST_CHROMIUM` to a Chrome for Testing executable if Playwright's matching Chromium is not installed. No Copilot login or native host registration is needed.
+
 ```bash
 npm test            # all tests
 npm run test:watch  # watch mode

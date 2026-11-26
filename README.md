@@ -198,6 +198,7 @@ Browy amplifies a human operator. It does not replace the operator.
 
 - **You see every action.** Tool calls render inline in the side panel as they happen. Browy never executes a tool you cannot watch.
 - **Host-touching tools are off by default.** Shell, filesystem, `web_fetch` and `run_script` require an explicit Settings toggle, one tool at a time.
+- **Your browser guidelines apply from the next message.** In Settings, save instructions such as “Use the tracker tab, but ask before sending.” Browy can target a background tab without switching the one you see. Tool switches still control which capabilities are available.
 - **No background activity.** The agent only acts when you send a message. No polling, no scheduled runs, no off-screen automation.
 - **Page content goes to GitHub Copilot.** Same path as `copilot` in a terminal. Governed by your Copilot subscription terms.
 - **Chats are stored on your machine.** Transcripts live in `~/.copilot/` on your disk, alongside your Copilot CLI sessions.

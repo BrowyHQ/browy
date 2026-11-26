@@ -9,7 +9,7 @@
 // Tools never need to know which mode they're in — the duck-typed surface is
 // identical to the playwright-backed BrowserToolContext.
 
-import type { Transport, ServerMessage, ToolResult, CdpEventFromClient, CdpDetached, TabInfo } from '../protocol.js';
+import type { Transport, ServerMessage, ToolResult, CdpEventFromClient, CdpDetached, TabInfo, NativeBrowserAction } from '../protocol.js';
 import type { BrowserToolContext } from './tools/browser.js';
 
 /** `tabId` is set for CDP calls that name their tab, so a detach can fail them. */
@@ -77,6 +77,7 @@ export class ExtensionContext {
     private transport: Transport,
     /** Test hook: shortens every call deadline. */
     private timeoutOverrideMs?: number,
+    private nativeIO = false,
   ) {}
 
   // ── Inbound from runner ─────────────────────────────────────────────────
@@ -123,6 +124,9 @@ export class ExtensionContext {
   /** A new turn: what happened to tabs before it is old news. */
   beginTurn(): void {
     this.notices.clear();
+    // Resolve the current tab on first use, even if guidelines ruled out
+    // taking the usual automatic snapshot at the start of this turn.
+    this.activeTabId = null;
   }
 
   private forgetTab(tabId: number): void {
@@ -148,8 +152,8 @@ export class ExtensionContext {
     return `${prefix}-${++this.callSeq}-${Date.now().toString(36)}`;
   }
 
-  private sendAndWait<T = unknown>(envelope: Omit<ServerMessage, never>, method: string, timeoutMs = TAB_TIMEOUT_MS, tabId?: number): Promise<T> {
-    const callId = (envelope as any).callId;
+  private sendAndWait<T = unknown>(envelope: Extract<ServerMessage, { callId: string }>, method: string, timeoutMs = TAB_TIMEOUT_MS, tabId?: number): Promise<T> {
+    const callId = envelope.callId;
     const limit = this.timeoutOverrideMs ?? timeoutMs;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -164,7 +168,7 @@ export class ExtensionContext {
         tabId,
       });
       try {
-        this.transport.send(envelope as ServerMessage);
+        this.transport.send(envelope);
       } catch (e) {
         clearTimeout(timer);
         this.pending.delete(callId);
@@ -176,12 +180,12 @@ export class ExtensionContext {
   // ── BrowserToolContext surface ──────────────────────────────────────────
 
   /** Returns a duck-typed BrowserToolContext. */
-  build(): BrowserToolContext {
+  build(pinnedTabId?: number): BrowserToolContext {
     const self = this;
 
     const cdp = {
       send: async (method: string, params?: unknown) => {
-        const target = self.activeTabId;
+        const target = pinnedTabId ?? self.activeTabId;
         const notice = target != null ? self.notices.get(target) : undefined;
         if (notice) {
           self.notices.delete(target!);
@@ -196,6 +200,7 @@ export class ExtensionContext {
           tabId: target ?? undefined,
           method,
           params: params ?? {},
+          ...(self.nativeIO ? { observePrompts: true } : {}),
         };
         // Runtime.evaluate can carry its own deadline; wait a little longer
         // than that so the page's own timeout error is the one reported.
@@ -204,7 +209,9 @@ export class ExtensionContext {
         const wrapped = await self.sendAndWait<{ tabId: number; result: unknown }>(envelope, method, limit, target ?? undefined);
         // Remember whichever tab the SW actually used so subsequent calls pin
         // to the same tab (avoids races if the user switches tabs mid-flow).
-        if (wrapped && typeof wrapped.tabId === 'number') self.activeTabId = wrapped.tabId;
+        if (pinnedTabId === undefined && self.activeTabId === target && wrapped && typeof wrapped.tabId === 'number') {
+          self.activeTabId = wrapped.tabId;
+        }
         return wrapped?.result;
       },
       on: (event: string, cb: (params: unknown) => void) => {
@@ -248,6 +255,26 @@ export class ExtensionContext {
 
     return {
       cdp: cdp as unknown as BrowserToolContext['cdp'],
+      pinTarget: async () => {
+        let id = pinnedTabId ?? self.activeTabId;
+        if (id == null) {
+          const tab = await self.sendAndWait<TabInfo | null>({
+            type: 'tab.getActive', sessionId: self.sessionId, callId: self.nextCallId('tab'),
+          }, 'tab.getActive');
+          if (!tab) throw new Error('No active browser tab.');
+          id = tab.tabId;
+          if (self.activeTabId == null) self.activeTabId = id;
+        }
+        return self.build(id);
+      },
+      ...(this.nativeIO ? {
+        nativeAction: (action: NativeBrowserAction) => {
+          const tabId = pinnedTabId ?? self.activeTabId ?? undefined;
+          return self.sendAndWait({
+            type: 'browser.native', sessionId: self.sessionId, callId: self.nextCallId('native'), tabId, action,
+          }, action.kind, TAB_TIMEOUT_MS, tabId);
+        },
+      } : {}),
       browser: {
         contexts: () => [{
           newPage: async () => {
@@ -263,16 +290,21 @@ export class ExtensionContext {
           },
         }],
       } as unknown as BrowserToolContext['browser'],
+      listTabs: async () => {
+        const tabs = await self.refreshTabs();
+        const indices = new Map(tabs.map((t, i) => [t.tabId, i]));
+        return tabs.map((t, index) => ({ index, title: t.title, url: t.url, windowId: t.windowId,
+          activeInWindow: t.active, targeted: t.tabId === self.activeTabId,
+          openerIndex: t.openerTabId === undefined ? undefined : indices.get(t.openerTabId) }));
+      },
       getPages: () => {
-        // Tools call getPages() synchronously, so we return whatever is in
-        // our cache. Callers that need a fresh list should chain a manual
-        // tab.list call (added in Phase F if a tool actually needs it).
         return Array.from(self.knownTabs.values()).map((info) => makePage(info)) as any;
       },
       getActivePageIndex: () => (self.activeTabId == null ? -1 : Array.from(self.knownTabs.keys()).indexOf(self.activeTabId)),
-      setActivePage: async (page: any) => {
+      setActivePage: async (page: any, background) => {
         if (page && typeof page._tabId === 'number') {
-          await self.activate(page._tabId);
+          if (background) self.activeTabId = page._tabId;
+          else await self.activate(page._tabId);
         }
       },
       getActiveTabInfo: async () => {
@@ -317,7 +349,7 @@ export class ExtensionContext {
 
   /** Refresh the known-tab cache by asking the SW. Useful before tools that
    *  enumerate tabs (list_tabs / switch_tab). */
-  async refreshTabs(): Promise<ExtTabState[]> {
+  async refreshTabs(): Promise<TabInfo[]> {
     const callId = this.nextCallId('tab');
     const tabs = await this.sendAndWait<TabInfo[]>(
       { type: 'tab.list', sessionId: this.sessionId, callId } as any,
@@ -326,9 +358,8 @@ export class ExtensionContext {
     this.knownTabs.clear();
     for (const t of tabs) {
       this.knownTabs.set(t.tabId, { tabId: t.tabId, url: t.url, title: t.title });
-      if (t.active) this.activeTabId = t.tabId;
     }
-    return Array.from(this.knownTabs.values());
+    return tabs;
   }
 
   private async activate(tabId: number): Promise<void> {

@@ -208,6 +208,32 @@ try {
   const r6 = await t6;
   check('the next message starts it again and carries on', r6.text === 'Yes.' && !r6.stopped && clients[3].resumes.length === 1, JSON.stringify(r6));
 
+  const rules = 'Do not submit my form.';
+  let pageReads = 0;
+  agent.setBrowserContextOverride({ getActiveTabInfo: async () => { pageReads++; return null; },
+    cdp: { send: async () => { pageReads++; return {}; } } });
+  agent.setBrowyProtocolSessionId('sp-settings');
+  agent.setDisabledTools(['submit_form']);
+  const configuredTurn = async (guidelines) => {
+    const client = clients.at(-1), before = client.sessions.length;
+    const turn = agent.chat('read the form', guidelines);
+    await until('settings-aware send', () => client.sessions.length > before && client.sessions.at(-1).sent.length === 1);
+    const s = client.sessions.at(-1);
+    s.emit('session.idle');
+    await turn;
+    return s;
+  };
+  const restricted = await configuredTurn(rules);
+  check('a new chat receives written rules separately from page/user text and cannot call disabled tools',
+    pageReads === 0 && restricted.config.systemMessage.content.endsWith(rules) && !restricted.sent[0].includes(rules)
+    && !restricted.config.availableTools.includes('submit_form'));
+  agent.setBrowserContextOverride(null);
+  agent.setDisabledTools([]);
+  const cleared = await configuredTurn('');
+  check('clearing guidelines takes effect in the same chat without deleting its history',
+    restricted.disconnected && cleared.sessionId === restricted.sessionId && !cleared.config.systemMessage.content.includes(rules)
+    && cleared.config.availableTools.includes('submit_form'));
+
   // The request to the model never answers, as on 15 and 16 Oct 2026 when it
   // hung on a dead connection. A second copy of loop.ts reads a short limit.
   process.env.BROWY_IDLE_MS = '600';
@@ -253,5 +279,5 @@ if (failures.length) {
   console.error('FAIL:\n  - ' + failures.join('\n  - '));
   process.exit(1);
 }
-console.log('PASS: Copilot quitting or going silent under a chat (16 assertions)');
+console.log('PASS: Copilot recovery and saved chat guidelines');
 process.exit(0);

@@ -85,6 +85,7 @@
       outline: none;
     }
     .search:focus { border-color: var(--green); }
+    #guidelines { display: block; width: 100%; resize: vertical; margin: 8px 0; }
     .toolbar .count { color: var(--ink-mute); font-size: 10px; letter-spacing: 0.05em; }
 
     .models {
@@ -313,6 +314,18 @@
 
     <section>
       <div class="sec-hdr">
+        <h2><label for="guidelines">Browser guidelines</label></h2>
+        <span class="sec-hint">// optional standing instructions</span>
+      </div>
+      <div class="sec-body">
+        <span id="guidelinesHint">Saved in this browser profile and sent to Copilot from your next message, including in an existing chat. Leave blank for Browy's defaults. Use the tool switches below to disable capabilities.</span>
+        <textarea id="guidelines" class="search" rows="4" maxlength="4000" aria-describedby="guidelinesHint" placeholder="For example: Use the docs and tracker tabs. Ask before sending a message." disabled></textarea>
+        <button id="saveGuidelines" class="btn" type="button" disabled>Save guidelines</button>
+      </div>
+    </section>
+
+    <section>
+      <div class="sec-hdr">
         <h2>Tools</h2>
         <span class="sec-hint">// turn off any built-in tool you don't want the agent to call</span>
       </div>
@@ -326,7 +339,7 @@
           <div class="empty">loading tools…</div>
         </div>
         <div style="margin-top:10px;color:var(--ink-mute);font-size:10px;line-height:1.5">
-          // changes apply on the next chat (or after /clear).<br/>
+          // with the current backend, changes apply from your next message.<br/>
           // <strong>browser tools</strong> are on by default — turn off any you don't want the agent to call.<br/>
           // <strong>host tools</strong> (read_file, write_file, bash, grep, glob, web_fetch) reach your machine, not the browser. they're off by default; opt in per-tool only if you trust the pages you'll visit.
         </div>

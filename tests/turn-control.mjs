@@ -74,10 +74,11 @@ const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
 function fakeAgent({ stuck = false } = {}) {
   const a = {
-    chats: [], aborts: 0, interrupts: [], current: null, resolvers: [], ctx: null,
+    chats: [], policies: [], aborts: 0, interrupts: [], current: null, resolvers: [], ctx: null,
     setActivityCallback() {}, setBrowyProtocolSessionId() {}, setBrowserContextOverride(ctx) { a.ctx = ctx; },
-    setDisabledTools() {}, setEnabledHostTools() {}, getModel: () => 'm', listModels: async () => [],
-    chat(text) {
+    setDisabledTools(names) { a.disabled = names; }, setEnabledHostTools() {}, getModel: () => 'm', listModels: async () => [],
+    chat(text, guidelines) {
+      a.policies.push([guidelines, a.disabled]);
       a.chats.push(text);
       return new Promise((resolve) => { a.current = resolve; a.resolvers.push(resolve); });
     },
@@ -114,14 +115,18 @@ function harness(opts = {}) {
   const h = harness();
   await h.send({ type: 'session.start', sessionId: 'sp-a', capabilities: [] });
   await h.send({ type: 'session.start', sessionId: 'sp-b', capabilities: [] });
-  await h.send({ type: 'chat.send', sessionId: 'sp-a', text: 'first' });
-  await h.send({ type: 'chat.send', sessionId: 'sp-b', text: 'second' });
+  await h.send({ type: 'chat.send', sessionId: 'sp-a', text: 'first',
+    policy: { guidelines: 'No sending', disabledTools: ['submit_form'], enabledHostTools: [] } });
+  await h.send({ type: 'chat.send', sessionId: 'sp-b', text: 'second',
+    policy: { guidelines: 'Use the docs tab', disabledTools: ['upload_file'], enabledHostTools: [] } });
   check('a second window waits in line instead of erroring', h.of('sp-b', 'chat.queued').length === 1 && h.of('sp-b', 'chat.error').length === 0,
     JSON.stringify(h.out.filter((m) => m.sessionId === 'sp-b')));
   check('it does not start while the first runs', h.agent.chats.join() === 'first');
   h.agent.finish('done a');
   await tick();
   check('it starts as soon as the first ends', h.agent.chats.join() === 'first,second');
+  check('queued turns retain the requesting profile rules and tool switches', JSON.stringify(h.agent.policies) ===
+    JSON.stringify([['No sending', ['submit_form']], ['Use the docs tab', ['upload_file']]]));
   h.agent.finish('done b');
   await tick();
   check('both panels get their own answer', h.of('sp-a', 'chat.done')[0]?.text === 'done a' && h.of('sp-b', 'chat.done')[0]?.text === 'done b');
@@ -340,4 +345,4 @@ if (failures.length) {
   console.error('FAIL:\n  - ' + failures.join('\n  - '));
   process.exit(1);
 }
-console.log('PASS: turn control (35 assertions)');
+console.log('PASS: turn control and queued settings');

@@ -31,6 +31,7 @@ import type { ChatItem } from './agent/chat-items.js';
 // Future capabilities go here; tools are gated on the corresponding string.
 export type Capability =
   | 'cdp.activeTab'
+  | 'browser.nativeIO'
   | 'cdp.allTabs'
   | 'console.tap'
   | 'network.tap'
@@ -89,6 +90,14 @@ export interface ChatSend {
   type: 'chat.send';
   sessionId: string;
   text: string;
+  policy?: BrowserPolicy;
+}
+
+/** Snapshot of Settings from the requesting browser profile, not from a web page. */
+export interface BrowserPolicy {
+  guidelines: string;
+  disabledTools: string[];
+  enabledHostTools: string[];
 }
 
 export interface ChatCancel {
@@ -218,6 +227,7 @@ export interface ServerHello {
   protocol: number;
   /** Server-side build info; useful for "you need to upgrade" hints. */
   serverVersion: string;
+  browserPolicy?: true;
 }
 
 export interface SessionReady {
@@ -295,6 +305,23 @@ export interface CdpSendRequest {
   tabId?: string | number;
   method: string;
   params: unknown;
+  observePrompts?: boolean;
+}
+
+export type NativeBrowserAction =
+  | { kind: 'inspect' }
+  | { kind: 'accept' | 'dismiss'; id: string; text?: string }
+  | { kind: 'attach'; id: string; files: string[] }
+  | { kind: 'pickFiles'; objectId: string; files: string[] }
+  | { kind: 'download'; url: string; filename?: string }
+  | { kind: 'downloadStatus'; downloadId: number };
+
+export interface NativeBrowserRequest {
+  type: 'browser.native';
+  sessionId: string;
+  callId: string;
+  tabId?: number;
+  action: NativeBrowserAction;
 }
 
 /** Server asks client to open a new tab. Reply via tool.result. */
@@ -340,6 +367,7 @@ export interface TabInfo {
   title: string;
   active: boolean;
   windowId?: number;
+  openerTabId?: number;
 }
 
 /** Mascot/UI activity hint. Maps to existing pose/reaction system. */
@@ -475,6 +503,7 @@ export type ServerMessage =
   | ChatQueued
   | ChatError
   | CdpSendRequest
+  | NativeBrowserRequest
   | TabNewRequest
   | TabActivateRequest
   | TabCloseRequest

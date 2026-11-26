@@ -94,7 +94,9 @@ Every tool returns JSON. Some return signals (`urlChanged`, `titleChanged`) that
 - `extract_text`, `get_page_info`, `get_page_html`, `accessibility_snapshot`, `screenshot`
 
 ### Tabs
-- `list_tabs`, `switch_tab`, `new_tab`, `close_tab`, `navigate`
+- `list_tabs` refreshes the browser's tab list, including other windows and new popups. `switch_tab(index, background=true)` targets a listed tab without switching the tab the user sees. `new_tab`, `close_tab` and `navigate` are also available.
+
+In **Settings > Browser guidelines**, save instructions for this browser profile, for example "Use the tracker and docs tabs, but ask before submitting a form." Browy sends them to Copilot from the next message, including in an existing chat. Clearing the field restores the defaults. Written guidelines guide the model; the tool switches determine which tools it actually receives.
 
 ### Power
 - `evaluate_js` — arbitrary JS in the page (top-level await OK)
@@ -104,7 +106,9 @@ Every tool returns JSON. Some return signals (`urlChanged`, `titleChanged`) that
 - `get_console_logs`, `get_network_requests`, `get_cookies`, `get_storage`, `replay_request`
 
 ### Files
-- `download_file`, `upload_file`, `pdf_export`
+- `upload_index` and `upload_file` attach named files directly to an HTML file input. If the button creates its input on click, set `open_picker: true`. If an earlier click already returned a `chooser_id`, pass that ID and `path` to `upload_file` without clicking again. A multiple-file input accepts a JSON array of absolute paths.
+- `download_file(url, filename?, dir?)` uses Chrome's download manager in extension mode. Names and subfolders are relative to Downloads. Use `download_status(id)` with its `downloadId` until the state is `complete`; blocked or interrupted downloads are not saved successes. `pdf_export` remains available for printing a page to PDF.
+- `handle_dialog()` inspects a page alert, confirmation, text prompt or beforeunload dialog without executing page JavaScript. Pass the current `id` and `action` (`accept` or `dismiss`), plus `text` for a text prompt. If the dialog was already open before Browy connected, Chrome may need you to close that one yourself. DOM overlays still use `inspect_page`; popup windows appear in `list_tabs`. OS windows, permission prompts and browser security warnings are not page dialogs.
 
 ### Persistent disk + memory (sandboxed at `~/.browy/data/`)
 - `save_file`, `read_file`, `list_files`, `delete_file`
