@@ -34,7 +34,7 @@ export function savePrefs(patch: Partial<UserPrefs>): void {
     const current = loadPrefs();
     const next = { ...current, ...patch };
     fs.writeFileSync(PREFS_PATH, JSON.stringify(next, null, 2));
-  } catch {
-    // best-effort; never crash the host because prefs failed to persist.
+  } catch (error) {
+    console.warn('Could not save Browy preferences for the next start:', error instanceof Error ? error.message : String(error));
   }
 }

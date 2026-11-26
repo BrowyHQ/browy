@@ -293,7 +293,7 @@ async function cmdModel(arg) {
     appendRow('dim', '·', 'fetching available models…');
     return;
   }
-  sendToHost({ type: 'models.set', id: arg });
+  sendToHost({ type: 'models.set', sessionId: SESSION_ID, id: arg });
   appendRow('dim', '·', 'requesting model switch → ' + arg);
 }
 
@@ -667,7 +667,7 @@ port.onMessage.addListener((msg) => {
           appendRow(isCur ? 'ok' : 'dim', mark, line, {
             onClick: () => {
               if (m.id === sessionModel) return;
-              sendToHost({ type: 'models.set', id: m.id });
+              sendToHost({ type: 'models.set', sessionId: SESSION_ID, id: m.id });
               appendRow('dim', '·', 'requesting model switch → ' + m.id);
             },
           });
@@ -681,6 +681,10 @@ port.onMessage.addListener((msg) => {
       $model.textContent = sessionModel || '—';
       $model.title = sessionModel || '';
       appendRow('ok', '✓', 'model → ' + sessionModel);
+      break;
+
+    case 'models.error':
+      appendRow('err', '✗', msg.message);
       break;
 
     case 'chat.list.result':

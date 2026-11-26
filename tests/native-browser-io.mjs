@@ -180,6 +180,19 @@ try {
   await options.reload();
   await options.waitForFunction(() => !document.querySelector('#guidelines').disabled);
   assert.equal(await options.locator('#guidelines').inputValue(), 'Keep the tracker tab open.');
+  // The host (not the click) confirms the radio selection. A refused switch
+  // has its own error and must not look like the chat itself failed.
+  await options.evaluate(() => {
+    onMsg({ type: 'models.list', models: [{ id: 'one', name: 'One' }, { id: 'two', name: 'Two' }] });
+    onMsg({ type: 'models.current', id: 'one' });
+  });
+  await options.locator('[title="Click to use two"]').click();
+  assert.equal(await options.locator('.model.selected .sub').textContent(), 'one');
+  await options.evaluate(() => onMsg({ type: 'models.error', id: 'two', current: 'one', message: 'Model is unavailable' }));
+  assert.equal(await options.locator('#toast.err').textContent(), 'Model is unavailable');
+  await options.locator('[title="Click to use two"]').click();
+  await options.evaluate(() => onMsg({ type: 'models.current', id: 'two' }));
+  assert.equal(await options.locator('.model.selected .sub').textContent(), 'two');
   const settingsTab = (await call('list_tabs')).tabs.find(t => t.url === options.url());
   await call('switch_tab', { index: String(settingsTab.index), background: true });
   await assert.rejects(ctx.cdp.send('Runtime.evaluate', { expression: 'document.title' }), /extension pages/);

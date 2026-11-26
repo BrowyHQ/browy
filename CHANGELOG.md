@@ -11,6 +11,10 @@ All notable changes to Browy will be documented in this file. The format follows
 - **Browy can attach a file even when the upload button creates its input on click.** It captures the picker for that click instead of operating the desktop. It never picks a file just because the page asked for one.
 - **Link downloads use your browser session.** Browy requests the file without a Save As dialog, gives duplicate filenames distinct names and reports whether Chrome finished or blocked the download. It leaves downloads you start yourself alone.
 
+### Fixed
+
+- **A rejected model switch now keeps your chat and its previous model.** Settings waits for confirmation from the backend. If Copilot refuses a switch or you enter an unavailable ID with `/model`, Browy shows the error instead of saving that ID or clearing your conversation.
+
 ## [0.1.16]: press_key types its key, and disabled buttons show up
 *Released 2026-10-16*
 

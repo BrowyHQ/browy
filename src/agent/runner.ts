@@ -317,10 +317,19 @@ export class Runner {
         return;
       }
 
-      case 'models.set':
-        await this.agent.setModel(msg.id);
-        this.broadcast({ type: 'models.current', id: this.agent.getModel() });
+      case 'models.set': {
+        try {
+          await this.agent.setModel(msg.id);
+          this.broadcast({ type: 'models.current', id: this.agent.getModel() });
+        } catch (e) {
+          const current = this.agent.getModel();
+          transport.send({ type: 'models.error', sessionId: msg.sessionId, id: msg.id, current,
+            message: e instanceof Error ? e.message : String(e) });
+          // Older pickers optimistically displayed the requested model.
+          if (!msg.sessionId) transport.send({ type: 'models.current', id: current });
+        }
         return;
+      }
 
       case 'chat.list': {
         const route = this.replyRoute(msg);

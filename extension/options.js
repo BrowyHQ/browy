@@ -38,6 +38,7 @@ const saveGuidelinesEl = $('saveGuidelines');
 let port = null;
 let allModels = [];
 let currentModelId = null;
+let pendingModelId = null;
 let filterText = '';
 /** name -> bool. Persisted to chrome.storage.local.settings.tools.
  *  Anything missing from this map is treated as enabled. The host receives
@@ -122,14 +123,16 @@ function connect() {
   port = chrome.runtime.connect({ name: 'options' });
   port.onMessage.addListener(onMsg);
   port.onDisconnect.addListener(() => {
+    port = null;
+    pendingModelId = null;
     setHost('disconnected', 'err');
     setTimeout(connect, 1500);
   });
 }
 
 function send(msg) {
-  if (!port) return;
-  try { port.postMessage(msg); } catch {}
+  if (!port) return false;
+  try { port.postMessage(msg); return true; } catch { return false; }
 }
 
 // ── Install-backend section wiring (visible only when host is offline) ───
@@ -181,6 +184,7 @@ function onMsg(m) {
     return;
   }
   if (m.type === '__host_disconnected' || m.type === '__host_error' || m.type === '__host_missing' || m.type === '__host_stale') {
+    pendingModelId = null;
     setHost('offline — make sure the browy backend is installed and running', 'err');
     return;
   }
@@ -201,6 +205,18 @@ function onMsg(m) {
     currentModelId = m.id;
     renderCurrent();
     renderModels();
+    if (pendingModelId === m.id) {
+      pendingModelId = null;
+      showToast(`model → ${m.id}`);
+    }
+    return;
+  }
+  if (m.type === 'models.error') {
+    if (pendingModelId === m.id) pendingModelId = null;
+    currentModelId = m.current;
+    renderCurrent();
+    renderModels();
+    showToast(m.message, 'err');
     return;
   }
   if (m.type === 'models.list') {
@@ -300,12 +316,13 @@ function renderModels() {
 }
 
 function selectModel(m) {
-  if (!m || m.id === currentModelId) return;
-  currentModelId = m.id;
-  renderCurrent();
-  renderModels();
-  send({ type: 'models.set', id: m.id });
-  showToast(`model → ${m.name || m.id}`);
+  if (!m || m.id === (pendingModelId || currentModelId)) return;
+  if (!send({ type: 'models.set', sessionId: SESSION_ID, id: m.id })) {
+    showToast('Cannot switch models: the backend is offline.', 'err');
+    return;
+  }
+  pendingModelId = m.id;
+  showToast(`switching to ${m.name || m.id}…`);
 }
 
 // ── Toast ─────────────────────────────────────────────────────────────────

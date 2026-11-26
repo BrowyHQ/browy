@@ -162,6 +162,7 @@ export interface ListModels {
 export interface SetModel {
   type: 'models.set';
   id: string;
+  sessionId?: string;
 }
 
 export interface ChatList {
@@ -420,6 +421,14 @@ export interface CurrentModel {
   id: string;
 }
 
+export interface ModelSelectionError {
+  type: 'models.error';
+  sessionId?: string;
+  id: string;
+  current: string;
+  message: string;
+}
+
 export interface BrowsersStatusEvt {
   type: 'browsers.status';
   browsers: BrowserStatus[];
@@ -515,6 +524,7 @@ export type ServerMessage =
   | HostStatus
   | ModelsList
   | CurrentModel
+  | ModelSelectionError
   | BrowsersStatusEvt
   | ActiveBrowsersEvt
   | FocusedTab

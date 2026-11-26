@@ -9,6 +9,7 @@ import { getForegroundInfo, brandFromProcessName, stripBrowserSuffix, shutdownFo
 import { copilotClientOptions, resolveCopilotCli } from './copilot-cli.js';
 import { RecentActions } from './recent-actions.js';
 import { OPT_IN_TOOLS, toolPolicy } from './tool-policy.js';
+import { savePrefs } from './prefs.js';
 import { TurnText } from './turn-text.js';
 import type { WakeWatch } from './wake-watch.js';
 import { eventsToTurns, pageTurns, legacyMessages, type ChatItem, type ChatPage, type LegacyMessage } from './chat-items.js';
@@ -623,8 +624,7 @@ export class Agent {
     // first available model otherwise. Saves a confusing "Model X is not
     // available" error on the very first chat after install.
     try {
-      const models = await this.copilotClient.listModels();
-      const ids: string[] = (models || []).map((m: any) => m.id);
+      const ids = (await this.selectableModels()).map((m) => m.id);
       if (ids.length && !ids.includes(this.config.model)) {
         const preferred = ids.find(id => /claude-sonnet-4\.?5/i.test(id))
                        || ids.find(id => /claude-sonnet/i.test(id))
@@ -967,6 +967,7 @@ export class Agent {
   private sessionPolicyKey = '';
 
   private async ensureSession(guidelines: string) {
+    await this.modelChanges;
     const policyKey = JSON.stringify([guidelines, [...this.disabledTools].sort(), [...this.enabledHostTools].sort(),
       !!this.contextOverride?.nativeAction]);
     if (this.copilotSession?.disconnected) {
@@ -1045,12 +1046,9 @@ export class Agent {
         this.adoptSession(client, session);
         return;
       } catch (e) {
-        // Session doesn't exist (first run, or was cleared): fall through and
-        // create a new one bound to this same id. But not when Copilot went
-        // away mid-resume, which would start the chat over on top of the one
-        // still on disk.
+        // A refused model or other resume error does not mean the chat is gone.
         const m = e instanceof Error ? e.message : String(e);
-        if (client !== this.copilotClient || /not connected|connection|disposed|exited|EPIPE|ECONNRESET/i.test(m)) throw e;
+        if (client !== this.copilotClient || !m.endsWith(`Session not found: ${wantId}`)) throw e;
       }
     }
 
@@ -1493,34 +1491,34 @@ export class Agent {
     return this.config.model;
   }
 
-  /** Switch the Copilot model in-place when possible (preserving the session
-   *  history), otherwise fall back to recreating the session.
-   *  The Copilot SDK exposes `session.setModel(id)` since copilot-sdk 0.x; we
-   *  call it on the live session so a /model change keeps every prior turn. */
-  async setModel(id: string): Promise<void> {
-    if (!id || id === this.config.model) return;
-    this.config.model = id;
-    // Persist the user's choice so it survives a host restart. Best-effort:
-    // savePrefs swallows its own errors and never throws.
-    try {
-      const { savePrefs } = await import('./prefs.js');
+  private modelChanges: Promise<void> = Promise.resolve();
+
+  /** Apply picker requests in arrival order. Never delete or recreate a chat
+   *  to switch models; if Copilot refuses, keep the last confirmed choice. */
+  setModel(id: string): Promise<void> {
+    const change = this.modelChanges.then(async () => {
+      await this.whenCopilotReady();
+      const models = await this.selectableModels();
+      if (!models.length) throw new Error('Copilot has not reported any available models. Check your sign-in and try again.');
+      if (!models.some((m) => m.id === id)) throw new Error(`"${id}" is not an available Copilot model. Open the model list to pick one.`);
+      await this.sessionOpening;
+      if (id === this.config.model) return;
+      const session = this.copilotSession;
+      if (session && !session.disconnected) await session.setModel(id);
+      this.config.model = id;
       savePrefs({ model: id });
-    } catch {}
-    // No chat open, e.g. right after Copilot restarted: the next one opens
-    // with this model. Rebuilding here would delete the chat on disk.
-    if (!this.copilotSession) return;
-    if (this.copilotSession && typeof this.copilotSession.setModel === 'function') {
-      try {
-        await this.copilotSession.setModel(id);
-        return;
-      } catch (e) {
-        // Some models reject mid-session (e.g. provider mismatch). Fall through
-        // to a full rebuild so the user still gets the model they asked for.
-        console.warn(`  ⚠ session.setModel("${id}") failed; rebuilding session:`, (e as Error)?.message || e);
-      }
-    }
-    // No setModel support, or setModel threw → rebuild.
-    await this.clearHistory();
+    });
+    this.modelChanges = change.catch(() => {}); // the caller gets the rejection; later requests can proceed
+    return change;
+  }
+
+  private async selectableModels(): Promise<import('../types.js').ModelOption[]> {
+    if (!this.copilotClient) throw new Error('Copilot is not connected.');
+    const models: { id: string; name?: string; vendor?: string; provider?: string; policy?: { state: string } }[] =
+      await this.copilotClient.listModels();
+    return models.filter((m) => m.policy?.state !== 'disabled').map((m) => ({
+      id: m.id, name: m.name || m.id, vendor: m.vendor || m.provider,
+    }));
   }
 
   /** List models advertised by the Copilot SDK. */
@@ -1528,12 +1526,7 @@ export class Agent {
     await this.whenCopilotReady();
     if (!this.copilotClient) return [];
     try {
-      const models = await this.copilotClient.listModels();
-      return (models || []).map((m: any) => ({
-        id: m.id,
-        name: m.name || m.id,
-        vendor: m.vendor || m.provider,
-      }));
+      return await this.selectableModels();
     } catch {
       return [];
     }

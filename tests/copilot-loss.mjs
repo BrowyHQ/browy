@@ -91,7 +91,7 @@ class FakeClient {
     this.creates.push(config);
     return s;
   }
-  async listModels() { return [{ id: 'gpt-5-mini' }]; }
+  async listModels() { return [{ id: 'gpt-5-mini' }, { id: 'gpt-5' }]; }
   async listSessions() { return []; }
   async deleteSession(id) { this.deleted = [...(this.deleted || []), id]; onDisk.delete(id); }
   async ping() { if (!this.connected || this.pingHangs) throw new Error('Client not connected'); return {}; }
@@ -233,6 +233,31 @@ try {
   check('clearing guidelines takes effect in the same chat without deleting its history',
     restricted.disconnected && cleared.sessionId === restricted.sessionId && !cleared.config.systemMessage.content.includes(rules)
     && cleared.config.availableTools.includes('submit_form'));
+
+  const savedModel = () => JSON.parse(fs.readFileSync(path.join(home, '.browy', 'data', 'prefs.json'), 'utf8')).model;
+  cleared.setModel = async (id) => {
+    if (id === 'gpt-5') throw new Error('model switch rejected by Copilot');
+    cleared.model = id;
+  };
+  await agent.setModel('gpt-5-mini');
+  check('an accepted switch updates the live chat and saved preference', cleared.model === 'gpt-5-mini' && savedModel() === cleared.model);
+  const rejected = await agent.setModel('gpt-5').then(() => '', (e) => e.message);
+  check('a refused switch preserves the chat and its confirmed model',
+    rejected.includes('rejected by Copilot') && !cleared.disconnected && onDisk.has(cleared.sessionId)
+    && agent.getModel() === cleared.model && savedModel() === cleared.model);
+  agent.setBrowyProtocolSessionId('sp-unopened');
+  const unknown = await agent.setModel('not-in-the-catalog').then(() => '', (e) => e.message);
+  check('an unknown ID before the first turn cannot become the saved model',
+    !!unknown && agent.getModel() === cleared.model && savedModel() === cleared.model);
+
+  agent.setBrowyProtocolSessionId(cleared.sessionId);
+  const client = clients.at(-1);
+  client.resumeSession = async () => { throw new Error('Model not permitted on resume'); };
+  let replacement = false;
+  client.createSession = async () => { replacement = true; throw new Error('Unexpected attempt to replace the saved chat'); };
+  const failedResume = await agent.chat('continue');
+  check('a refused model on resume never creates a replacement chat',
+    !replacement && onDisk.has(cleared.sessionId) && failedResume.text.includes('Model not permitted on resume'));
 
   // The request to the model never answers, as on 15 and 16 Oct 2026 when it
   // hung on a dead connection. A second copy of loop.ts reads a short limit.
