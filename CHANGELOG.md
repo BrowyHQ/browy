@@ -2,12 +2,19 @@
 
 All notable changes to Browy will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.1.19]: Run Browy chats on different tabs at the same time
+*Released 2026-11-26*
+
+Two chats can work at once, each on its own tab with its own Copilot CLI process. You can leave a task running in the side panel, work on something else, and come back to its answer.
 
 ### Added
 
 - **You can run Browy chats on different tabs at the same time.** Start a task, switch tabs, and choose **New chat**. Use **Chats** to see which task is running or waiting. Stopping one leaves the other running.
 - **Chats that start on the same tab wait their turn.** Browy remembers the tab you chose when you sent the message. If a running task tries to switch to a tab another chat is using, Browy leaves that tab alone.
+
+### Upgrading
+
+Update the backend and extension together to keep chats running when you switch between them in the side panel. If you load Browy unpacked, rerun the installer, then click **Reload** on the Browy extension.
 
 ## [0.1.18]: Browser guidelines and native file transfers, with a smaller backend
 *Released 2026-11-26*
